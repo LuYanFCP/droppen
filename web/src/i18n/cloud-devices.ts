@@ -6,6 +6,29 @@
  */
 
 export const cloudDevicesZhCN: Record<string, string> = {
+  // This browser cannot run the encryption, and compatibility mode (`browser-support.tsx`).
+  "this browser does not support Droppen's strong key protection": "这个浏览器不支持 Droppen 的强钥匙保护",
+  "this browser cannot run Droppen's end-to-end encryption": "这个浏览器无法运行 Droppen 的端到端加密",
+  "Droppen normally keeps this device's private keys as non-extractable browser keys. This browser cannot do that for the key types Droppen uses. Nothing was stored or changed.": "Droppen 通常把这台设备的私钥保存为浏览器里不可导出的钥匙。这个浏览器不支持 Droppen 用到的钥匙类型，做不到这一点。没有保存或更改任何东西。",
+  "Droppen encrypts everything end to end on this device, and this browser lacks what that needs. Nothing was stored or changed.": "Droppen 在这台设备上做端到端加密，而这个浏览器缺少所需的功能。没有保存或更改任何东西。",
+  "missing: {{what}}": "缺少：{{what}}",
+  "Update this browser, or open this page in Chrome {{chrome}}, Edge {{edge}}, Firefox {{firefox}} or Safari {{safari}}, or newer.": "请更新这个浏览器，或者用 Chrome {{chrome}}、Edge {{edge}}、Firefox {{firefox}} 或 Safari {{safari}}（或更新的版本）打开本页。",
+  "This looks like a browser built into an app. Open this page in the system browser instead.": "这看起来是某个应用内置的浏览器。请改用系统浏览器打开本页。",
+  "This looks like the browser built into {{app}}. Open this page in the system browser: in the app's menu (often ··· or ⋮), choose “Open in browser”.": "这看起来是{{app}}内置的浏览器。请用系统浏览器打开本页：在应用的菜单（通常是 ··· 或 ⋮）里选择「在浏览器打开」。",
+  "Or use this browser in compatibility mode: the same encryption, done in JavaScript. What changes: the JavaScript curve arithmetic is not hardened against side channels as the browser's own is; one more library is loaded into the page; and this device's private keys are plain bytes in the page's memory instead of keys the browser holds, so malicious code that gets into the page could copy them.": "也可以在兼容模式下使用这个浏览器：加密方式不变，改用 JavaScript 完成。会有这些不同：JavaScript 的曲线运算不像浏览器自带的那样针对侧信道做过加固；页面里会多加载一个库；而且这台设备的私钥是页面内存里的明文字节，而不是由浏览器保管的钥匙，所以混进页面的恶意代码可以把它们复制走。",
+  "I understand the risk": "我了解这个风险",
+  "trust this browser": "信任这个浏览器",
+  "Remembered for this browser, which then shows “compatibility mode”.": "这个浏览器会记住这一选择，之后会显示「兼容模式」。",
+  "This browser runs Droppen's encryption in JavaScript: this device's private keys are plain bytes in the page's memory, not keys the browser holds.": "这个浏览器用 JavaScript 运行 Droppen 的加密：这台设备的私钥是页面内存里的明文字节，而不是由浏览器保管的钥匙。",
+  "compatibility mode": "兼容模式",
+  "compat.": "兼容模式",
+  "stop using compatibility mode": "停用兼容模式",
+  "Its device keys stay stored in this browser; it asks again before it uses them.": "设备钥匙仍保存在这个浏览器里；再次使用前会重新询问。",
+  "compatibility mode could not be loaded: connect to the internet, then reload the page": "兼容模式没能加载：请连上网络，然后刷新页面",
+  "WeChat": "微信",
+  "Alipay": "支付宝",
+  "Douyin": "抖音",
+  "Weibo": "微博",
   "its copy": "副本",
   "as of {{time}}": "截至 {{time}}",
   // The devices dashboard and the cross-device "needs you" (features/cloud/my-devices.tsx, features/machines).
@@ -746,6 +769,29 @@ export const cloudDevicesZhCN: Record<string, string> = {
 };
 
 export const cloudDevicesZhTW: Record<string, string> = {
+  // This browser cannot run the encryption, and compatibility mode (`browser-support.tsx`).
+  "this browser does not support Droppen's strong key protection": "這個瀏覽器不支援 Droppen 的強金鑰保護",
+  "this browser cannot run Droppen's end-to-end encryption": "這個瀏覽器無法執行 Droppen 的端對端加密",
+  "Droppen normally keeps this device's private keys as non-extractable browser keys. This browser cannot do that for the key types Droppen uses. Nothing was stored or changed.": "Droppen 通常把這台裝置的私密金鑰保存為瀏覽器中不可匯出的金鑰。這個瀏覽器不支援 Droppen 使用的金鑰類型，做不到這一點。沒有儲存或變更任何東西。",
+  "Droppen encrypts everything end to end on this device, and this browser lacks what that needs. Nothing was stored or changed.": "Droppen 在這台裝置上做端對端加密，而這個瀏覽器缺少所需的功能。沒有儲存或變更任何東西。",
+  "missing: {{what}}": "缺少：{{what}}",
+  "Update this browser, or open this page in Chrome {{chrome}}, Edge {{edge}}, Firefox {{firefox}} or Safari {{safari}}, or newer.": "請更新這個瀏覽器，或改用 Chrome {{chrome}}、Edge {{edge}}、Firefox {{firefox}} 或 Safari {{safari}}（或更新的版本）開啟本頁。",
+  "This looks like a browser built into an app. Open this page in the system browser instead.": "這看起來是某個 App 內建的瀏覽器。請改用系統瀏覽器開啟本頁。",
+  "This looks like the browser built into {{app}}. Open this page in the system browser: in the app's menu (often ··· or ⋮), choose “Open in browser”.": "這看起來是{{app}}內建的瀏覽器。請用系統瀏覽器開啟本頁：在 App 的選單（通常是 ··· 或 ⋮）中選擇「在瀏覽器中開啟」。",
+  "Or use this browser in compatibility mode: the same encryption, done in JavaScript. What changes: the JavaScript curve arithmetic is not hardened against side channels as the browser's own is; one more library is loaded into the page; and this device's private keys are plain bytes in the page's memory instead of keys the browser holds, so malicious code that gets into the page could copy them.": "也可以在相容模式下使用這個瀏覽器：加密方式不變，改以 JavaScript 完成。會有這些不同：JavaScript 的曲線運算不像瀏覽器內建的那樣針對旁通道做過強化；頁面中會多載入一個函式庫；而且這台裝置的私密金鑰是頁面記憶體中的明文位元組，而不是由瀏覽器保管的金鑰，所以混進頁面的惡意程式碼可以把它們複製走。",
+  "I understand the risk": "我了解這個風險",
+  "trust this browser": "信任這個瀏覽器",
+  "Remembered for this browser, which then shows “compatibility mode”.": "這個瀏覽器會記住這個選擇，之後會顯示「相容模式」。",
+  "This browser runs Droppen's encryption in JavaScript: this device's private keys are plain bytes in the page's memory, not keys the browser holds.": "這個瀏覽器以 JavaScript 執行 Droppen 的加密：這台裝置的私密金鑰是頁面記憶體中的明文位元組，而不是由瀏覽器保管的金鑰。",
+  "compatibility mode": "相容模式",
+  "compat.": "相容模式",
+  "stop using compatibility mode": "停用相容模式",
+  "Its device keys stay stored in this browser; it asks again before it uses them.": "裝置金鑰仍保存在這個瀏覽器中；再次使用前會重新詢問。",
+  "compatibility mode could not be loaded: connect to the internet, then reload the page": "相容模式無法載入：請連上網路，然後重新整理頁面",
+  "WeChat": "微信",
+  "Alipay": "支付寶",
+  "Douyin": "抖音",
+  "Weibo": "微博",
   "its copy": "副本",
   "as of {{time}}": "截至 {{time}}",
   // The devices dashboard and the cross-device "needs you" (features/cloud/my-devices.tsx, features/machines).
@@ -1486,6 +1532,29 @@ export const cloudDevicesZhTW: Record<string, string> = {
 };
 
 export const cloudDevicesJa: Record<string, string> = {
+  // This browser cannot run the encryption, and compatibility mode (`browser-support.tsx`).
+  "this browser does not support Droppen's strong key protection": "このブラウザは Droppen の強力な鍵の保護に対応していません",
+  "this browser cannot run Droppen's end-to-end encryption": "このブラウザでは Droppen のエンドツーエンド暗号化を実行できません",
+  "Droppen normally keeps this device's private keys as non-extractable browser keys. This browser cannot do that for the key types Droppen uses. Nothing was stored or changed.": "Droppen は通常、このデバイスの秘密鍵をブラウザ内の取り出せない鍵として保持します。このブラウザは Droppen が使う種類の鍵に対応しておらず、それができません。何も保存・変更していません。",
+  "Droppen encrypts everything end to end on this device, and this browser lacks what that needs. Nothing was stored or changed.": "Droppen はこのデバイス上でエンドツーエンド暗号化を行いますが、このブラウザにはそのために必要な機能がありません。何も保存・変更していません。",
+  "missing: {{what}}": "不足：{{what}}",
+  "Update this browser, or open this page in Chrome {{chrome}}, Edge {{edge}}, Firefox {{firefox}} or Safari {{safari}}, or newer.": "このブラウザを更新するか、Chrome {{chrome}}、Edge {{edge}}、Firefox {{firefox}}、Safari {{safari}} 以降でこのページを開いてください。",
+  "This looks like a browser built into an app. Open this page in the system browser instead.": "アプリに組み込まれたブラウザのようです。代わりに標準のブラウザでこのページを開いてください。",
+  "This looks like the browser built into {{app}}. Open this page in the system browser: in the app's menu (often ··· or ⋮), choose “Open in browser”.": "{{app}} に組み込まれたブラウザのようです。標準のブラウザでこのページを開いてください。アプリのメニュー（多くは ··· または ⋮）から「ブラウザで開く」を選びます。",
+  "Or use this browser in compatibility mode: the same encryption, done in JavaScript. What changes: the JavaScript curve arithmetic is not hardened against side channels as the browser's own is; one more library is loaded into the page; and this device's private keys are plain bytes in the page's memory instead of keys the browser holds, so malicious code that gets into the page could copy them.": "このブラウザを互換モードで使うこともできます。暗号化は同じで、JavaScript で行います。変わる点：JavaScript の曲線演算は、ブラウザ自身のものほどサイドチャネル対策が施されていません。ページにライブラリがひとつ追加で読み込まれます。そして、このデバイスの秘密鍵はブラウザが保持する鍵ではなくページのメモリ上の生のバイト列になるため、ページに入り込んだ悪意あるコードがそれをコピーできてしまいます。",
+  "I understand the risk": "リスクを理解しました",
+  "trust this browser": "このブラウザを信頼する",
+  "Remembered for this browser, which then shows “compatibility mode”.": "このブラウザに記憶され、以後「互換モード」と表示されます。",
+  "This browser runs Droppen's encryption in JavaScript: this device's private keys are plain bytes in the page's memory, not keys the browser holds.": "このブラウザは Droppen の暗号化を JavaScript で実行しています。このデバイスの秘密鍵は、ブラウザが保持する鍵ではなく、ページのメモリ上の生のバイト列です。",
+  "compatibility mode": "互換モード",
+  "compat.": "互換モード",
+  "stop using compatibility mode": "互換モードをやめる",
+  "Its device keys stay stored in this browser; it asks again before it uses them.": "デバイスの鍵はこのブラウザに保存されたままです。次に使う前にもう一度確認します。",
+  "compatibility mode could not be loaded: connect to the internet, then reload the page": "互換モードを読み込めませんでした。インターネットに接続してから、ページを再読み込みしてください",
+  "WeChat": "WeChat",
+  "Alipay": "Alipay",
+  "Douyin": "Douyin",
+  "Weibo": "Weibo",
   "its copy": "コピー",
   "as of {{time}}": "{{time}} 時点",
   // The devices dashboard and the cross-device "needs you" (features/cloud/my-devices.tsx, features/machines).

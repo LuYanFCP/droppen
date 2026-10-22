@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import type { Accept } from "@/lib/e2e";
+import { compatModeActive } from "@/lib/e2e/compat";
 import { formatAsOf, formatExactTime, formatRelative } from "@/lib/format";
 import type { PauseEnding, PromoteBlock, ReEnrollLine } from "@/lib/hub/account";
 import type { PresenceState } from "@/lib/hub/link";
@@ -28,6 +29,7 @@ import type { RenewalStatus } from "@/lib/hub/renewal";
 import type { DeviceAttention } from "@/features/machines/needs-you";
 import { ActivityChipView, StateCountChip, UnreadPill } from "@/features/sessions/attention-badges";
 import { unreadCountOf } from "@/features/sessions/session-attention";
+import { CompatBadge } from "./browser-support";
 import { Presence } from "./machine-name";
 import { pauseHeldText, RenewalLine } from "./renewal";
 
@@ -314,6 +316,11 @@ function RowBadges({ view, warn }: { view: DeviceRowView; warn: ReactNode }) {
   return (
     <>
       {view.self && <Badge variant="outline" className={badge}>{t("this device")}</Badge>}
+      {view.self && compatModeActive() && (
+        <Badge data-testid="compat-mode-row" variant="outline" className={badge}>
+          <CompatBadge className="uppercase" />
+        </Badge>
+      )}
       {view.host && (
         <Badge data-testid="runs-ai" variant="outline" className={badge}>
           {t("can run AI")}
