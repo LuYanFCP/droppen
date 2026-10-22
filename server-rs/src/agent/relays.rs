@@ -698,6 +698,17 @@ async fn session(
     channels: &Arc<AtomicUsize>,
     events: &mpsc::UnboundedSender<Event>,
 ) -> Result<(), String> {
+    // This device's identity key was renewed and the link has not restarted
+    // with the new one yet: no sign-in with the retired key
+    // (`docs/host-identity-rotation.md` §3.8).
+    if super::rotation::renewed_away(&shared.state.lock().expect("agent state"), &shared.identity) {
+        return Err("waiting for this device's renewed identity key".into());
+    }
+    // A staged key is kept and the hub link has not shown the key in use is
+    // still current: this computer's chain may be stale (§3.5).
+    if !super::rotation::device_role_may_sign_in(shared) {
+        return Err("waiting for the hub link to sign in (an identity key renewal is staged)".into());
+    }
     let (origin, insecure) = (target.origin.as_str(), target.insecure);
     let socket = tokio::time::timeout(STEP, connect(origin, insecure))
         .await

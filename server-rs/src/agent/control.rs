@@ -88,6 +88,10 @@ pub struct AgentStatus {
     pub alarms: Vec<Alarm>,
     /// Account changes this machine saw (newest last).
     pub changes: Vec<Alarm>,
+    /// Renewing this machine's identity key: a staged key (and the code to
+    /// type, for a high-assurance renewal), a renewal just taken, or one made
+    /// elsewhere ([`super::rotation::status`]).
+    pub rotation: super::rotation::Status,
 }
 
 impl AgentStatus {
@@ -111,6 +115,19 @@ impl AgentStatus {
             removed_ms: None,
             alarms: Vec::new(),
             changes: Vec::new(),
+            rotation: super::rotation::Status {
+                state: "idle".into(),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// [`AgentStatus::of`], with the identity renewal as this instance's
+    /// files say ([`super::rotation::status`]).
+    pub fn of_instance(paths: &Paths, st: &AgentState) -> Self {
+        Self {
+            rotation: super::rotation::status(paths, Some(st), super::now_ms()),
+            ..Self::of(st)
         }
     }
 
@@ -171,6 +188,9 @@ impl std::fmt::Display for ControlError {
 /// The server's handle on its hub link. One per server, in
 /// [`crate::api::AppState`].
 pub struct Control {
+    /// Itself, for the link to ask for a restart once it took a renewed
+    /// identity key ([`Control::restart`]).
+    me: std::sync::Weak<Control>,
     paths: Paths,
     /// Set once the server owns its instance and listens
     /// ([`crate::app::RemoteHandApp::prepare`]); a server without it (no
@@ -189,7 +209,8 @@ pub struct Control {
 impl Control {
     /// The handle for one server.
     pub fn new(paths: Paths) -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new_cyclic(|me| Self {
+            me: me.clone(),
             paths,
             env: OnceLock::new(),
             running: Mutex::new(None),
@@ -197,6 +218,33 @@ impl Control {
             generation: Mutex::new(0),
             live: crate::aggregator::live::LiveCopies::new(),
         })
+    }
+
+    /// What a link calls once it renewed its identity key: this control
+    /// restarts it ([`Control::restart`]) on a task of its own — the link
+    /// that asks is the one stopped.
+    fn restart_hook(&self) -> super::rotation::Restart {
+        let me = self.me.clone();
+        Arc::new(move || {
+            let Some(control) = me.upgrade() else { return };
+            tokio::spawn(async move {
+                if let Err(error) = control.restart().await {
+                    tracing::error!(%error, "cannot restart the hub link with the renewed identity key");
+                }
+            });
+        })
+    }
+
+    /// Stop the link and start it again from what is on disk — after an
+    /// identity renewal, with the new key: its hub connection, relays,
+    /// channels, this computer's device role and the streams' writer. The
+    /// server, its AI sessions and terminals go on untouched (they never ran
+    /// under the link).
+    pub async fn restart(&self) -> Result<(), ControlError> {
+        let _gate = self.gate.lock().await;
+        self.stop_locked().await;
+        tracing::info!("restarting the hub link");
+        self.start_locked().await
     }
 
     /// The other devices' copies as the gateway serves them.
@@ -210,6 +258,14 @@ impl Control {
     /// ([`crate::aggregator::sweep_deleted`]).
     pub fn attach(&self, env: LinkEnv) {
         crate::aggregator::sweep_deleted(&self.paths);
+        // Adding this device again under a new identity, cut short by a
+        // crash: finished before anything starts (R6 review, Info).
+        if let Err(error) = super::rotation::finish_re_enroll(&self.paths) {
+            tracing::error!(%error, "cannot finish adding this device again under a new identity");
+        }
+        // A dispute statement the hub has not taken yet: delivered again
+        // (it outlives the enrollment it disputes: contract §12 #6).
+        super::dispute::deliver(&self.paths);
         let _ = self.env.set(env);
     }
 
@@ -255,7 +311,7 @@ impl Control {
         if let Some(old) = old {
             old.stop().await;
         }
-        let started = super::link::start(&self.paths, env, self.live.clone()).map_err(ControlError::Failed)?;
+        let started = super::link::start(&self.paths, env, self.live.clone(), self.restart_hook()).map_err(ControlError::Failed)?;
         *self.running.lock().expect("running") = Some(started);
         Ok(())
     }
@@ -281,7 +337,7 @@ impl Control {
     pub fn status(&self) -> AgentStatus {
         let running = self.running.lock().expect("running");
         if let Some(run) = running.as_ref() {
-            let mut status = run.with_state(AgentStatus::of);
+            let mut status = run.with_state(|st| AgentStatus::of_instance(&self.paths, st));
             let finished = run.finished();
             let Health {
                 connected,
@@ -298,7 +354,7 @@ impl Control {
         }
         drop(running);
         match AgentState::load(&self.paths) {
-            Ok(Some(st)) => AgentStatus::of(&st),
+            Ok(Some(st)) => AgentStatus::of_instance(&self.paths, &st),
             Ok(None) => AgentStatus::none(),
             Err(error) => AgentStatus {
                 state: Standing::Broken,
@@ -335,7 +391,9 @@ impl Control {
         // the code refused): a failed sign-in never leaves the link stopped.
         let was_running = self.running.lock().expect("running").as_ref().is_some_and(|r| !r.finished());
         self.stop_locked().await;
-        let begun = match self.identity() {
+        // A seed a renewal retired (or one archived) never signs up again:
+        // a fresh one then (`docs/host-identity-rotation.md` §3.8).
+        let begun = match super::rotation::identity_for_enrolling(&self.paths) {
             Ok(identity) => super::enroll::begin(&self.paths, &identity, code, hub_url)
                 .await
                 .map_err(ControlError::Begin),
@@ -428,6 +486,39 @@ impl Control {
         tokio::time::timeout(Duration::from_secs(30), delete_streams(&st, &identity))
             .await
             .map_err(|_| ControlError::Unreachable("the hub did not answer in time".into()))?
+    }
+
+    /// Before a sign-in shows this computer's keys: when the seed in use is
+    /// one it must never use again — archived, or replaced elsewhere on the
+    /// chain it knows ([`super::rotation::seed_retired`]: never its own
+    /// renewal to a key it staged, R6 review A1) — it never signs up again:
+    /// the link stops, the seed is archived, the old enrollment forgotten and
+    /// a fresh seed made ([`Control::re_enroll_fresh`]). `true` when that happened.
+    pub async fn renew_retired_seed(&self) -> Result<bool, ControlError> {
+        let _gate = self.gate.lock().await;
+        use super::SeedStore as _;
+        let current = match super::FileSeedStore::for_instance(&self.paths).load() {
+            Ok(Some(seed)) => MachineIdentity::from_seed(&seed.seed),
+            Ok(None) => return Ok(false),
+            Err(error) => return Err(ControlError::Failed(error)),
+        };
+        if !super::rotation::seed_retired(&self.paths, &current) {
+            return Ok(false);
+        }
+        self.stop_locked().await;
+        super::rotation::re_enroll_fresh(&self.paths, super::now_ms()).map_err(ControlError::Failed)?;
+        Ok(true)
+    }
+
+    /// "Add this device again with a new identity": for a device left holding
+    /// only a retired identity key (`link.rotation.state` `foreign`), stop
+    /// the link, archive the seed, forget the enrollment and make a fresh
+    /// seed ([`super::rotation::re_enroll_fresh`]). The new identity; the
+    /// instance is then not enrolled, waiting for a registration code.
+    pub async fn re_enroll_fresh(&self) -> Result<MachineIdentity, ControlError> {
+        let _gate = self.gate.lock().await;
+        self.stop_locked().await;
+        super::rotation::re_enroll_fresh(&self.paths, super::now_ms()).map_err(ControlError::Failed)
     }
 
     /// Stop the link and delete everything under `agent/`: the state, the
@@ -533,20 +624,48 @@ fn forget_enrollment(paths: &Paths) -> Result<(), String> {
     }
 }
 
-/// Delete `agent/` and everything in it (no-op when it is not there). The
+/// Delete `agent/` and everything in it (no-op when it is not there) — but
+/// a dispute statement the hub has not taken yet ([`super::dispute`]): the
+/// only evidence that this device's key was replaced elsewhere, signed and
+/// holding no secret, kept and still delivered until the hub has it. The
 /// link — and with it the streams' writer — must be stopped first; the
 /// process's connection to `streams.db` is dropped here, before the file.
 pub fn unenroll_files(paths: &Paths) -> Result<(), String> {
     crate::db::forget(&super::streams::store::path(paths));
     let dir = paths.instance_dir().join("agent");
-    match std::fs::remove_dir_all(&dir) {
-        Ok(()) => {
-            tracing::info!(dir = %dir.display(), "unenrolled: the agent's files are gone");
-            Ok(())
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{}: {e}", dir.display())),
+    };
+    let mut kept = 0usize;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let path = entry.path();
+        let is_dir = entry.file_type().map_err(|e| format!("{}: {e}", path.display()))?.is_dir();
+        if !is_dir && super::dispute::is_pending_statement(&path) {
+            kept += 1;
+            continue;
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("{}: {e}", dir.display())),
+        let removed = if is_dir { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+        match removed {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        }
     }
+    if kept == 0 {
+        match std::fs::remove_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{}: {e}", dir.display())),
+        }
+        tracing::info!(dir = %dir.display(), "unenrolled: the agent's files are gone");
+    } else {
+        super::sync_dir(&dir.join("."));
+        tracing::warn!(dir = %dir.display(), kept, "unenrolled: the agent's files are gone but the dispute statements the hub does not have yet");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -759,6 +878,108 @@ mod tests {
         assert!(state_file.exists(), "the code's expiry leaves a member alone");
         assert_eq!(control.delete_copies().await.unwrap(), 0, "no copy to delete while it runs no AI");
         assert_eq!(control.status().state, Standing::NotHosting);
+    }
+
+    /// Host identity renewal (§3.5): once a renewed key is in place the link
+    /// is restarted in this process — through the hook a link calls, on a
+    /// task of its own — and runs with the new key; the server's token (what
+    /// its AI sessions and terminals live under) is never touched.
+    #[tokio::test]
+    async fn a_restart_runs_the_link_with_the_renewed_key_and_leaves_the_server_alone() {
+        use crate::agent::{FileSeedStore, SeedStore, StagedSeed};
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::for_instance(dir.path().to_path_buf(), "ctlrestart");
+        let control = Control::new(paths.clone());
+        let old = control.identity().unwrap();
+        let hub = format!("ws://127.0.0.1:{}", closed_port());
+        AgentState::enrolling(&hub, "a-1", "m-1", [9; 16], 5_000).save(&paths).unwrap();
+        let env = link_env(&paths);
+        let server = env.cancel.clone();
+        let session = server.child_token();
+        control.attach(env);
+        assert!(control.start_if_enrolled().await);
+        let key_in_use = |control: &Control| {
+            let running = control.running.lock().unwrap();
+            running.as_ref().filter(|r| !r.finished()).map(|r| r.shared.identity.sign_public())
+        };
+        assert_eq!(key_in_use(&control), Some(old.sign_public()));
+        // The renewed seed in place, as a promotion leaves it.
+        let store = FileSeedStore::for_instance(&paths);
+        store
+            .stage(&StagedSeed {
+                uuid: crate::identity::ensure(&paths).unwrap().uuid,
+                seed: zeroize::Zeroizing::new([9; 32]),
+                nonce: [1; 16],
+                chain_seq: 0,
+                chain_head: [0; 32],
+                assurance: rh_proto::chain::Assurance::Auto,
+                created_ms: 1,
+                accepted_ms: Some(2),
+            })
+            .unwrap();
+        store.promote(&[1; 16]).unwrap();
+        let new = MachineIdentity::from_seed(&[9; 32]);
+        // R6 review W4: the promotion noted that the push keys follow; a
+        // device subscribed against the old VAPID key.
+        let old_vapid = crate::push::store::vapid_public(&paths).await.unwrap();
+        let point = {
+            use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+            let device = p256::SecretKey::random(&mut rand::rngs::OsRng);
+            crate::push::ece::b64url(device.public_key().to_encoded_point(false).as_bytes())
+        };
+        crate::push::store::upsert(&paths, "https://push.example/a".into(), point, crate::push::ece::b64url(&[9; 16]), None)
+            .await
+            .unwrap();
+        {
+            let running = control.running.lock().unwrap();
+            let shared = &running.as_ref().unwrap().shared;
+            shared.state.lock().unwrap().rotation.push_renew = true;
+            shared.save();
+        }
+        (control.restart_hook())();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while key_in_use(&control) != Some(new.sign_public()) {
+            assert!(std::time::Instant::now() < deadline, "the link restarts with the new key");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while AgentState::load(&paths).unwrap().unwrap().rotation.push_renew {
+            assert!(std::time::Instant::now() < deadline, "the restarted link renews the push keys");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(crate::push::store::subscriptions(&paths).await.is_empty(), "every push subscription forgotten");
+        assert_ne!(crate::push::store::vapid_public(&paths).await.unwrap(), old_vapid, "a new VAPID keypair");
+        assert!(control.status().running);
+        assert!(!server.is_cancelled() && !session.is_cancelled(), "the server and what runs under it go on");
+        control.restart().await.unwrap();
+        assert_eq!(key_in_use(&control), Some(new.sign_public()));
+        control.stop().await;
+        assert!(!server.is_cancelled() && !session.is_cancelled());
+    }
+
+    /// R6 review, Info: "add this device again" cut short by a crash after
+    /// the seed was archived (its `state.json` still there) is finished when
+    /// the control comes up: the instance is not enrolled, with a fresh seed,
+    /// and the link does not start as the old enrollment.
+    #[tokio::test]
+    async fn adding_again_cut_short_by_a_crash_is_finished_when_the_control_comes_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::for_instance(dir.path().to_path_buf(), "ctlfresh");
+        let control = Control::new(paths.clone());
+        let old = control.identity().unwrap();
+        AgentState::enrolling("wss://hub.example", "a-1", "m-1", [9; 16], 5_000).save(&paths).unwrap();
+        // What the crash left: the marker, the seed archived, the state kept.
+        let agent = super::super::key_path(&paths).parent().unwrap().to_path_buf();
+        crate::agent::write_private(&agent.join("re-enroll-fresh.json"), b"{}").unwrap();
+        std::fs::rename(super::super::key_path(&paths), super::super::rotation::archived_key_path(&paths, 5)).unwrap();
+        control.attach(link_env(&paths));
+        assert!(!crate::agent::state::exists(&paths), "the old enrollment is forgotten");
+        assert!(!agent.join("re-enroll-fresh.json").exists());
+        let fresh = control.identity().unwrap();
+        assert_ne!(fresh.sign_public(), old.sign_public());
+        assert!(super::super::rotation::archived(&paths, &old));
+        assert!(!control.start_if_enrolled().await, "nothing to start");
+        assert_eq!(control.status().state, Standing::None);
     }
 
     #[tokio::test]

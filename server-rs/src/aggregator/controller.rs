@@ -170,6 +170,9 @@ pub struct Env {
     pub keys_out: watch::Sender<Option<Arc<super::copies::KeyRing>>>,
     /// Woken when mail for this device was pushed (the copies task hears it).
     pub nudge: Arc<tokio::sync::Notify>,
+    /// Whether the device role may sign in now ([`super::SignInGate`]);
+    /// `None`: always.
+    pub may_sign_in: Option<super::SignInGate>,
 }
 
 /// What a round sees of the agent state.
@@ -340,6 +343,10 @@ struct Controller {
     hub_removed: Option<(String, String, u64)>,
     /// Mail whose key could not be stored: id → rounds tried ([`MAX_PUT_TRIES`]).
     put_failures: HashMap<i64, u32>,
+    /// Parked (R6 review A4): the hub suspended the device role while this
+    /// computer's identity renewal is pending (`rotation_pending`) at this
+    /// chain version; no round until the chain moves, or until (ms).
+    suspended: Option<(u64, u64)>,
 }
 
 /// Run the controller until `env.cancel`.
@@ -356,6 +363,7 @@ pub async fn run(env: Env) {
         backoff: BACKOFF_MIN,
         hub_removed: None,
         put_failures: HashMap::new(),
+        suspended: None,
     };
     loop {
         if c.env.cancel.is_cancelled() {
@@ -415,6 +423,9 @@ impl Controller {
             }
             self.hub_removed = None;
         }
+        if let Some(wait) = self.parked() {
+            return wait;
+        }
         // The client and the keys are bound to this enrollment.
         if self
             .client
@@ -458,6 +469,15 @@ impl Controller {
                 self.forget_removed(&view);
                 self.env.timing.idle_every.max(Duration::from_millis(1))
             }
+            Err(HubError::Suspended) => {
+                // Parked until the chain moves — the renewal committed (the
+                // link then restarts with the new key) — or REFUSED_EVERY:
+                // not retried on the back-off meanwhile (R6 review A4).
+                tracing::info!(device = %view.me, "the hub suspends the device role while this computer's identity renewal is pending: parked until the chain moves");
+                self.suspended = Some((*self.env.chain.borrow(), now_ms() + REFUSED_EVERY.as_millis() as u64));
+                self.report(&view, Some(HubError::Suspended.to_string()));
+                REFUSED_EVERY
+            }
             Err(error) => {
                 let wait = match &error {
                     HubError::Removed | HubError::Off => REFUSED_EVERY,
@@ -481,6 +501,19 @@ impl Controller {
         // anything that needs the hub (D2: narrowing purges at once).
         self.retain(view);
         if self.keys.is_none() {
+            return Ok(false);
+        }
+        // This computer's identity key was renewed and the link has not
+        // restarted with the new one yet: nothing that signs in with the
+        // retired key (`docs/host-identity-rotation.md` §3.8).
+        if !super::holds_named_keys(&view.chain, &view.me, &self.env.identity) {
+            tracing::info!(device = %view.me, "the chain names a renewed identity key for this device: the device role waits for the link to take it");
+            return Ok(false);
+        }
+        // A staged identity key is kept and the link has not shown the key
+        // in use is still current: the chain here may be stale.
+        if self.env.may_sign_in.as_ref().is_some_and(|may| !may()) {
+            tracing::debug!(device = %view.me, "a staged identity key is kept: the device role waits for the link's sign-in");
             return Ok(false);
         }
         self.publish(view);
@@ -634,7 +667,7 @@ impl Controller {
         for admin in admins {
             match self.client.as_mut().expect("a client").ask(&admin).await {
                 Ok(()) => asked.push(admin),
-                Err(error @ (HubError::Unauthorized | HubError::Unreachable(_))) => return Err(error),
+                Err(error @ (HubError::Unauthorized | HubError::Unreachable(_) | HubError::Suspended)) => return Err(error),
                 Err(error) => tracing::warn!(%error, %admin, "could not ask an admin for keys"),
             }
         }
@@ -655,6 +688,19 @@ impl Controller {
             }
         }
         Ok(())
+    }
+
+    /// While parked after `rotation_pending` ([`Controller::suspended`]) at the
+    /// chain version now: how long still. Unparked once the chain moved or
+    /// the time is over.
+    fn parked(&mut self) -> Option<Duration> {
+        let (version, until) = self.suspended?;
+        let now = now_ms();
+        if *self.env.chain.borrow() == version && now < until {
+            return Some(Duration::from_millis(until - now));
+        }
+        self.suspended = None;
+        None
     }
 
     /// Whether a write was refused because the aggregator is off, its link
@@ -945,10 +991,14 @@ mod tests {
         acked: Vec<i64>,
         asked: Vec<(String, u8, u64)>,
         sessions: usize,
+        /// Every `POST /v1/session`, taken or not.
+        attempts: usize,
         /// How long a key request takes to be answered (ms).
         ask_delay_ms: u64,
         /// Answer sign-ins `403 device_removed`.
         removed: bool,
+        /// Answer sign-ins `403 rotation_pending` (the device role suspended).
+        suspended: bool,
         /// How many times the mailbox was read, and at which read each mail was acknowledged.
         reads: usize,
         acked_at: Vec<(i64, usize)>,
@@ -979,9 +1029,13 @@ mod tests {
                 "/v1/session",
                 post(|State(hub): State<Hub>, Json(body): Json<Value>| async move {
                     let mut h = hub.lock().unwrap();
+                    h.attempts += 1;
                     if h.removed {
                         h.sessions += 1;
                         return (StatusCode::FORBIDDEN, Json(json!({"error": "device_removed"})));
+                    }
+                    if h.suspended {
+                        return (StatusCode::FORBIDDEN, Json(json!({"error": "rotation_pending"})));
                     }
                     let text = body["signature"].as_str().unwrap_or_default();
                     let bytes: Vec<u8> = (0..text.len() / 2)
@@ -1126,6 +1180,7 @@ mod tests {
             timing,
             keys_out,
             nudge: Arc::default(),
+            may_sign_in: None,
         }));
         let covers = |epochs: &[u32]| {
             let s = status.lock().unwrap();
@@ -1203,10 +1258,22 @@ mod tests {
         status: Arc<Mutex<Status>>,
         cancel: CancellationToken,
         task: tokio::task::JoinHandle<()>,
+        /// Wakes it as pushed mail would.
+        nudge: Arc<tokio::sync::Notify>,
         _dir: tempfile::TempDir,
     }
 
     fn start(a: &Account, origin: &str) -> Running {
+        start_as(a, origin, MachineIdentity::from_seed(&[9; 32]))
+    }
+
+    /// [`start`], the device role running with `identity`.
+    fn start_as(a: &Account, origin: &str, identity: MachineIdentity) -> Running {
+        start_gated(a, origin, identity, None)
+    }
+
+    /// [`start_as`], its sign-ins gated by `may_sign_in`.
+    fn start_gated(a: &Account, origin: &str, identity: MachineIdentity, may_sign_in: Option<super::super::SignInGate>) -> Running {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::for_instance(dir.path().to_path_buf(), "control");
         std::fs::create_dir_all(paths.instance_dir()).unwrap();
@@ -1216,9 +1283,10 @@ mod tests {
         let (bump, chain) = watch::channel(0u64);
         let status = Arc::new(Mutex::new(Status::default()));
         let cancel = CancellationToken::new();
+        let nudge: Arc<tokio::sync::Notify> = Arc::default();
         let task = tokio::spawn(run(Env {
             paths: paths.clone(),
-            identity: Arc::new(MachineIdentity::from_seed(&[9; 32])),
+            identity: Arc::new(identity),
             state: state.clone(),
             chain,
             cancel: cancel.clone(),
@@ -1230,7 +1298,8 @@ mod tests {
                 ask_backoff: [Duration::from_secs(600); 3],
             },
             keys_out: watch::channel(None).0,
-            nudge: Arc::default(),
+            nudge: nudge.clone(),
+            may_sign_in,
         }));
         Running {
             paths,
@@ -1239,6 +1308,7 @@ mod tests {
             status,
             cancel,
             task,
+            nudge,
             _dir: dir,
         }
     }
@@ -1388,6 +1458,77 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(hub.lock().unwrap().sessions, tries, "no more sign-ins (rounds every 50 ms otherwise)");
         assert!(!crate::aggregator::dir(&r.paths).exists());
+        r.cancel.cancel();
+        r.task.await.unwrap();
+    }
+
+    /// Host identity renewal (`docs/host-identity-rotation.md` §3.8; the
+    /// hub phase's constraint): once the chain names other keys for this
+    /// computer than the ones it runs with — a renewal its link has not taken
+    /// yet — the device role signs in with nothing: the hub would keep a
+    /// sign-in with the retired key as evidence against this very computer.
+    #[tokio::test]
+    async fn a_device_role_never_signs_in_with_a_key_the_chain_does_not_name() {
+        let a = account();
+        let (hub, origin) = fake_hub(a.me.sign_public()).await;
+        let r = start_as(&a, &origin, MachineIdentity::from_seed(&[12; 32]));
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        r.bump.send_modify(|v| *v += 1);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(hub.lock().unwrap().attempts, 0, "no sign-in at all (rounds every 50 ms)");
+        assert!(!r.status.lock().unwrap().signed_in);
+        r.cancel.cancel();
+        r.task.await.unwrap();
+        // The keys the chain names, but a staged identity key is kept and the
+        // link has not signed in with the key in use (§3.5 「不拿旧钥误伤自己」):
+        // the chain here may be stale — still no sign-in.
+        let open = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate = open.clone();
+        let r = start_gated(
+            &a,
+            &origin,
+            MachineIdentity::from_seed(&[9; 32]),
+            Some(Arc::new(move || gate.load(std::sync::atomic::Ordering::SeqCst))),
+        );
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(hub.lock().unwrap().attempts, 0, "no session minted with a key that may be retired");
+        // The link signed in with the key in use: it is current.
+        open.store(true, std::sync::atomic::Ordering::SeqCst);
+        until(Duration::from_secs(10), "a sign-in", || hub.lock().unwrap().sessions > 0).await;
+        r.cancel.cancel();
+        r.task.await.unwrap();
+    }
+
+    /// R6 review A4: while this computer's identity renewal is pending the
+    /// hub suspends its device role (`403 rotation_pending`). The controller
+    /// parks — pushed mail does not wake it into another sign-in — until the
+    /// chain moves (the renewal written), then signs in again.
+    #[tokio::test]
+    async fn a_suspended_device_role_is_parked_until_the_chain_moves() {
+        let a = account();
+        let (hub, origin) = fake_hub(a.me.sign_public()).await;
+        hub.lock().unwrap().suspended = true;
+        let r = start(&a, &origin);
+        until(Duration::from_secs(10), "the first sign-in", || hub.lock().unwrap().attempts == 1).await;
+        until(Duration::from_secs(10), "the refusal said", || {
+            r.status.lock().unwrap().error.as_deref().is_some_and(|e| e.contains("rotation_pending"))
+        })
+        .await;
+        // Mail pushed meanwhile wakes it, and it stays parked.
+        for _ in 0..5 {
+            r.nudge.notify_one();
+            tokio::time::sleep(Duration::from_millis(60)).await;
+        }
+        assert_eq!(hub.lock().unwrap().attempts, 1, "parked: no sign-in on a wake-up");
+        // The chain moved: it tries again (and parks again while suspended)…
+        r.bump.send_modify(|v| *v += 1);
+        until(Duration::from_secs(10), "a sign-in once the chain moved", || hub.lock().unwrap().attempts == 2).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(hub.lock().unwrap().attempts, 2);
+        // …and signs in once the hub lets it.
+        hub.lock().unwrap().suspended = false;
+        r.bump.send_modify(|v| *v += 1);
+        until(Duration::from_secs(10), "a session", || hub.lock().unwrap().sessions > 0).await;
         r.cancel.cancel();
         r.task.await.unwrap();
     }

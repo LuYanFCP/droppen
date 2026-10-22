@@ -165,6 +165,14 @@ pub struct Env {
     pub status: Arc<Mutex<Status>>,
     /// Where the copies are published for the local gateway (S1-7).
     pub live: Arc<LiveCopies>,
+    /// Asks the link to sync the chain from the hub once: a stream that
+    /// stops being readable may be one whose host renewed its identity key
+    /// before this computer's chain heard (`docs/host-identity-rotation.md`
+    /// §5.4) — the chain moving makes it read again under the new key.
+    pub resync: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Whether the device role may sign in now ([`super::SignInGate`]);
+    /// `None`: always.
+    pub may_sign_in: Option<super::SignInGate>,
 }
 
 /// A host followed now.
@@ -172,10 +180,32 @@ pub struct Env {
 pub(super) struct Host {
     /// Its id.
     pub id: String,
-    /// Its Ed25519 key (what signs its heads).
+    /// Its Ed25519 key now (what signs its heads): the only key anything from
+    /// the network is taken under.
     pub machine_key: [u8; 32],
+    /// The Ed25519 keys it renewed away from (`RotateHostKey`), oldest first:
+    /// a position stored here, verified when it was stored, may carry one
+    /// (`docs/host-identity-rotation.md` §5.4).
+    pub retired: Vec<[u8; 32]>,
+    /// The Ed25519 key it joined with (`keys_at` the entry that added it):
+    /// what a stored position from before `copies.db` kept its key was
+    /// verified under — they all predate any renewal ([`resume_key`]).
+    pub first_key: [u8; 32],
     /// Its epochs held.
     pub keys: Keys,
+}
+
+/// The key a stored position of `host` is checked under again: the one
+/// recorded with it (`head_key`) — or, for a row from before that was kept,
+/// the key the host joined with, never any other of its retired keys: such
+/// rows were all verified before any renewal could exist.
+pub(super) fn resume_key(host: &Host, head_key: Option<[u8; 32]>) -> [u8; 32] {
+    head_key.unwrap_or(host.first_key)
+}
+
+/// Each host's identity key now, for the gateway ([`LiveCopies::set_signers`]).
+fn signers(hosts: &[Host]) -> Vec<(String, [u8; 32])> {
+    hosts.iter().map(|h| (h.id.clone(), h.machine_key)).collect()
 }
 
 /// The hosts this computer may follow: accepting its control (D2), with
@@ -189,6 +219,8 @@ pub(super) fn followed(view: &View, ring: &KeyRing) -> Vec<Host> {
             Some(Host {
                 id: h.info.id.clone(),
                 machine_key: h.info.sign_key,
+                retired: h.retired.iter().map(|r| r.sign_key).collect(),
+                first_key: view.chain.keys_at(&h.info.id, h.added_seq).map_or(h.info.sign_key, |k| k.sign_key),
                 keys: keys.clone(),
             })
         })
@@ -310,6 +342,10 @@ enum Update {
     Fresh { want: Want, head: SignedHead, at_ms: Option<u64> },
 }
 
+/// What a stream's task sends: the host identity key it verifies heads
+/// under, and the update (Codex review M3).
+type Report = ([u8; 32], Update);
+
 /// Where a stream's task fetches pages: the device session, renewed in place.
 #[derive(Clone)]
 struct PageSource {
@@ -335,7 +371,14 @@ impl PageSource {
 /// floor, when it had one), or from a stored cursor.
 enum Start {
     Fresh { floor: Option<Floor> },
-    Resume { head: SignedHead, state: String },
+    /// `head_key`: the host's key the cursor was verified under when it was
+    /// stored ([`resume_key`]: for a row older than renewals, the key the
+    /// host joined with).
+    Resume {
+        head: SignedHead,
+        state: String,
+        head_key: [u8; 32],
+    },
 }
 
 /// One stream to follow, and where to.
@@ -343,13 +386,41 @@ struct Task {
     want: Want,
     /// The host's Ed25519 key.
     machine_key: [u8; 32],
+    /// The keys it renewed away from: a stored cursor may carry one.
+    retired: Vec<[u8; 32]>,
     keys: Keys,
     start: Start,
     link: Arc<Link>,
     pages: PageSource,
-    tx: mpsc::UnboundedSender<Update>,
+    tx: mpsc::UnboundedSender<Report>,
     /// Where the copy is published for the local gateway once caught up.
     live: Arc<LiveCopies>,
+}
+
+/// Where a stream's task starts reading, and the copy it folds into.
+///
+/// A stored cursor was verified, when it was stored, under the key recorded
+/// with it — one the host held (`keys_at`): it may have renewed its identity
+/// key since — and is checked under exactly that key again, never under
+/// whichever retired key happens to verify. One that is not is read again
+/// from the start.
+fn started(want: &Want, machine_key: [u8; 32], retired: &[[u8; 32]], keys: &Keys, start: Start) -> (Follower, Fold) {
+    let fresh = |floor| (Follower::new(want.stream, machine_key, &keys.0).with_floor(floor), Fold::empty(want.kind));
+    match start {
+        Start::Fresh { floor } => fresh(floor),
+        Start::Resume { head, state, head_key } => {
+            let signed_by = head_key;
+            let held = (signed_by == machine_key || retired.contains(&signed_by)) && head.verify(&signed_by);
+            let floor = held.then(|| Floor::of(&head));
+            match (
+                Follower::resume_stored(want.stream, machine_key, &signed_by, retired, &keys.0, head),
+                Fold::restore(want.kind, &state),
+            ) {
+                (Ok(f), Some(fold)) => (f, fold),
+                _ => fresh(floor),
+            }
+        }
+    }
 }
 
 /// Follow one stream until the link closes, `stop`, or an error.
@@ -361,6 +432,7 @@ async fn follow_stream(task: Task, stop: CancellationToken) {
     let Task {
         want,
         machine_key,
+        retired,
         keys,
         start,
         link,
@@ -369,21 +441,16 @@ async fn follow_stream(task: Task, stop: CancellationToken) {
         live,
     } = task;
     let key = Key::new(&want.host, want.kind, &want.name);
-    let fresh = |floor| (Follower::new(want.stream, machine_key, &keys.0).with_floor(floor), Fold::empty(want.kind));
-    let (mut follower, fold) = match start {
-        Start::Fresh { floor } => fresh(floor),
-        Start::Resume { head, state } => {
-            let floor = head.verify(&machine_key).then(|| Floor::of(&head));
-            match (
-                Follower::resume(want.stream, machine_key, &keys.0, head),
-                Fold::restore(want.kind, &state),
-            ) {
-                (Ok(f), Some(fold)) => (f, fold),
-                _ => fresh(floor),
-            }
-        }
+    let (mut follower, fold) = started(&want, machine_key, &retired, &keys, start);
+    // Everything this task tells, and every copy it shows, carries the host
+    // key it verifies under (Codex review M3): once the host renewed it, a
+    // task cancelled for that — but still running a frame that won the race
+    // with the cancel — has nothing taken from it, by the copies task
+    // ([`Live::admits`]) or the gateway ([`LiveCopies::set_signers`]).
+    let send = |update: Update| {
+        let _ = tx.send((machine_key, update));
     };
-    let slot: Slot = Arc::new(Mutex::new(Published::new(fold, follower.from_seq(), 0)));
+    let slot: Slot = Arc::new(Mutex::new(Published::new(fold, follower.from_seq(), 0).signed_by(machine_key)));
     // Whether the slot is the one the gateway shows (once caught up).
     let mut published = false;
     let (ch, mut rx) = link.reserve();
@@ -399,8 +466,8 @@ async fn follow_stream(task: Task, stop: CancellationToken) {
         return;
     }
     let too_large = || {
-        live.too_large(&key);
-        let _ = tx.send(Update::TooLarge { want: want.clone() });
+        live.too_large_as(&key, Some(machine_key));
+        send(Update::TooLarge { want: want.clone() });
     };
     let emit = |follower: &Follower| -> Result<(), ()> {
         let (state, index) = {
@@ -415,7 +482,7 @@ async fn follow_stream(task: Task, stop: CancellationToken) {
             too_large();
             return Err(());
         }
-        let _ = tx.send(Update::State(Box::new(Copied {
+        send(Update::State(Box::new(Copied {
             want: want.clone(),
             head: follower.head().cloned(),
             at_ms: follower.freshest_ms(),
@@ -425,7 +492,7 @@ async fn follow_stream(task: Task, stop: CancellationToken) {
         Ok(())
     };
     let failed = |error: String, unauthorized: bool| {
-        let _ = tx.send(Update::Failed {
+        send(Update::Failed {
             want: want.clone(),
             error,
             unauthorized,
@@ -528,8 +595,8 @@ async fn follow_stream(task: Task, stop: CancellationToken) {
         match step {
             Step::Nothing | Step::Checkpoint(_) => {}
             Step::Missing => {
-                live.missing(&key);
-                let _ = tx.send(Update::Missing { want: want.clone() });
+                live.missing_as(&key, Some(machine_key));
+                send(Update::Missing { want: want.clone() });
             }
             Step::Synced => {
                 dirty = false;
@@ -561,7 +628,7 @@ async fn follow_stream(task: Task, stop: CancellationToken) {
                     if follower.synced() && !dirty && quiet {
                         if let Some(head) = follower.head().cloned() {
                             last_fresh = Some(tokio::time::Instant::now());
-                            let _ = tx.send(Update::Fresh {
+                            send(Update::Fresh {
                                 want: want.clone(),
                                 head,
                                 at_ms: follower.freshest_ms(),
@@ -665,8 +732,12 @@ struct Copies {
     env: Env,
     store: Option<CopyStore>,
     backoff: Duration,
-    /// No connection before this (ms): `device_removed`, `host_devices_off`.
+    /// No connection before this (ms): `device_removed`, `host_devices_off`,
+    /// `rotation_pending`.
     quiet_until: Option<u64>,
+    /// Parked (R6 review A4): `rotation_pending` at this chain version — the
+    /// quiet ends as soon as the chain moves ([`Copies::unpark_if_moved`]).
+    parked: Option<u64>,
     /// The device session and when (ms) it expires.
     session: Option<(Arc<RwLock<Zeroizing<String>>>, u64)>,
     /// Streams that failed: when they may be read again (ms), and how often they failed.
@@ -695,6 +766,7 @@ pub async fn run(env: Env) {
         store: None,
         backoff: BACKOFF_MIN,
         quiet_until: None,
+        parked: None,
         session: None,
         failures: HashMap::new(),
         too_large: HashSet::new(),
@@ -801,12 +873,15 @@ impl Copies {
             return IDLE_EVERY;
         };
         self.env.live.set_hosts(&hosts.iter().map(|h| h.id.clone()).collect::<Vec<_>>());
+        self.env.live.set_signers(&signers(&hosts));
+        self.unpark_if_moved();
         if let Some(until) = self.quiet_until {
             let now = now_ms();
             if now < until {
                 return Duration::from_millis(until - now).min(IDLE_EVERY);
             }
             self.quiet_until = None;
+            self.parked = None;
         }
         if self.store.is_none() {
             // The store is created only once there is something to keep.
@@ -840,6 +915,21 @@ impl Copies {
             self.session = None;
             self.set_status(|s| *s = Status::default());
             return IDLE_EVERY;
+        }
+        // This computer's identity key was renewed and the link has not
+        // restarted with the new one yet: no sign-in with the retired key
+        // (`docs/host-identity-rotation.md` §3.8).
+        if !super::holds_named_keys(&view.chain, &view.me, &self.env.identity) {
+            self.session = None;
+            self.set_status(|s| s.error = Some("waiting for this device's renewed identity key".into()));
+            return IDLE_EVERY;
+        }
+        // A staged identity key is kept and the link has not shown the key in
+        // use is still current: the chain here may be stale.
+        if self.env.may_sign_in.as_ref().is_some_and(|may| !may()) {
+            self.session = None;
+            self.set_status(|s| s.error = Some("waiting for the link to sign in (an identity key renewal is staged)".into()));
+            return IDLE_EVERY.min(Duration::from_secs(5));
         }
         let hub = match HubUrl::parse(&view.hub) {
             Ok(hub) => hub,
@@ -921,7 +1011,29 @@ impl Copies {
                 self.set_status(|s| s.error = Some("the hub lets no device that runs AI act as a device now".into()));
                 REFUSED_EVERY.min(IDLE_EVERY)
             }
+            "rotation_pending" => {
+                // This computer's identity renewal is pending: parked until
+                // the chain moves (the renewal written) or REFUSED_EVERY —
+                // never a removal, nothing deleted, and not retried on the
+                // back-off meanwhile (R6 review A4).
+                tracing::info!(device = %view.me, "the hub suspends the device role while this computer's identity renewal is pending: parked until the chain moves");
+                self.session = None;
+                self.parked = Some(*self.env.chain.borrow());
+                self.quiet_until = Some(now_ms() + REFUSED_EVERY.as_millis() as u64);
+                self.set_status(|s| {
+                    s.error = Some("the hub suspends this device's device role while its identity renewal is pending (rotation_pending)".into())
+                });
+                IDLE_EVERY
+            }
             other => self.failed(format!("the hub refused: {other}")),
+        }
+    }
+
+    /// Parked after `rotation_pending` and the chain moved since: the quiet ends.
+    fn unpark_if_moved(&mut self) {
+        if self.parked.is_some_and(|v| v != *self.env.chain.borrow()) {
+            self.parked = None;
+            self.quiet_until = None;
         }
     }
 
@@ -1009,8 +1121,8 @@ impl Copies {
             }
             tokio::select! {
                 update = live.rx.recv() => {
-                    let Some(update) = update else { break Ended::Again("closed".into()) };
-                    if let Err(ended) = live.on_update(self, update) {
+                    let Some((signer, update)) = update else { break Ended::Again("closed".into()) };
+                    if let Err(ended) = live.on_update_from(self, Some(signer), update) {
                         break ended;
                     }
                 }
@@ -1073,8 +1185,8 @@ struct Live {
     hosts: Vec<Host>,
     link: Arc<Link>,
     pages: PageSource,
-    tx: mpsc::UnboundedSender<Update>,
-    rx: mpsc::UnboundedReceiver<Update>,
+    tx: mpsc::UnboundedSender<Report>,
+    rx: mpsc::UnboundedReceiver<Report>,
     subs: HashMap<StreamId, Sub>,
     /// Which names exist (from `stream_synced`).
     exists: HashMap<StreamId, bool>,
@@ -1087,7 +1199,7 @@ struct Live {
     /// When (ms) each row was last written in this connection.
     written: HashMap<(String, Kind, String), u64>,
     /// Heads of unchanged copies to write (a heartbeat: how current they are).
-    touches: HashMap<(String, Kind, String), (StreamId, SignedHead)>,
+    touches: HashMap<(String, Kind, String), (StreamId, SignedHead, [u8; 32])>,
     online: BTreeMap<String, Option<bool>>,
     reported: Option<BTreeMap<String, HostCopy>>,
 }
@@ -1144,9 +1256,16 @@ impl Live {
     }
 
     /// Whether an update about `want` still counts: its stream is followed
-    /// now, as that very want, for a host followed now.
-    fn admits(&self, want: &Want) -> bool {
-        self.subs.get(&want.stream).is_some_and(|s| &s.want == want) && self.host(&want.host).is_some()
+    /// now, as that very want, for a host followed now — and, from a stream
+    /// task (`signer`: the host key it verifies under), under the host's
+    /// identity key now (Codex review M3): a renewal cancels the old tasks and
+    /// follows the same want again, and what the old ones had queued is
+    /// theirs, not the new ones'.
+    fn admits(&self, want: &Want, signer: Option<[u8; 32]>) -> bool {
+        self.subs.get(&want.stream).is_some_and(|s| &s.want == want)
+            && self
+                .host(&want.host)
+                .is_some_and(|h| signer.is_none_or(|k| k == h.machine_key))
     }
 
     /// The chain or the keys changed: the same enrollment carries on with
@@ -1172,6 +1291,9 @@ impl Live {
         self.view = view;
         self.hosts = hosts;
         c.env.live.set_hosts(&self.hosts.iter().map(|h| h.id.clone()).collect::<Vec<_>>());
+        // Before any old task is cancelled: from now on the gateway shows
+        // nothing verified under a key a host renewed away from.
+        c.env.live.set_signers(&signers(&self.hosts));
         // Presence of devices no longer in the account goes.
         let chain = &self.view.chain;
         self.online.retain(|id, _| chain.machine(id).is_some());
@@ -1266,7 +1388,7 @@ impl Live {
                 continue;
             }
             let Some(host) = self.host(&want.host) else { continue };
-            let (machine_key, keys) = (host.machine_key, host.keys.clone());
+            let (machine_key, retired, keys) = (host.machine_key, host.retired.clone(), host.keys.clone());
             // A failed stream is read again from the start; any other from its cursor.
             let key = (want.host.clone(), want.kind, want.name.clone());
             let stored = self.stored.get(&key).filter(|s| s.stream == want.stream && !s.too_large);
@@ -1281,8 +1403,13 @@ impl Live {
                         head: Some(head),
                         state: Some(state),
                         stream,
+                        head_key,
                         ..
-                    })) if stream == want.stream => Start::Resume { head, state },
+                    })) if stream == want.stream => Start::Resume {
+                        head,
+                        state,
+                        head_key: resume_key(host, head_key),
+                    },
                     _ => Start::Fresh { floor },
                 },
                 _ => Start::Fresh { floor },
@@ -1292,6 +1419,7 @@ impl Live {
                 Task {
                     want: want.clone(),
                     machine_key,
+                    retired,
                     keys,
                     start,
                     link: self.link.clone(),
@@ -1306,6 +1434,12 @@ impl Live {
     }
 
     fn on_update(&mut self, c: &mut Copies, update: Update) -> Result<(), Ended> {
+        self.on_update_from(c, None, update)
+    }
+
+    /// [`Live::on_update`], from a stream task verifying under `signer`
+    /// (`None`: from no task, as in tests and the store).
+    fn on_update_from(&mut self, c: &mut Copies, signer: Option<[u8; 32]>, update: Update) -> Result<(), Ended> {
         match update {
             Update::State(copied) => {
                 let Copied {
@@ -1315,7 +1449,7 @@ impl Live {
                     state,
                     index,
                 } = *copied;
-                if !self.admits(&want) {
+                if !self.admits(&want, signer) {
                     return Ok(());
                 }
                 self.exists.insert(want.stream, true);
@@ -1338,6 +1472,9 @@ impl Live {
                         floor: head.as_ref().map(Floor::of),
                     },
                 );
+                // The host key its stream task verifies heads under: the key
+                // this head is checked with again when the copy carries on.
+                let head_key = signer.or_else(|| self.host(&want.host).map(|h| h.machine_key));
                 self.pending.insert(
                     key,
                     Row {
@@ -1347,6 +1484,7 @@ impl Live {
                         stream: want.stream,
                         epoch: want.epoch,
                         head,
+                        head_key,
                         state: Some(state),
                         too_large: false,
                         updated_ms: now_ms(),
@@ -1354,12 +1492,12 @@ impl Live {
                 );
             }
             Update::Missing { want } => {
-                if self.admits(&want) {
+                if self.admits(&want, signer) {
                     self.exists.insert(want.stream, false);
                 }
             }
             Update::Fresh { want, head, at_ms } => {
-                if !self.admits(&want) {
+                if !self.admits(&want, signer) {
                     return Ok(());
                 }
                 let key = (want.host.clone(), want.kind, want.name.clone());
@@ -1374,22 +1512,26 @@ impl Live {
                 }));
                 // A copy waiting to be written takes the newer head; one
                 // already written gets only its head and time moved.
+                let Some(head_key) = signer.or_else(|| self.host(&want.host).map(|h| h.machine_key)) else {
+                    return Ok(());
+                };
                 match self.pending.get_mut(&key) {
                     // Only at the place the waiting state stands.
                     Some(row) => {
                         if row.head.as_ref().is_some_and(|h| h.head.next_seq == head.head.next_seq) {
                             row.head = Some(head);
+                            row.head_key = Some(head_key);
                         }
                     }
                     None => {
-                        self.touches.insert(key, (want.stream, head));
+                        self.touches.insert(key, (want.stream, head, head_key));
                     }
                 }
             }
             Update::TooLarge { want } => {
                 // From a stream still followed for a host still followed only
                 // (a late update must not bring back a purged host's row).
-                if !self.admits(&want) {
+                if !self.admits(&want, signer) {
                     return Ok(());
                 }
                 self.subs.remove(&want.stream);
@@ -1415,6 +1557,7 @@ impl Live {
                         stream: want.stream,
                         epoch: want.epoch,
                         head: None,
+                        head_key: None,
                         state: None,
                         too_large: true,
                         updated_ms: now_ms(),
@@ -1422,10 +1565,22 @@ impl Live {
                 );
             }
             Update::Failed { want, error, unauthorized } => {
+                // A task cancelled for its host's renewal fails on what the
+                // new key signs: not the new task's failure (Codex review M3).
+                if signer.is_some_and(|k| self.host(&want.host).is_some_and(|h| h.machine_key != k)) {
+                    return Ok(());
+                }
                 if self.subs.get(&want.stream).is_some_and(|s| s.want == want) {
                     self.subs.remove(&want.stream);
                 }
                 let (_, tries) = c.failures.get(&want.stream).copied().unwrap_or((0, 0));
+                if tries == 0 {
+                    // Its host may have renewed its identity key: the chain
+                    // is synced once, and the stream read again under it.
+                    if let Some(resync) = &c.env.resync {
+                        resync();
+                    }
+                }
                 let wait = (REBUILD_MIN * 2u32.saturating_pow(tries.min(10))).min(REBUILD_MAX);
                 c.failures.insert(want.stream, (now_ms() + wait.as_millis() as u64, tries + 1));
                 tracing::warn!(host = %want.host, kind = want.kind.as_str(), %error, "a copy stopped; reading it again in {wait:?}");
@@ -1463,11 +1618,11 @@ impl Live {
         if !self.touches.is_empty() {
             let hosts: HashSet<&str> = self.hosts.iter().map(|h| h.id.as_str()).collect();
             let store = c.store.as_mut().ok_or(Ended::Off)?;
-            for ((host, kind, name), (stream, head)) in self.touches.drain() {
+            for ((host, kind, name), (stream, head, head_key)) in self.touches.drain() {
                 if !hosts.contains(host.as_str()) {
                     continue;
                 }
-                match store.touch(&host, kind, &name, &stream, &head, now_ms()) {
+                match store.touch(&host, kind, &name, &stream, &head, &head_key, now_ms()) {
                     Ok(_) => {}
                     Err(error) if error == super::store::OFF => return Err(Ended::Off),
                     Err(error) => tracing::debug!(%error, %host, "cannot note how current a copy is"),
@@ -1660,14 +1815,18 @@ mod tests {
             cancel: CancellationToken::new(),
             status: Arc::default(),
             live: LiveCopies::new(),
+            resync: None,
+            may_sign_in: None,
         };
         env.live.set_hosts(&hosts.iter().map(|h| h.to_string()).collect::<Vec<_>>());
+        env.live.set_signers(&hosts.iter().map(|h| (h.to_string(), [7; 32])).collect::<Vec<_>>());
         let c = Copies {
             store: Some(CopyStore::open(paths, "a-1", "m-me", Box::new(|| true)).unwrap()),
             interest: env.live.interest(),
             env,
             backoff: BACKOFF_MIN,
             quiet_until: None,
+            parked: None,
             session: None,
             failures: HashMap::new(),
             too_large: HashSet::new(),
@@ -1691,6 +1850,8 @@ mod tests {
                 .map(|id| Host {
                     id: id.to_string(),
                     machine_key: [7; 32],
+                    retired: Vec::new(),
+                    first_key: [7; 32],
                     keys: Keys(vec![(0, [8; 32])]),
                 })
                 .collect(),
@@ -1713,6 +1874,386 @@ mod tests {
             reported: None,
         };
         (c, live)
+    }
+
+    /// Host identity renewal (the hub phase's constraint): while this
+    /// computer's renewal is pending the hub suspends its device role —
+    /// `rotation_pending` on `/v1/session` or `/v1/client`. Not a removal:
+    /// nothing is deleted, nothing goes quiet for an hour. Parked (R6 review
+    /// A4) — no connection on the back-off — until the chain moves.
+    #[tokio::test]
+    async fn a_suspended_device_role_is_parked_until_the_chain_moves_not_taken_for_a_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::for_instance(dir.path().to_path_buf(), "pendingtest");
+        let (mut c, live) = live(&paths, &["m-2"]);
+        let (bump, chain) = watch::channel(3u64);
+        c.env.chain = chain;
+        let wait = c.refused(&live.view, "rotation_pending");
+        assert!(wait <= IDLE_EVERY, "{wait:?}");
+        let quiet = c.quiet_until.expect("parked");
+        assert!(quiet > now_ms() + REFUSED_EVERY.as_millis() as u64 - 60_000 && quiet < now_ms() + REMOVED_EVERY.as_millis() as u64);
+        assert_eq!(c.parked, Some(3));
+        assert!(super::super::store::path(&paths).exists(), "the copies stay");
+        assert!(c.store.is_some());
+        assert!(c.env.status.lock().unwrap().error.as_deref().is_some_and(|e| e.contains("rotation_pending")));
+        // Woken, the chain where it was: still parked.
+        c.unpark_if_moved();
+        assert!(c.quiet_until.is_some() && c.parked.is_some());
+        // The chain moved (the renewal written, say): the quiet ends.
+        bump.send_modify(|v| *v += 1);
+        c.unpark_if_moved();
+        assert!(c.quiet_until.is_none() && c.parked.is_none());
+    }
+
+    /// R6 review: a stored cursor resumes under exactly the key recorded with
+    /// it in `copies.db` — a key the host held — and not under whichever of
+    /// its retired keys happens to verify; one that does not is read again
+    /// from the start (under its floor only when that key signed it).
+    #[test]
+    fn a_stored_cursor_resumes_only_under_the_key_it_was_stored_under() {
+        let (old, new) = (ed25519_dalek::SigningKey::from_bytes(&[7; 32]), ed25519_dalek::SigningKey::from_bytes(&[8; 32]));
+        let (old_key, new_key) = (old.verifying_key().to_bytes(), new.verifying_key().to_bytes());
+        let want = want("m-2", "s");
+        let head = rh_proto::record::StreamHead {
+            stream: want.stream,
+            next_seq: 4,
+            epoch: 0,
+            link: [5; 32],
+            time_ms: 1_700_000_000_000,
+        }
+        .sign(&old);
+        let mut copy = Fold::empty(Kind::Session);
+        copy.apply(&(FMT_FEED_V1, br#"{"fromIndex":0,"items":[{"t":1}],"endIndex":1}"#.to_vec()))
+            .unwrap();
+        let state = copy.to_json();
+        assert!(Fold::restore(Kind::Session, &state).is_some());
+        let keys = Keys(vec![(0, [3; 32])]);
+        let resume = |head: &SignedHead, head_key| Start::Resume {
+            head: head.clone(),
+            state: state.clone(),
+            head_key,
+        };
+        // Stored under the key the host held then, renewed since: resumed.
+        let (f, fold) = started(&want, new_key, &[old_key], &keys, resume(&head, old_key));
+        assert_eq!(f.from_seq(), 4);
+        assert!(matches!(fold, Fold::Feed(ref copy, _) if copy.items.len() == 1));
+        // Recorded under the key now but signed by the old one: read again
+        // from the start, no floor.
+        let (f, fold) = started(&want, new_key, &[old_key], &keys, resume(&head, new_key));
+        assert_eq!((f.from_seq(), f.floor()), (0, None));
+        assert!(matches!(fold, Fold::Feed(ref copy, _) if copy.items.is_empty()));
+        // Recorded under a key the chain does not say the host held.
+        let (f, _) = started(&want, new_key, &[], &keys, resume(&head, old_key));
+        assert_eq!((f.from_seq(), f.floor()), (0, None));
+        // A copy that does not restore: from the start, under the cursor's floor.
+        let broken = Start::Resume {
+            head: head.clone(),
+            state: "not json".into(),
+            head_key: old_key,
+        };
+        let (f, _) = started(&want, new_key, &[old_key], &keys, broken);
+        assert_eq!((f.from_seq(), f.floor().map(|fl| fl.next_seq)), (0, Some(4)));
+
+        // A row from before `copies.db` kept the key (no `head_key`): every
+        // such row was verified before any renewal, so under the key the host
+        // joined with — and resumes under that one after a renewal, never
+        // under any other of its retired keys.
+        let later = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        let later_key = later.verifying_key().to_bytes();
+        let host = |machine_key, retired: Vec<[u8; 32]>| Host {
+            id: "m-2".into(),
+            machine_key,
+            first_key: retired.first().copied().unwrap_or(machine_key),
+            retired,
+            keys: keys.clone(),
+        };
+        let never_renewed = host(old_key, Vec::new());
+        assert_eq!(resume_key(&never_renewed, None), old_key, "the key now is the one it joined with");
+        assert_eq!(resume_key(&never_renewed, Some(new_key)), new_key, "a recorded key is the one");
+        // Renewed once since (old → new): the legacy row still resumes.
+        let renewed = host(new_key, vec![old_key]);
+        let (f, fold) = started(&want, new_key, &renewed.retired, &keys, resume(&head, resume_key(&renewed, None)));
+        assert_eq!(f.from_seq(), 4, "still resumes after the renewal");
+        assert!(matches!(fold, Fold::Feed(ref copy, _) if copy.items.len() == 1));
+        // Renewed twice (old → later → new): a legacy row whose head the
+        // later retired key signed is refused — read again from the start.
+        let twice = host(new_key, vec![old_key, later_key]);
+        assert_eq!(resume_key(&twice, None), old_key);
+        let by_later = rh_proto::record::StreamHead {
+            stream: want.stream,
+            next_seq: 6,
+            epoch: 0,
+            link: [5; 32],
+            time_ms: 1_700_000_000_000,
+        }
+        .sign(&later);
+        let (f, fold) = started(&want, new_key, &twice.retired, &keys, resume(&by_later, resume_key(&twice, None)));
+        assert_eq!((f.from_seq(), f.floor()), (0, None), "not under a later retired key");
+        assert!(matches!(fold, Fold::Feed(ref copy, _) if copy.items.is_empty()));
+        // …while the same head, recorded with its key, resumes.
+        let (f, _) = started(&want, new_key, &twice.retired, &keys, resume(&by_later, resume_key(&twice, Some(later_key))));
+        assert_eq!(f.from_seq(), 6);
+    }
+
+    /// R6 review (the outbound direction of the pause overlay, §3.4 rule
+    /// 10): another host, m-2, pausing THIS computer's control of it — a
+    /// renewal pause removing m-2←m-me — stops this computer's device role
+    /// using m-2: the copies task no longer follows it, and the controller
+    /// neither asks for its keys nor counts it among the hosts that accept
+    /// it. Ending the pause gives it back.
+    #[test]
+    fn a_pause_of_this_computers_control_stops_its_device_role_until_it_ends() {
+        use rh_proto::chain::{Accept, Action, ChainClock, ChainState, DeviceV3, Flags, KeyCommit, KeyCommits, PausePhase, Signer};
+        let ak = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+        let admin = MachineIdentity::from_seed(&[2; 32]);
+        let genesis = rh_proto::chain::genesis3_draft(
+            "a-1",
+            ak.verifying_key().to_bytes(),
+            DeviceV3 {
+                id: "d-a".into(),
+                sign_key: admin.sign_public(),
+                dh_key: admin.dh_public(),
+                flags: Flags { host: false, admin: true },
+            },
+            None,
+            1,
+        )
+        .sign(&ak);
+        let mut chain = ChainState::genesis(&genesis, None).unwrap();
+        let push = |chain: &mut ChainState, action: Action| {
+            let e = chain.draft(Signer::Device("d-a".into()), action, 100 + chain.seq()).sign(admin.signing_key());
+            chain.apply(&e, &mut ChainClock::history()).unwrap();
+        };
+        for (id, seed) in [("m-me", 19u8), ("m-2", 20u8)] {
+            let k = MachineIdentity::from_seed(&[seed; 32]);
+            push(
+                &mut chain,
+                Action::AddDevice3(DeviceV3 {
+                    id: id.into(),
+                    sign_key: k.sign_public(),
+                    dh_key: k.dh_public(),
+                    flags: Flags { host: true, admin: false },
+                }),
+            );
+            push(
+                &mut chain,
+                Action::KeyEpochs(KeyCommits {
+                    user: None,
+                    machines: vec![(id.into(), KeyCommit { epoch: 0, hash: [0; 32] })],
+                }),
+            );
+        }
+        push(
+            &mut chain,
+            Action::SetAccept {
+                host: "m-2".into(),
+                from: Accept::Devices(vec!["m-me".into()]),
+            },
+        );
+        let ring = KeyRing {
+            account: "a-1".into(),
+            device: "m-me".into(),
+            hosts: BTreeMap::from([("m-2".to_string(), Keys(vec![(0, [8; 32])]))]),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::for_instance(dir.path().to_path_buf(), "pauseout");
+        let keys = super::super::keys::HostKeys::load(&paths, "a-1", "m-me").unwrap();
+        let uses = |chain: &ChainState| {
+            let view = View {
+                hub: "ws://127.0.0.1:1".into(),
+                account: "a-1".into(),
+                me: "m-me".into(),
+                chain: chain.clone(),
+            };
+            let followed: Vec<String> = followed(&view, &ring).into_iter().map(|h| h.id).collect();
+            let asked: Vec<String> = super::super::controller::gaps(chain, "m-me", &keys).into_iter().map(|(h, _)| h).collect();
+            (followed, asked, chain.may_control("m-me", "m-2").is_ok())
+        };
+        let using = (vec!["m-2".to_string()], vec!["m-2".to_string()], true);
+        let stopped = (Vec::<String>::new(), Vec::<String>::new(), false);
+        assert_eq!(uses(&chain), using, "m-2 accepts this computer");
+        let pause = |op: u8, phase: PausePhase, removals: Vec<(String, Vec<String>)>| Action::RenewalPause {
+            op: [op; 16],
+            phase,
+            removals,
+        };
+        push(&mut chain, pause(1, PausePhase::Start, vec![("m-2".into(), vec!["m-me".into()])]));
+        assert_eq!(uses(&chain), stopped, "paused: not followed, no keys asked for, no control");
+        assert_eq!(chain.base_accept("m-2"), Accept::Devices(vec!["m-me".into()]), "the base stands");
+        push(&mut chain, pause(1, PausePhase::Completed, Vec::new()));
+        assert_eq!(uses(&chain), using, "the pause ended: in use again");
+        push(&mut chain, pause(2, PausePhase::Start, vec![("m-2".into(), vec!["m-me".into()])]));
+        assert_eq!(uses(&chain), stopped);
+        push(&mut chain, pause(2, PausePhase::Cancelled, Vec::new()));
+        assert_eq!(uses(&chain), using, "cancelled: in use again");
+    }
+
+    /// The key a host joined with, from its own verified chain (`keys_at`
+    /// the entry that added it), whatever it renewed to since.
+    #[test]
+    fn a_followed_host_carries_the_key_it_joined_with() {
+        use rh_proto::chain::{Action, ChainClock, ChainState, DeviceV3, Flags, HostRotation, KeyCommit, KeyCommits, Signer};
+        let ak = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+        let admin = MachineIdentity::from_seed(&[2; 32]);
+        let genesis = rh_proto::chain::genesis3_draft(
+            "a-1",
+            ak.verifying_key().to_bytes(),
+            DeviceV3 {
+                id: "d-a".into(),
+                sign_key: admin.sign_public(),
+                dh_key: admin.dh_public(),
+                flags: Flags { host: false, admin: true },
+            },
+            None,
+            1,
+        )
+        .sign(&ak);
+        let mut chain = ChainState::genesis(&genesis, None).unwrap();
+        let push = |chain: &mut ChainState, action: Action| {
+            let e = chain.draft(Signer::Device("d-a".into()), action, 100 + chain.seq()).sign(admin.signing_key());
+            chain.apply(&e, &mut ChainClock::history()).unwrap();
+        };
+        let host_epoch = |host: &str, e: u32| {
+            Action::KeyEpochs(KeyCommits {
+                user: None,
+                machines: vec![(host.into(), KeyCommit { epoch: e, hash: [e as u8; 32] })],
+            })
+        };
+        let epoch = |e: u32| host_epoch("m-2", e);
+        // This computer (m-me), a host too, and m-2, the one it follows.
+        let me = MachineIdentity::from_seed(&[19; 32]);
+        push(
+            &mut chain,
+            Action::AddDevice3(DeviceV3 {
+                id: "m-me".into(),
+                sign_key: me.sign_public(),
+                dh_key: me.dh_public(),
+                flags: Flags { host: true, admin: false },
+            }),
+        );
+        push(&mut chain, host_epoch("m-me", 0));
+        let joined = MachineIdentity::from_seed(&[20; 32]);
+        push(
+            &mut chain,
+            Action::AddDevice3(DeviceV3 {
+                id: "m-2".into(),
+                sign_key: joined.sign_public(),
+                dh_key: joined.dh_public(),
+                flags: Flags { host: true, admin: false },
+            }),
+        );
+        push(&mut chain, epoch(0));
+        let renew = |chain: &mut ChainState, from: &MachineIdentity, to: &MachineIdentity, e: u32| {
+            let mut r = HostRotation {
+                host: "m-2".into(),
+                sign_key: to.sign_public(),
+                dh_key: to.dh_public(),
+                staged_seq: chain.seq(),
+                staged_head: chain.head(),
+                nonce: [e as u8; 16],
+                assurance: rh_proto::chain::Assurance::Auto,
+                old_sig: [0; 64],
+                new_sig: [0; 64],
+            };
+            let body = r.body("a-1", &from.sign_public(), &from.dh_public());
+            r.old_sig = rh_proto::sig::sign(from.signing_key(), rh_proto::sig::HOST_ROTATE, &body);
+            r.new_sig = rh_proto::sig::sign(to.signing_key(), rh_proto::sig::HOST_ROTATE, &body);
+            push(chain, Action::RotateHostKey(r));
+            push(chain, epoch(e));
+        };
+        let (second, third) = (MachineIdentity::from_seed(&[21; 32]), MachineIdentity::from_seed(&[22; 32]));
+        renew(&mut chain, &joined, &second, 1);
+        renew(&mut chain, &second, &third, 2);
+        push(
+            &mut chain,
+            Action::SetAccept {
+                host: "m-2".into(),
+                from: rh_proto::chain::Accept::Devices(vec!["m-me".into()]),
+            },
+        );
+        let view = View {
+            hub: "ws://127.0.0.1:1".into(),
+            account: "a-1".into(),
+            me: "m-me".into(),
+            chain,
+        };
+        let ring = KeyRing {
+            account: "a-1".into(),
+            device: "m-me".into(),
+            hosts: BTreeMap::from([("m-2".to_string(), Keys(vec![(0, [8; 32])]))]),
+        };
+        let hosts = followed(&view, &ring);
+        assert_eq!(hosts.len(), 1, "{hosts:?}");
+        assert_eq!(hosts[0].machine_key, third.sign_public());
+        assert_eq!(hosts[0].retired, vec![joined.sign_public(), second.sign_public()]);
+        assert_eq!(hosts[0].first_key, joined.sign_public());
+        assert_eq!(resume_key(&hosts[0], None), joined.sign_public());
+    }
+
+    /// Codex review M3: a host renewed its identity key — its stream tasks
+    /// are cancelled and the same wants followed again under the new key.
+    /// What an old task had queued (a copy, a heartbeat, a failure) is not
+    /// taken for the new task's: not stored, not labelled with the new key,
+    /// no failure counted against the new task. The new task's is taken,
+    /// labelled with the key it verified under.
+    #[tokio::test]
+    async fn updates_queued_by_a_task_of_a_key_its_host_renewed_away_from_are_not_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::for_instance(dir.path().to_path_buf(), "rekeytest");
+        let (mut c, mut live) = live(&paths, &["m-2"]);
+        let (old, new) = ([7; 32], [9; 32]);
+        let w = want("m-2", "s");
+        // Renewed: the same want followed again, under the new key.
+        live.hosts[0].machine_key = new;
+        live.hosts[0].retired = vec![old];
+        live.subs.insert(
+            w.stream,
+            Sub {
+                want: w.clone(),
+                stop: CancellationToken::new(),
+            },
+        );
+        let machine = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let head = rh_proto::record::StreamHead {
+            stream: w.stream,
+            next_seq: 3,
+            epoch: 0,
+            link: [5; 32],
+            time_ms: 1_700_000_000_000,
+        }
+        .sign(&machine);
+        // The old task's: none taken.
+        live.on_update_from(&mut c, Some(old), state(&w, "OLD")).ok().unwrap();
+        live.on_update_from(
+            &mut c,
+            Some(old),
+            Update::Fresh {
+                want: w.clone(),
+                head: head.clone(),
+                at_ms: Some(1),
+            },
+        )
+        .ok()
+        .unwrap();
+        live.on_update_from(
+            &mut c,
+            Some(old),
+            Update::Failed {
+                want: w.clone(),
+                error: "a head the new key signed".into(),
+                unauthorized: false,
+            },
+        )
+        .ok()
+        .unwrap();
+        assert!(live.pending.is_empty() && live.touches.is_empty(), "nothing of the old task's kept");
+        assert!(live.subs.contains_key(&w.stream), "the new task carries on");
+        assert!(c.failures.is_empty(), "no failure counted against it");
+        // The new task's: taken, labelled with the key it verified under.
+        live.on_update_from(&mut c, Some(new), state(&w, "NEW")).ok().unwrap();
+        let row = live.pending.values().next().expect("kept");
+        assert_eq!(row.head_key, Some(new));
+        assert!(row.state.as_deref().is_some_and(|s| s.contains("NEW")));
     }
 
     fn want(host: &str, name: &str) -> Want {
@@ -1780,6 +2321,7 @@ mod tests {
                 head: None,
                 state: Some("{}".into()),
                 too_large: false,
+                head_key: None,
                 updated_ms: 1,
             },
         );
@@ -1933,6 +2475,7 @@ mod tests {
                 head: Some(head(index_stream, 12, 1_700_000_000_000)),
                 state: Some(serde_json::to_string(&index).unwrap()),
                 too_large: false,
+                head_key: None,
                 updated_ms: 1,
             })
             .unwrap();
