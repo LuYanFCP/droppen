@@ -37,6 +37,12 @@
   --color-danger: #d42a1f;
   /* Text on a signal fill (the amber "asking you" chip): ink in both themes. */
   --color-on-signal: #0a0a0a;
+  /* The security page's formulas (security/formula.tsx): a token's kind,
+     always with a weight or an underline style beside the hue. Checked for
+     colour-vision deficiency and for text contrast, in both themes. */
+  --color-key-secret: #c2410c;
+  --color-key-derived: #9333ea;
+  --color-key-public: #047857;
   /* Unread is ink — a solid square, the second loudest thing after asking —
      so a count never reads as working (ok) or asking (warn). */
   --color-unread: #0a0a0a;
@@ -95,6 +101,9 @@
   --color-warn-fg: #f5b031;
   --color-danger: #ff5c50;
   --color-unread: #f5f5f5;
+  --color-key-secret: #fb923c;
+  --color-key-derived: #c084fc;
+  --color-key-public: #34d399;
   --color-claude: #a3a3a3;
   --color-codex: #a3a3a3;
 }
@@ -337,9 +346,12 @@ a {
 /* A long press on chrome must not raise iOS's callout sheet or start a text
    selection — both read as "the user grabbed a web page". Scoped to controls
    and the nav on purpose: transcripts, messages, code and inputs are content
-   and MUST stay selectable, so this may never be widened to a container. */
+   and MUST stay selectable, so this may never be widened to a container.
+   The security page's formula parts and named terms (`[data-occ]`) are words
+   of the text that also open a card: they stay selectable, so a formula or a
+   paragraph copies whole. */
 button,
-[role="button"],
+[role="button"]:not([data-occ]),
 nav a {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
