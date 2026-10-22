@@ -41,13 +41,14 @@ import {
   type Draft,
   type Entry,
 } from "../src/lib/e2e/index.js";
-import { AccountError, type AccountLocks, type AccountStorage, CloudAccount, SEEN_RECHECK_MS } from "../src/lib/hub/account.js";
+import { AccountError, type AccountLocks, type AccountStorage, CloudAccount } from "../src/lib/hub/account.js";
 import { hubErrorKind, MAIL_USER_KEY } from "../src/lib/hub/api.js";
 import { checkAgentKey, flushPendingReencrypts, notePendingReencrypt, pendingReencrypts } from "../src/lib/hub/deliver.js";
 import { keyName, wrapMachineKey } from "../src/lib/hub/keyring.js";
 import { candidateFromOffer, completePairing, PairingResponder } from "../src/lib/hub/pairing.js";
 import { recoverySecret } from "../src/lib/hub/recovery-words.js";
-import { browserStorage, createV2Genesis, FakeCourier, FakeKeysHub, HUB_ORIGIN, RecordingKeyStore } from "./fake-keys-hub.js";
+import { localStorageSeenStore, type MemorySeenStore, type SeenStore, SeenStoreError } from "../src/lib/hub/seen-store.js";
+import { browserSeen, browserStorage, createV2Genesis, FakeCourier, FakeKeysHub, HUB_ORIGIN, RecordingKeyStore } from "./fake-keys-hub.js";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -235,6 +236,7 @@ test("H2: recovery against a hub-made chain is refused, and nothing is pinned", 
     if (z) await assert.rejects(z.recover(words.join(" ")), expected, what);
     assert.equal(z?.pinned ?? false, false, what);
     assert.ok(![...browserStorage(store).values.keys()].some((k) => k.startsWith("rh.hub.genesis.")), `${what}: no genesis pinned`);
+    assert.ok(![...browserSeen(store).values.values()].some((v) => typeof (v as { genesis?: unknown }).genesis === "string"), `${what}: no genesis pinned in the store`);
     assert.equal(await store.get(`uk-epochs/${evil.account}`), undefined, `${what}: no key adopted`);
   }
 });
@@ -396,14 +398,49 @@ test("E2E review: first sightings from every page are merged, the earliest of ea
 
 // ---- review of #172 ----------------------------------------------------
 
-/** `account`'s browser opened again on `storage` (another page's copy of its `localStorage`), with `locks`. */
-function openPage(hub: FakeKeysHub, account: CloudAccount, storage: AccountStorage, locks: AccountLocks | null = null): Promise<CloudAccount> {
-  return CloudAccount.open(hub.api(), { ...account.session }, account.store, { origin: HUB_ORIGIN, storage, locks });
+/**
+ * `account`'s browser opened again on `storage` (another page's copy of its
+ * `localStorage`), with `locks` — and the browser's seen records (its
+ * IndexedDB, which every page reads as it is), or `seen`.
+ */
+function openPage(hub: FakeKeysHub, account: CloudAccount, storage: AccountStorage, locks: AccountLocks | null = null, seen: SeenStore = browserSeen(account.store)): Promise<CloudAccount> {
+  return CloudAccount.open(hub.api(), { ...account.session }, account.store, { origin: HUB_ORIGIN, storage, locks, seen });
 }
 
+type StoredSeen = { v: 1; seenThrough: number; head: string; heads?: [number, string][]; firstSeen: [number, number][] };
+
 /** The browser's seen record for the account, as stored. */
-function seenRecord(storage: AccountStorage, account: string): { seenThrough: number; head: string; heads?: [number, string][]; firstSeen: [number, number][] } {
-  return JSON.parse(storage.getItem(`rh.hub.seen.${account}`)!);
+function seenRecord(seen: MemorySeenStore, account: string): StoredSeen {
+  return structuredClone((seen.values.get(account) as { seen: StoredSeen }).seen);
+}
+
+/** The genesis the browser pinned for the account, as stored. */
+function storedGenesis(seen: MemorySeenStore, account: string): string | null {
+  return (seen.values.get(account) as { genesis?: string } | undefined)?.genesis ?? null;
+}
+
+/** Put `record` in the browser's store as the account's seen record (its pin as it is) — what no page writes, for the tests. */
+function setSeenRecord(seen: MemorySeenStore, account: string, record: StoredSeen): void {
+  seen.values.set(account, { v: 1, genesis: storedGenesis(seen, account), seen: record });
+}
+
+/** Let what is under way run (the store's turns, the pages' answers). */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+}
+
+/** A gate for `MemorySeenStore.gate`: holds the next update back until `release`; `reached` once it is held. */
+function holdNextUpdate(seen: MemorySeenStore) {
+  let reach!: () => void;
+  const reached = new Promise<void>((r) => (reach = r));
+  let release!: () => void;
+  const released = new Promise<void>((r) => (release = r));
+  seen.gate = async () => {
+    seen.gate = null;
+    reach();
+    await released;
+  };
+  return { reached, release };
 }
 
 /** Two equal-height views: a's entry at the next seq, then the hub forgetting it and taking b's there instead. */
@@ -457,26 +494,27 @@ test("review of #172: a page behind what this browser verified vouches for nothi
   assert.equal(caughtUp.chain!.deviceRecord(b.deviceId)?.status.type, "removed");
 });
 
-test("review of #172: a page whose write raced another's from a stale copy of localStorage puts the higher record back", async (t) => {
+/** `backing` (a browser's localStorage) as one page's own copy of it, brought into step only by `settle` (as browsers do, after the fact). */
+function pageStorage(backing: Map<string, string>) {
+  const copy = new Map(backing);
+  return {
+    getItem: (k: string) => copy.get(k) ?? null,
+    setItem: (k: string, v: string) => void (copy.set(k, v), backing.set(k, v)),
+    removeItem: (k: string) => void (copy.delete(k), backing.delete(k)),
+    settle: () => {
+      copy.clear();
+      for (const [k, v] of backing) copy.set(k, v);
+    },
+  };
+}
+
+test("review of #172, #183: a page on a stale copy of localStorage no longer lowers the record — it holds its view against the record as stored", async () => {
   const { hub, a } = await setup();
   await a.sync();
   const backing = browserStorage(a.store).values;
-  /** A page's own copy of the browser's localStorage, brought into step only by `settle` (as browsers do, after the fact). */
-  const pageStorage = () => {
-    const copy = new Map(backing);
-    return {
-      getItem: (k: string) => copy.get(k) ?? null,
-      setItem: (k: string, v: string) => void (copy.set(k, v), backing.set(k, v)),
-      removeItem: (k: string) => void (copy.delete(k), backing.delete(k)),
-      settle: () => {
-        copy.clear();
-        for (const [k, v] of backing) copy.set(k, v);
-      },
-    };
-  };
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const pageA = pageStorage();
-  const pageB = pageStorage();
+  const seen = browserSeen(a.store);
+  const pageA = pageStorage(backing);
+  const pageB = pageStorage(backing);
   const tabA = await openPage(hub, a, pageA);
   const tabB = await openPage(hub, a, pageB);
   pageA.settle();
@@ -485,28 +523,23 @@ test("review of #172: a page whose write raced another's from a stale copy of lo
   await tabB.append({ type: "setRecoveryKey", key: null });
   await tabB.append({ type: "setRecoveryKey", key: null });
   const full = hub.chain.slice();
-  assert.equal(seenRecord(pageB, a.account).seenThrough, seq + 2);
-  // Page A, on its stale copy (it still says `seq`), takes only the next entry and writes over B's record.
+  assert.equal(seenRecord(seen, a.account).seenThrough, seq + 2);
+  // Page A, on its stale copy, takes only the next entry: what it writes is
+  // made of the record as stored, B's, in the same step.
   hub.chain = full.slice(0, seq + 2);
   await tabA.sync();
-  pageA.settle();
-  pageB.settle();
-  assert.equal(seenRecord(pageA, a.account).seenThrough, seq + 1, "lowered by the race");
-  // A moment later page B reads it again and puts its own back.
-  t.mock.timers.tick(SEEN_RECHECK_MS);
-  for (let i = 0; i < 5; i++) await Promise.resolve();
-  pageA.settle();
-  assert.equal(seenRecord(pageA, a.account).seenThrough, seq + 2, "put back");
-  t.mock.timers.reset();
+  assert.equal(tabA.chain!.seq, seq + 1);
+  assert.equal(seenRecord(seen, a.account).seenThrough, seq + 2, "not lowered, with no page having to put it back");
   // So a later load of the browser, served the chain without B's entries, is a fork.
-  await assert.rejects(openPage(hub, a, pageStorage()), isFork);
+  await assert.rejects(openPage(hub, a, pageStorage(backing)), isFork);
   hub.chain = full;
 });
 
-test("review of #172: the seen record is read, compared and written under one Web Lock per account", async () => {
+test("review of #172: the pin is read, compared and written under one Web Lock per account, and the seen record with it", async () => {
   const { hub, a } = await setup();
   await a.sync();
   const storage = browserStorage(a.store);
+  const seen = browserSeen(a.store);
   const asked: string[] = [];
   let release!: () => void;
   const released = new Promise<void>((r) => (release = r));
@@ -532,30 +565,32 @@ test("review of #172: the seen record is read, compared and written under one We
   assert.deepEqual(asked, [`rh.hub.seen.${a.account} exclusive`], "the page asks for the account's lock");
   // While it waits, another page records more.
   await a.append({ type: "setRecoveryKey", key: null });
-  assert.equal(seenRecord(storage, a.account).seenThrough, seq + 1);
+  assert.equal(seenRecord(seen, a.account).seenThrough, seq + 1);
   release();
   await page;
-  assert.equal(seenRecord(storage, a.account).seenThrough, seq + 1, "compared with the record as it was once the lock was its own: not lowered");
+  assert.equal(seenRecord(seen, a.account).seenThrough, seq + 1, "compared with the record as it was once the lock was its own: not lowered");
 });
 
 test("review of #172: first sightings are not merged into a record this page could not hold its view against", async () => {
   const { hub, a } = await setup();
   await a.sync();
-  const storage = browserStorage(a.store);
+  const seen = browserSeen(a.store);
   const behind = await hub.reload(a);
   await a.append({ type: "setRecoveryKey", key: null });
   await a.append({ type: "setRecoveryKey", key: null });
   const full = hub.chain.slice();
   // The record as a page from before `heads` wrote it, with no sightings.
-  const legacy = seenRecord(storage, a.account);
+  const legacy = seenRecord(seen, a.account);
   delete legacy.heads;
   legacy.firstSeen = [];
-  storage.setItem(`rh.hub.seen.${a.account}`, JSON.stringify({ v: 1, ...legacy }));
+  setSeenRecord(seen, a.account, legacy);
+  // And where older pages read it (pages of this version keep it there too).
+  browserStorage(a.store).setItem(`rh.hub.seen.${a.account}`, JSON.stringify(legacy));
   hub.chain = full.slice(0, full.length - 1);
   await behind.sync();
   hub.chain = full;
   assert.equal(behind.chain!.seq, full.length - 2, "a page behind the record");
-  assert.deepEqual(seenRecord(storage, a.account).firstSeen, [], "its sightings stay out of a record it could not check");
+  assert.deepEqual(seenRecord(seen, a.account).firstSeen, [], "its sightings stay out of a record it could not check");
 });
 
 test("review of #172: a hub serving no chain to a browser that pinned one is a fork, and no new genesis is made over the pin", async () => {
@@ -686,6 +721,7 @@ test("re-review of #172: two first set-ups at once: the genesis pinned first sta
   const tabA = await hub.device("tok");
   const tabB = await hub.reload(tabA);
   const storage = browserStorage(tabA.store);
+  const seen = browserSeen(tabA.store);
   // A's genesis is held at the hub until B has made and pinned its own; then the hub takes A's too.
   const held = holdFirst(
     hub,
@@ -699,45 +735,41 @@ test("re-review of #172: two first set-ups at once: the genesis pinned first sta
   await held.reached;
   await tabB.createGenesis(false);
   const pin = storage.getItem(`rh.hub.genesis.${tabB.account}`);
-  const record = storage.getItem(`rh.hub.seen.${tabB.account}`);
+  const record = seenRecord(seen, tabB.account);
   assert.ok(pin && record);
   held.release();
   await assert.rejects(settingUp, isFork);
   assert.equal(storage.getItem(`rh.hub.genesis.${tabB.account}`), pin, "B's pin stands");
-  assert.equal(storage.getItem(`rh.hub.seen.${tabB.account}`), record, "and B's record");
+  assert.deepEqual(seenRecord(seen, tabB.account), record, "and B's record");
 });
 
-test("re-review of #172: an open page puts a lowered record back when another page writes it, when it comes back into view, and as it starts watching", async () => {
+test("re-review of #172, #183: an open page puts a lowered record back when another page writes it (the store says so), when it comes back into view, and as it starts watching", async () => {
   const { hub, a } = await setup();
   await a.sync();
   await a.append({ type: "setRecoveryKey", key: null });
-  const storage = browserStorage(a.store);
+  const seen = browserSeen(a.store);
   const page = await hub.reload(a);
   const seq = page.chain!.seq;
-  const key = `rh.hub.seen.${a.account}`;
-  const lowered = JSON.stringify({ v: 1, seenThrough: seq - 1, head: hex(page.chain!.hashAt(seq - 1)!), heads: [], firstSeen: [] });
-  const settle = async () => {
-    for (let i = 0; i < 10; i++) await Promise.resolve();
-  };
-  const windowLike = new EventTarget();
+  // Lowered as no page's write lowers it any more (code in this origin, say).
+  const lowered: StoredSeen = { v: 1, seenThrough: seq - 1, head: hex(page.chain!.hashAt(seq - 1)!), heads: [], firstSeen: [] };
   const documentLike = Object.assign(new EventTarget(), { visibilityState: "visible" });
-  storage.setItem(key, lowered);
-  page.watchSeenRecord({ storage: windowLike, visibility: documentLike });
+  setSeenRecord(seen, a.account, lowered);
+  page.watchSeenRecord({ visibility: documentLike });
   await settle();
-  assert.equal(seenRecord(storage, a.account).seenThrough, seq, "as it starts watching (a load)");
-  storage.setItem(key, lowered);
-  windowLike.dispatchEvent(Object.assign(new Event("storage"), { key }));
+  assert.equal(seenRecord(seen, a.account).seenThrough, seq, "as it starts watching (a load)");
+  // Written through the store, which tells every page (IndexedDB's writers say so on a BroadcastChannel).
+  await seen.update(a.account, (stored) => ({ ...(stored as object), seen: lowered }));
   await settle();
-  assert.equal(seenRecord(storage, a.account).seenThrough, seq, "as soon as another page wrote it");
-  storage.setItem(key, lowered);
+  assert.equal(seenRecord(seen, a.account).seenThrough, seq, "as soon as another page wrote it");
+  setSeenRecord(seen, a.account, lowered);
   documentLike.visibilityState = "hidden";
   documentLike.dispatchEvent(new Event("visibilitychange"));
   await settle();
-  assert.equal(seenRecord(storage, a.account).seenThrough, seq - 1, "not while hidden");
+  assert.equal(seenRecord(seen, a.account).seenThrough, seq - 1, "not while hidden");
   documentLike.visibilityState = "visible";
   documentLike.dispatchEvent(new Event("visibilitychange"));
   await settle();
-  assert.equal(seenRecord(storage, a.account).seenThrough, seq, "once back in view");
+  assert.equal(seenRecord(seen, a.account).seenThrough, seq, "once back in view");
 });
 
 test("re-review of #172: a page loading while other pages record twice more looks again until the chain holds the record's head", async () => {
@@ -893,14 +925,11 @@ test("the hub's caps are surfaced: mail rate, a full mailbox, and the write-once
 test("third look at #172: a handshake's copy that adds nothing is still held against the record", async () => {
   const { hub, a } = await setup();
   await a.sync();
-  const storage = browserStorage(a.store);
+  const seen = browserSeen(a.store);
   const page = await hub.reload(a);
   const seq = page.chain!.seq;
-  // The record, as a racing page may leave it: another head at this very height.
-  storage.setItem(
-    `rh.hub.seen.${a.account}`,
-    JSON.stringify({ v: 1, seenThrough: seq, head: "ff".repeat(32), heads: [[seq, "ff".repeat(32)]], firstSeen: [] }),
-  );
+  // The record as another page verified it a moment ago: another head at this very height.
+  setSeenRecord(seen, a.account, { v: 1, seenThrough: seq, head: "ff".repeat(32), heads: [[seq, "ff".repeat(32)]], firstSeen: [] });
   await assert.rejects(
     page.completeHandshake(async () => "open"),
     isFork,
@@ -1005,4 +1034,608 @@ test("third look at #172: a first load retries only a checkpoint still moving; a
   await assert.rejects(hub.reload(a), isFork);
   hub.chainServed = null;
   assert.equal(served, 1, "not fetched again");
+});
+
+// ---- #183: the seen record in IndexedDB ---------------------------------
+
+/** One page's handle on the browser's seen records, which counts (and says) the updates the page asks for. */
+function pageSeen(seen: MemorySeenStore) {
+  const page = { updates: 0, onUpdate: null as null | (() => void), store: null as unknown as SeenStore };
+  page.store = {
+    get atomic() {
+      return seen.atomic;
+    },
+    get: (account) => seen.get(account),
+    update: (account, change) => {
+      page.updates++;
+      page.onUpdate?.();
+      return seen.update(account, change);
+    },
+    watch: (heard) => seen.watch(heard),
+  };
+  return page;
+}
+
+/** Wait (a few ms at a time) until `done`, or fail. */
+async function until(done: () => boolean, what: string): Promise<void> {
+  for (let i = 0; i < 200 && !done(); i++) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(done(), what);
+}
+
+test("#183: two pages writing the seen record at once never leave it lower, whichever goes first", async () => {
+  for (const higherFirst of [true, false]) {
+    const { hub, a, b } = await setup();
+    await a.sync();
+    const seen = browserSeen(a.store);
+    const backing = browserStorage(a.store).values;
+    const lowSeen = pageSeen(seen);
+    const highSeen = pageSeen(seen);
+    // Two pages of a's browser, each on its own copy of localStorage.
+    const low = await openPage(hub, a, pageStorage(backing), null, lowSeen.store);
+    const high = await openPage(hub, a, pageStorage(backing), null, highSeen.store);
+    const seq = low.chain!.seq;
+    // Another browser adds two entries: one page is served the first, the other both.
+    await b.append({ type: "setRecoveryKey", key: null });
+    await b.append({ type: "setRecoveryKey", key: null });
+    const full = hub.chain.slice();
+    const [first, second] = higherFirst ? [high, low] : [low, high];
+    const served = (page: CloudAccount) => (page === low ? full.slice(0, seq + 2) : full);
+    // The first page's write is held in the store until the second's is asked for (behind it, as IndexedDB queues it).
+    const held = holdNextUpdate(seen);
+    hub.chainServed = async () => served(first);
+    const one = first.sync();
+    await held.reached;
+    const asked = new Promise<void>((r) => ((first === low ? highSeen : lowSeen).onUpdate = r));
+    hub.chainServed = async () => served(second);
+    const two = second.sync();
+    await asked;
+    held.release();
+    await Promise.all([one, two]);
+    hub.chainServed = null;
+    assert.equal(low.chain!.seq, seq + 1);
+    assert.equal(high.chain!.seq, seq + 2);
+    assert.equal(seenRecord(seen, a.account).seenThrough, seq + 2, `${higherFirst ? "the higher" : "the lower"} first: the record keeps the higher`);
+  }
+});
+
+test("#183: an older page's record in localStorage counts where it is proven one chain with the store's and goes past it, never lower, is a fork where it disagrees, and is left there", async () => {
+  const { hub, a } = await setup();
+  await a.sync();
+  const storage = browserStorage(a.store);
+  const seen = browserSeen(a.store);
+  const key = `rh.hub.seen.${a.account}`;
+  const before = seenRecord(seen, a.account);
+  await a.append({ type: "setRecoveryKey", key: null });
+  await a.append({ type: "setRecoveryKey", key: null });
+  const after = seenRecord(seen, a.account);
+  assert.equal(after.seenThrough, before.seenThrough + 2);
+  assert.deepEqual(JSON.parse(storage.getItem(key)!), after, "the record, for older pages");
+  assert.equal(storage.getItem(`rh.hub.genesis.${a.account}`), storedGenesis(seen, a.account), "and the pin");
+  // Higher, and proven one chain with the store's: an older page verified two entries more (what it wrote is the same JSON).
+  setSeenRecord(seen, a.account, before);
+  storage.setItem(key, JSON.stringify(after));
+  const full = hub.chain.slice();
+  hub.chain = full.slice(0, before.seenThrough + 1);
+  await assert.rejects(hub.reload(a), isFork, "a load served less than the older page verified is a fork");
+  hub.chain = full;
+  await hub.reload(a);
+  assert.equal(seenRecord(seen, a.account).seenThrough, after.seenThrough, "the store takes the older page's higher record");
+  assert.equal(storage.getItem(key), JSON.stringify(after), "and leaves it where it is: an older page may still be writing there");
+  // Lower: an older page on a stale view writes what it saw.
+  storage.setItem(key, JSON.stringify(before));
+  await hub.reload(a);
+  assert.equal(seenRecord(seen, a.account).seenThrough, after.seenThrough, "never lowered by it");
+  // Disagreeing: another head at the store's height.
+  storage.setItem(key, JSON.stringify({ ...after, head: "ff".repeat(32), heads: [[after.seenThrough, "ff".repeat(32)]] }));
+  await assert.rejects(hub.reload(a), isFork);
+  assert.equal(seenRecord(seen, a.account).head, after.head, "the store's record stays as it was");
+});
+
+test("#183 review: an older page's higher record that does not show it holds the store's checkpoint is not taken for it — both are held, and a chain missing either is a fork", async () => {
+  const { hub, a, b } = await setup();
+  await a.sync();
+  await b.sync();
+  const seen = browserSeen(a.store);
+  const storage = browserStorage(a.store);
+  const chain0 = hub.chain.slice();
+  const state0 = hub.state!.clone();
+  const s = chain0.length - 1;
+  // a's browser verifies A at s+1.
+  await a.append({ type: "setRecoveryKey", key: null });
+  const mine = hub.chain.slice();
+  const ours = hex(a.chain!.hashAt(s + 1)!);
+  assert.equal(seenRecord(seen, a.account).head, ours);
+  // The hub forgets it and takes another history, B, three entries from
+  // there — which an older page of a's browser verified, keeping only its
+  // last two hashes (none at s+1).
+  hub.chain = chain0;
+  hub.state = state0;
+  for (let i = 0; i < 3; i++) await b.append({ type: "setRecoveryKey", key: null });
+  const theirs = hub.chain.slice();
+  const forked = b.chain!;
+  const older: StoredSeen = {
+    v: 1,
+    seenThrough: s + 3,
+    head: hex(forked.hashAt(s + 3)!),
+    heads: [
+      [s + 2, hex(forked.hashAt(s + 2)!)],
+      [s + 3, hex(forked.hashAt(s + 3)!)],
+    ],
+    firstSeen: [],
+  };
+  storage.setItem(`rh.hub.seen.${a.account}`, JSON.stringify(older));
+  // Served B, which holds the older page's checkpoint and not the store's: a fork, and the store keeps A.
+  hub.chain = theirs;
+  await assert.rejects(hub.reload(a), isFork);
+  assert.equal(seenRecord(seen, a.account).head, ours, "the store's checkpoint stays");
+  // Served A, which holds the store's checkpoint and not the older page's: never proven, so a fork too.
+  hub.chain = mine;
+  await assert.rejects(hub.reload(a), isFork);
+  assert.equal(seenRecord(seen, a.account).head, ours);
+});
+
+test("#183 review: an older page's newer record, written after this page's copy of localStorage was taken, is not deleted", async () => {
+  const { hub, a } = await setup();
+  await a.sync();
+  const seen = browserSeen(a.store);
+  const backing = browserStorage(a.store).values;
+  const key = `rh.hub.seen.${a.account}`;
+  const r0 = seenRecord(seen, a.account);
+  await a.append({ type: "setRecoveryKey", key: null });
+  const r1 = seenRecord(seen, a.account);
+  await a.append({ type: "setRecoveryKey", key: null });
+  const r2 = seenRecord(seen, a.account);
+  // The store holds r0; an older page wrote r1, and this page's copy of localStorage is taken now.
+  setSeenRecord(seen, a.account, r0);
+  backing.set(key, JSON.stringify(r1));
+  const copy = pageStorage(backing);
+  // Then the older page writes r2, which this page's copy does not show.
+  backing.set(key, JSON.stringify(r2));
+  // This page is served the chain as far as r1.
+  const full = hub.chain.slice();
+  hub.chain = full.slice(0, r1.seenThrough + 1);
+  await openPage(hub, a, copy);
+  assert.equal(seenRecord(seen, a.account).seenThrough, r1.seenThrough, "the page took what its copy showed");
+  assert.equal(backing.get(key), JSON.stringify(r2), "and did not delete the newer record it never read");
+  // Which still counts: a load served no more than that is behind what the older page verified.
+  await assert.rejects(hub.reload(a), isFork);
+  hub.chain = full;
+  await hub.reload(a);
+  assert.equal(seenRecord(seen, a.account).seenThrough, r2.seenThrough);
+});
+
+test("#183 review: the pin is decided in the store — a page whose copy of localStorage shows no pin cannot pin another genesis over another page's", async () => {
+  const hub = new FakeKeysHub();
+  const first = await hub.device("tok");
+  const seen = browserSeen(first.store);
+  const backing = browserStorage(first.store).values;
+  // Two pages on the set-up screen, each on its own copy of localStorage.
+  const tabA = await openPage(hub, first, pageStorage(backing));
+  const tabB = await openPage(hub, first, pageStorage(backing));
+  // A's genesis is held at the hub until B has made and pinned its own; then the hub takes A's too.
+  const held = holdFirst(
+    hub,
+    (r) => r === "POST /v1/chain",
+    () => {
+      hub.chain = [];
+      hub.state = null;
+    },
+  );
+  const settingUp = tabA.createGenesis(false);
+  await held.reached;
+  await tabB.createGenesis(false);
+  const pin = storedGenesis(seen, tabB.account);
+  const record = seenRecord(seen, tabB.account);
+  assert.ok(pin && record);
+  held.release();
+  await assert.rejects(settingUp, isFork, "A's page, whose copy shows no pin, is told of B's");
+  assert.equal(storedGenesis(seen, tabB.account), pin, "B's pin stands");
+  assert.deepEqual(seenRecord(seen, tabB.account), record, "with B's record");
+});
+
+test("#183 review: a pin only older pages kept (localStorage) is taken into the store; another one beside the store's is a fork", async () => {
+  const { hub, a } = await setup();
+  await a.sync();
+  const seen = browserSeen(a.store);
+  const storage = browserStorage(a.store);
+  const genesis = storedGenesis(seen, a.account)!;
+  // As a browser that only ever ran older pages: nothing in the store.
+  seen.values.delete(a.account);
+  const page = await hub.reload(a);
+  assert.equal(page.pinned, true, "the older pages' pin is this browser's");
+  assert.equal(storedGenesis(seen, a.account), genesis, "and the store holds it now");
+  storage.setItem(`rh.hub.genesis.${a.account}`, "ff".repeat(32));
+  await assert.rejects(hub.reload(a), isFork);
+});
+
+test("#183 review: a view whose record could not be written is not installed, and is tried again", async () => {
+  const { hub, a, b } = await setup();
+  await a.sync();
+  const seen = browserSeen(a.store);
+  let failing = false;
+  const flaky: SeenStore = {
+    get atomic() {
+      return seen.atomic;
+    },
+    get: (account) => seen.get(account),
+    // The commit fails after the compare (a full disk, say).
+    update: (account, change) =>
+      seen.update(account, (stored) => {
+        const next = change(stored);
+        if (failing && next !== undefined) throw new DOMException("the disk is full", "QuotaExceededError");
+        return next;
+      }),
+    watch: (heard) => seen.watch(heard),
+  };
+  const page = await openPage(hub, a, browserStorage(a.store), null, flaky);
+  const seq = page.chain!.seq;
+  await b.append({ type: "setRecoveryKey", key: null });
+  failing = true;
+  await assert.rejects(page.sync(), (e: unknown) => e instanceof SeenStoreError);
+  assert.equal(page.chain!.seq, seq, "not installed");
+  assert.equal(page.forked, null, "and no fork");
+  failing = false;
+  await page.sync();
+  assert.equal(page.chain!.seq, seq + 1, "taken once the store takes its record");
+  assert.equal(seenRecord(seen, a.account).seenThrough, seq + 1);
+});
+
+test("#183 review: a store that fails on the set-up screen is tried again, not taken for another chain", async () => {
+  const hub = new FakeKeysHub();
+  const tabA = await hub.device("tok");
+  const seen = browserSeen(tabA.store);
+  let failNext = false;
+  const flaky: SeenStore = {
+    get atomic() {
+      return seen.atomic;
+    },
+    get: (account) => {
+      if (!failNext) return seen.get(account);
+      failNext = false;
+      return Promise.reject(new DOMException("Connection to Indexed Database server lost. Refresh the page to try again", "UnknownError"));
+    },
+    update: (account, change) => seen.update(account, change),
+    watch: (heard) => seen.watch(heard),
+  };
+  const tabB = await openPage(hub, tabA, browserStorage(tabA.store), null, flaky);
+  await tabA.createGenesis(false);
+  failNext = true;
+  await assert.rejects(tabB.createGenesis(false), (e: unknown) => e instanceof SeenStoreError);
+  assert.equal(tabB.forked, null, "no alarm");
+  await assert.rejects(tabB.createGenesis(false), (e: unknown) => e instanceof AccountError && e.kind === "setUpElsewhere");
+  assert.equal(tabB.forked, null);
+});
+
+test("#183: a page pinning on a stale copy of localStorage (no pin in it yet) keeps another page's record of the same chain", async () => {
+  const { hub, a } = await setup();
+  await a.sync();
+  const backing = browserStorage(a.store).values;
+  const seen = browserSeen(a.store);
+  // A page whose copy of localStorage does not show the pin yet.
+  const copy = pageStorage(backing);
+  copy.removeItem(`rh.hub.genesis.${a.account}`);
+  backing.set(`rh.hub.genesis.${a.account}`, hex(a.chain!.hashAt(0)!));
+  const stale = await openPage(hub, a, copy);
+  const seq = stale.chain!.seq;
+  // Another page goes on; then the stale page pins (as a pairing's delivery does).
+  await a.append({ type: "setRecoveryKey", key: null });
+  await a.append({ type: "setRecoveryKey", key: null });
+  await stale.storeUserKeys([]);
+  assert.equal(stale.chain!.seq, seq);
+  assert.equal(seenRecord(seen, a.account).seenThrough, seq + 2, "not replaced by the stale page's lower view");
+});
+
+test("#183: a page hears another page's write of the record through the store, and holds it against its own view", async () => {
+  const { hub, a } = await setup();
+  await a.sync();
+  const listening = pageSeen(browserSeen(a.store));
+  const page = await openPage(hub, a, browserStorage(a.store), null, listening.store);
+  page.watchSeenRecord({});
+  await settle();
+  const looked = listening.updates;
+  await a.append({ type: "setRecoveryKey", key: null });
+  await until(() => listening.updates > looked, "it looked at the record again");
+  page.stopSession();
+  const stopped = listening.updates;
+  await a.append({ type: "setRecoveryKey", key: null });
+  await settle();
+  assert.equal(listening.updates, stopped, "and no more once it stopped watching");
+});
+
+test("#183: where IndexedDB is not to be had, the record stays in localStorage, as before", async () => {
+  const hub = new FakeKeysHub();
+  const store = new MemoryKeyStore();
+  const storage = browserStorage(store);
+  const seen = localStorageSeenStore(storage, null);
+  const login = await hub.api().login("someone@example.test", "a password");
+  const a = await CloudAccount.open(hub.api(), login, store, { origin: HUB_ORIGIN, storage, seen });
+  await a.createGenesis(false);
+  await a.append({ type: "setRecoveryKey", key: null });
+  assert.equal((JSON.parse(storage.getItem(`rh.hub.seen.${a.account}`)!) as StoredSeen).seenThrough, a.chain!.seq);
+  const full = hub.chain.slice();
+  hub.chain = full.slice(0, -1);
+  await assert.rejects(CloudAccount.open(hub.api(), { ...a.session }, store, { origin: HUB_ORIGIN, storage, seen }), isFork, "and it is held against as before");
+  hub.chain = full;
+});
+
+// ---- #183 re-review: a pin another page made ------------------------------
+
+/** `seen` as a page that hears nothing of other pages' writes has it (a message lost; an older page writing only localStorage). */
+function deafSeen(seen: MemorySeenStore): SeenStore {
+  return {
+    get atomic() {
+      return seen.atomic;
+    },
+    get: (account) => seen.get(account),
+    update: (account, change) => seen.update(account, change),
+    watch: () => () => undefined,
+  };
+}
+
+/**
+ * A new device's browser with two pages on the pairing screen: the device is
+ * paired through `first`, and `second` takes in the chain that names the
+ * device just before `first` pins the account (as it takes the keys) — so
+ * `second` last read the store before there was a pin in it. `second` opens
+ * on `seen` (the browser's store as it is, by default), and `opened` runs as
+ * it has opened (its watch, say).
+ */
+async function pairTwoPages(
+  hub: FakeKeysHub,
+  a: CloudAccount,
+  opts: { seen?: (backing: MemorySeenStore) => SeenStore; opened?: (second: CloudAccount) => void } = {},
+): Promise<{ first: CloudAccount; second: CloudAccount }> {
+  const store = new RecordingKeyStore();
+  const first = await hub.device("tok", store);
+  const backing = browserSeen(store);
+  const second = await openPage(hub, first, browserStorage(store), null, opts.seen?.(backing) ?? backing);
+  opts.opened?.(second);
+  const r = new PairingResponder({
+    api: first.api,
+    token: first.session.token,
+    account: first.account,
+    device: first.deviceId,
+    signPublic: first.keys.signPublic,
+    noise: first.noiseKeys,
+    chain: async () => (await first.sync(), first.chain),
+    storeUserKeys: async (keys) => {
+      await second.sync();
+      return first.storeUserKeys(keys);
+    },
+    pollMs: 1,
+  });
+  try {
+    const c = await candidateFromOffer(await r.startOffer(), a.chain!);
+    await completePairing(
+      {
+        api: a.api,
+        token: a.session.token,
+        device: a.deviceId,
+        signPublic: a.keys.signPublic,
+        noise: a.noiseKeys,
+        chain: () => a.chain!,
+        append: (action) => a.append(action),
+        withUserKeys: (use) => a.withUserKeys(use),
+      },
+      c,
+    );
+    for (let i = 0; i < 10 && r.state.kind !== "paired"; i++) await r.tick();
+  } finally {
+    r.stop();
+  }
+  assert.equal(r.state.kind, "paired");
+  assert.ok(first.pinned);
+  assert.equal(second.standing, "active", "the second page sees its device in the account");
+  return { first, second };
+}
+
+test("#183 re-review: a page that took the chain naming its device just before another page pinned the account still vouches for nothing behind the record", async () => {
+  const hub = new FakeKeysHub();
+  const a = await hub.device("tok");
+  await a.createGenesis(false);
+  const { first, second } = await pairTwoPages(hub, a);
+  // The account goes on; the first page verifies it, and the hub keeps the second where it was.
+  const seq = second.chain!.seq;
+  await a.append({ type: "setRecoveryKey", key: null });
+  await a.append({ type: "setRecoveryKey", key: null });
+  await first.sync();
+  const full = hub.chain.slice();
+  hub.chainServed = async () => full.slice(0, seq + 1);
+  await assert.rejects(second.attestation(), isFork, "its fresh word for the old head is what a hub keeping the newer entries from it would want");
+  assert.match(second.forked ?? "", new RegExp(`through entry ${seq}, and another page of this browser verified it through ${full.length - 1}$`));
+  hub.chainServed = null;
+});
+
+test("#183 re-review: an open page takes in a pin another page made — as the store says it was written, or as the page comes back into view — and is not sent to pair again", async (t) => {
+  for (const heard of ["store", "visibility", "unwatched"] as const) {
+    await t.test(heard, async () => {
+      const hub = new FakeKeysHub();
+      const a = await hub.device("tok");
+      await a.createGenesis(false);
+      const documentLike = Object.assign(new EventTarget(), { visibilityState: "visible" });
+      const { second } = await pairTwoPages(hub, a, {
+        seen: heard === "store" ? undefined : deafSeen,
+        opened: heard === "unwatched" ? undefined : (page) => void page.watchSeenRecord({ visibility: documentLike }),
+      });
+      await settle();
+      if (heard === "visibility") {
+        documentLike.visibilityState = "hidden";
+        documentLike.dispatchEvent(new Event("visibilitychange"));
+        documentLike.visibilityState = "visible";
+        documentLike.dispatchEvent(new Event("visibilitychange"));
+        await settle();
+      }
+      if (heard !== "unwatched") assert.ok(second.pinned, `the pin taken in (${heard})`);
+      // Asked of the store, not of what this page saw last: an honest page is not sent to pair again.
+      assert.equal(await second.lacksKeys(), false, `the keys are there (${heard})`);
+      assert.ok(second.pinned, `and the pin with them (${heard})`);
+      second.stopSession();
+    });
+  }
+});
+
+test("#183 re-review: a store that twice will not take the pin of the genesis this device just made leaves it in localStorage — the first user key is kept — and the next view takes it into the store", async (t) => {
+  t.mock.method(console, "warn", () => undefined);
+  const hub = new FakeKeysHub();
+  const store = new MemoryKeyStore();
+  const storage = browserStorage(store);
+  const seen = browserSeen(store);
+  let failing = 2;
+  const flaky: SeenStore = {
+    get atomic() {
+      return seen.atomic;
+    },
+    get: (account) => seen.get(account),
+    // Each write of a pin fails as long as `failing` lasts (the connection lost, say).
+    update: (account, change) =>
+      seen.update(account, (stored) => {
+        const next = change(stored) as { genesis?: string | null } | undefined;
+        if (next?.genesis && failing > 0) {
+          failing--;
+          throw new DOMException("Connection to Indexed Database server lost. Refresh the page to try again", "UnknownError");
+        }
+        return next;
+      }),
+    watch: (heard) => seen.watch(heard),
+  };
+  const login = await hub.api().login("someone@example.test", "a password");
+  const a = await CloudAccount.open(hub.api(), login, store, { origin: HUB_ORIGIN, storage, seen: flaky });
+  await a.createGenesis(false);
+  const genesis = hex(a.chain!.hashAt(0)!);
+  assert.equal(failing, 0, "tried twice");
+  assert.ok(a.pinned);
+  assert.equal(storage.getItem(`rh.hub.genesis.${a.account}`), genesis, "pinned where older pages keep it");
+  assert.equal(storedGenesis(seen, a.account), null, "and not in the store yet");
+  assert.equal(await a.lacksKeys(), false, "the account's first user key is kept");
+  await a.append({ type: "setRecoveryKey", key: null });
+  assert.equal(storedGenesis(seen, a.account), genesis, "the next view takes the pin into the store");
+  assert.equal(seenRecord(seen, a.account).seenThrough, a.chain!.seq, "with its record");
+  const again = await CloudAccount.open(hub.api(), { ...a.session }, store, { origin: HUB_ORIGIN, storage, seen });
+  assert.ok(again.pinned, "a reload trusts it");
+  assert.equal(again.chain!.seq, a.chain!.seq);
+});
+
+// ---- #183 third review ------------------------------------------------------
+
+test("#183 third review: what a page records is written where older pages read it too, so one of them that a hub keeps behind vouches for nothing", async () => {
+  const { hub, a } = await setup();
+  await a.sync();
+  const storage = browserStorage(a.store);
+  // A page of this browser that keeps the record in localStorage (an older version of the app; one where IndexedDB would not open).
+  const older = await openPage(hub, a, storage, null, localStorageSeenStore(storage, null));
+  const seq = older.chain!.seq;
+  await a.append({ type: "setRecoveryKey", key: null });
+  await a.append({ type: "setRecoveryKey", key: null });
+  // The hub keeps the newer entries from the older page.
+  const full = hub.chain.slice();
+  hub.chainServed = async () => full.slice(0, seq + 1);
+  await assert.rejects(older.attestation(), isFork, "not its word for the old head");
+  hub.chainServed = null;
+  assert.equal((JSON.parse(storage.getItem(`rh.hub.seen.${a.account}`)!) as StoredSeen).seenThrough, a.chain!.seq, "the record raised where older pages read it");
+});
+
+test("#183 third review: what a page records where older pages read it never lowers theirs, nor replaces one it cannot prove is the same chain", async (t) => {
+  await t.test("higher, not proven", async () => {
+    const { a } = await setup();
+    await a.sync();
+    const storage = browserStorage(a.store);
+    const key = `rh.hub.seen.${a.account}`;
+    // An older page went further than this page (no hash at this page's height to prove it the same chain): kept apart.
+    const higher: StoredSeen = { v: 1, seenThrough: a.chain!.seq + 5, head: "ee".repeat(32), heads: [], firstSeen: [] };
+    storage.setItem(key, JSON.stringify(higher));
+    a.watchSeenRecord({});
+    await settle();
+    assert.equal(a.forked, null);
+    assert.equal(storage.getItem(key), JSON.stringify(higher), "left as it is");
+  });
+  await t.test("lower, not proven", async () => {
+    const { a } = await setup();
+    await a.sync();
+    const seen = browserSeen(a.store);
+    const storage = browserStorage(a.store);
+    const key = `rh.hub.seen.${a.account}`;
+    const seq = a.chain!.seq;
+    // The store's record from before `heads`, and an older page's lower one: nothing proves them one chain, so that one is kept apart.
+    setSeenRecord(seen, a.account, { v: 1, seenThrough: seq, head: hex(a.chain!.head), firstSeen: [] });
+    const lower: StoredSeen = { v: 1, seenThrough: seq - 1, head: hex(a.chain!.hashAt(seq - 1)!), firstSeen: [] };
+    storage.setItem(key, JSON.stringify(lower));
+    a.watchSeenRecord({});
+    await settle();
+    assert.equal(a.forked, null);
+    assert.equal(storage.getItem(key), JSON.stringify(lower), "not replaced: it is a checkpoint of its own");
+  });
+});
+
+test("#183 third review: a page whose newer view could not be recorded vouches for nothing — not for the older head it still shows — until it takes that view", async () => {
+  const { hub, a, b } = await setup();
+  await a.sync();
+  const seen = browserSeen(a.store);
+  let failing = false;
+  const flaky: SeenStore = {
+    get atomic() {
+      return seen.atomic;
+    },
+    get: (account) => seen.get(account),
+    // Every commit fails after the compare (a full disk, say).
+    update: (account, change) =>
+      seen.update(account, (stored) => {
+        const next = change(stored);
+        if (failing && next !== undefined) throw new DOMException("the disk is full", "QuotaExceededError");
+        return next;
+      }),
+    watch: (heard) => seen.watch(heard),
+  };
+  const page = await openPage(hub, a, browserStorage(a.store), null, flaky);
+  const seq = page.chain!.seq;
+  await b.append({ type: "setRecoveryKey", key: null });
+  failing = true;
+  await assert.rejects(page.sync(), (e: unknown) => e instanceof SeenStoreError);
+  assert.equal(page.chain!.seq, seq, "the newer view verified, and not taken");
+  await assert.rejects(page.attestation(), (e: unknown) => e instanceof SeenStoreError, "no fresh word for the older head");
+  assert.equal(page.forked, null, "and no fork: it is tried again");
+  failing = false;
+  const vouched = await page.attestation();
+  assert.equal(vouched.seq, seq + 1, "once the store takes the record, it takes the view and vouches for that");
+});
+
+test("#183 third review: a page whose chain does not start with the genesis this browser pinned, or contradicts the record at its own head, vouches for nothing: a fork", async (t) => {
+  await t.test("another genesis pinned", async () => {
+    const { a } = await setup();
+    await a.sync();
+    // What no page of this browser writes over a pin (code in this origin, say).
+    const other = "ab".repeat(32);
+    browserSeen(a.store).values.set(a.account, { v: 1, genesis: other, seen: null });
+    browserStorage(a.store).setItem(`rh.hub.genesis.${a.account}`, other);
+    browserStorage(a.store).removeItem(`rh.hub.seen.${a.account}`);
+    await assert.rejects(a.attestation(), isFork);
+  });
+  await t.test("another head at this page's height", async () => {
+    const { a } = await setup();
+    await a.sync();
+    const seq = a.chain!.seq;
+    setSeenRecord(browserSeen(a.store), a.account, { v: 1, seenThrough: seq, head: "cd".repeat(32), heads: [], firstSeen: [] });
+    browserStorage(a.store).removeItem(`rh.hub.seen.${a.account}`);
+    await assert.rejects(a.attestation(), isFork);
+  });
+});
+
+test("#183 third review: a sync that takes in more entries than the record keeps hashes of still raises the record where older pages read it", async () => {
+  const { hub, a, b } = await setup();
+  await a.sync();
+  const storage = browserStorage(a.store);
+  const key = `rh.hub.seen.${a.account}`;
+  // A page of this browser that keeps the record in localStorage (an older version of the app).
+  const older = await openPage(hub, a, storage, null, localStorageSeenStore(storage, null));
+  const seq = older.chain!.seq;
+  assert.equal((JSON.parse(storage.getItem(key)!) as StoredSeen).seenThrough, seq);
+  // Another device goes on by more than the record keeps hashes of; this page takes it all in one view.
+  for (let i = 0; i < 300; i++) await b.append({ type: "setRecoveryKey", key: null });
+  await a.sync();
+  assert.equal(a.chain!.seq, seq + 300);
+  // The hub keeps the newer entries from the older page.
+  const full = hub.chain.slice();
+  hub.chainServed = async () => full.slice(0, seq + 1);
+  await assert.rejects(older.attestation(), isFork, "not its word for the old head");
+  hub.chainServed = null;
+  assert.equal((JSON.parse(storage.getItem(key)!) as StoredSeen).seenThrough, a.chain!.seq, "the view that holds both proved them one chain");
 });
