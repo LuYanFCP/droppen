@@ -4,13 +4,15 @@ import { useTranslation } from "react-i18next";
 import { CapsLabel } from "@/components/ui/caps-label";
 import { landingBundles } from "./copy";
 import { FooterLine, Points, PublicHeader, Section, SectionHead } from "./page-kit";
+import { onPublicLink, SECURITY_PATH } from "./route";
 import { PRIVACY_EMAIL } from "./waitlist";
 
 /*
  * droppen.app/privacy: a short, honest notice — what the waitlist keeps, why,
  * for how long and how to be taken off it, and what Droppen's servers can and
  * cannot see of an account (docs/cross-machine-architecture.md §2, the
- * landing page's security section). Signed in or not; drawn like the other
+ * landing page's security section; the security design at `/security` says
+ * how). Signed in or not; drawn like the other
  * public pages. The contact address is a placeholder for the user to confirm.
  */
 
@@ -18,7 +20,7 @@ import { PRIVACY_EMAIL } from "./waitlist";
 for (const [lng, bundle] of Object.entries(landingBundles)) i18n.addResourceBundle(lng, "translation", bundle, true, false);
 
 /** When the notice last changed, as the page says it. */
-export const PRIVACY_UPDATED = "2026-10-21";
+export const PRIVACY_UPDATED = "2026-10-22";
 
 function Block({ title, items }: { title: string; items: string[] }) {
   return (
@@ -99,8 +101,8 @@ export default function PrivacyPage({ signedIn = false }: { signedIn?: boolean }
                 items={[
                   t("Your e-mail address, and when you sign in"),
                   t("Which of your devices are online, when they connect and from which IP address"),
-                  t("What kind of device each one is and which browser, as a short name such as “iPhone · Chrome” made from its User-Agent; never the User-Agent itself"),
-                  t("How much data moves and when, in padded sizes: so roughly when you are working"),
+                  t("What kind of device each one is and which browser, as a short name such as “iPhone · Chrome” made from its User-Agent; it does not keep the User-Agent itself"),
+                  t("How much data moves and when. What we store is padded to fixed sizes; live connections are not, so while our servers carry one they see its timing, its volume and the rhythm of typing in a terminal: roughly when you are working"),
                   t("Your plan, and how much of it you use"),
                 ]}
               />
@@ -116,6 +118,11 @@ export default function PrivacyPage({ signedIn = false }: { signedIn?: boolean }
                 />
               </div>
             </div>
+            <p className="border-t border-border px-6 py-4 text-xs leading-5 max-md:px-4">
+              <a href={SECURITY_PATH} onClick={onPublicLink(SECURITY_PATH)} data-testid="privacy-security" className="text-fg underline underline-offset-4 hover:no-underline">
+                {t("How the encryption works, in detail")}
+              </a>
+            </p>
           </Section>
           <Section id="contact">
             <div className="flex flex-col gap-3 px-6 py-8 max-md:px-4">
