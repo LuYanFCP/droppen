@@ -1863,7 +1863,7 @@ fn w2_a_v2_chain_with_removals_replays_exactly_as_before() {
     assert_eq!(state.recovery_key(), None, "v2 keeps its rule: the removed device came back with words");
 }
 
-/// Recorded on 191ff56, before the v3-only rule: v2's removal of a device
+/// Recorded before the v3-only rule: v2's removal of a device
 /// that came back with the words voids the account's words, whichever.
 const V2_REMOVAL_STATE: &str = r#"{"accept":[{"from":{"kind":"admins"},"host":"m-1"}],"admins":["dev-0"],"devices":[{"activatedSeq":0,"addedSeq":0,"admin":true,"host":false,"id":"dev-0","status":"active","viaPasskey":null,"viaRecovery":false},{"activatedSeq":1,"addedSeq":1,"admin":true,"host":false,"id":"dev-1","status":"removed","viaPasskey":null,"viaRecovery":false},{"activatedSeq":3,"addedSeq":3,"admin":false,"host":false,"id":"dev-2","status":"active","viaPasskey":null,"viaRecovery":false},{"activatedSeq":6,"addedSeq":5,"admin":true,"host":false,"id":"dev-r","status":"removed","viaPasskey":null,"viaRecovery":true},{"activatedSeq":2,"addedSeq":2,"admin":false,"host":true,"id":"m-1","status":"active","viaPasskey":null,"viaRecovery":false}],"head":"c275baf73d2604f37e294c5c11d23afd83db4f54a83d6bdf4ad816e36a56e823","machineKeyEpochs":{"m-1":0},"machines":["m-1"],"recoveryKey":null,"seq":8,"slots":[],"userKeyEpochs":0,"v3From":null}"#;
 
@@ -2634,7 +2634,7 @@ fn r1_a_retired_key_never_names_a_device_again() {
     assert_eq!(same, state);
 }
 
-/// Security review of #128 (R1b): a pending join made with a host's key
+/// Security review: a pending join made with a host's key
 /// before its renewal does not come alive after it — not approved by an
 /// admin, not activated with the recovery words, not activated by its passkey
 /// (a thief with the old key and a synced passkey would otherwise join early
@@ -2705,7 +2705,7 @@ fn r1b_a_retired_key_never_activates_a_device() {
     try_push(&other, by0(), k0, Action::ApproveDevice("d-ok".into())).expect("fresh keys are approved");
 }
 
-/// §3.8 「证据：退役钥签的争议声明」 (R1c): the key a renewal retired signs a
+/// §3.8 「证据：退役钥签的争议声明」: the key a renewal retired signs a
 /// statement bound to that renewal's hash, and a verifier checks it against
 /// its own chain — no clocks to compare. Only that entry, that hash, that new
 /// key, and the key that entry retired make one that verifies.
@@ -2763,7 +2763,7 @@ fn r1c_a_dispute_names_the_renewal_by_its_hash() {
     assert!(!state.verify_rotate_dispute("h-2", rotate, &r.old_sig));
 }
 
-/// §3.4 rule 9 (R1d): the account's renewal policy is on the chain. Only an
+/// §3.4 rule 9: the account's renewal policy is on the chain. Only an
 /// active admin sets it; while it is on, a renewal that was not confirmed on
 /// the device is refused, an assured one goes through; turned off, automatic
 /// renewals go through again. Kind 21 exists in v3 only, its byte is 0 or 1.

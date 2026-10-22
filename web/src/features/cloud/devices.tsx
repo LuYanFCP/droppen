@@ -1469,7 +1469,7 @@ export function RelayStandbySetting({ account, link }: { account: CloudAccount; 
 /**
  * "Missing key": the chain commits a newer user key than this device holds
  * (it missed the rotation's mail, or the rotation died after its commit). It
- * wraps no machine key until it has it (M2 re-review #27) — it has asked the
+ * wraps no machine key until it has it (M2 re-review) — it has asked the
  * account's other devices to send it; if none has it, rotating again mends it.
  */
 export function MissingUserKey({ account, link, epoch }: { account: CloudAccount; link: HubLink; epoch: number }) {
@@ -1788,7 +1788,7 @@ function RotateKeys({ account, link, due }: { account: CloudAccount; link: HubLi
 export function alertLevel(alert: ChainAlert): "confirm" | "high" | "info" {
   if (alert.kind === "setAdmin") return alert.on ? "high" : "info";
   if (alert.kind === "setHost" || alert.kind === "setAccept" || alert.kind === "removeDevice" || alert.kind === "keyEpochs" || alert.kind === "upgrade" || alert.kind === "rotateHostKey" || alert.kind === "renewalPause") return "info";
-  // Renewals confirmed on the device turned off (or never on): "is this you?" on every device (#178 L1). Turned on: a note.
+  // Renewals confirmed on the device turned off (or never on): "is this you?" on every device. Turned on: a note.
   if (alert.kind === "renewalPolicy") return alert.on ? "info" : "confirm";
   if (alert.kind === "passkey") return alert.passkey === "join" || alert.passkey === "slotSet" ? "confirm" : "info";
   return "confirm";
@@ -2326,7 +2326,7 @@ function EnterCode({ account, onCandidate }: { account: CloudAccount; onCandidat
                 <input type="radio" name="pairing" checked={picked === p.id} onChange={() => setPicked(p.id)} />
                 <span className="text-fg">{p.device}</span>
                 <span className="text-faint">{formatRelative(new Date(p.createdMs).toISOString())}</span>
-                {/* Any full device may close one it does not recognise (M2 re-review #28). */}
+                {/* Any full device may close one it does not recognise (M2 re-review). */}
                 <button
                   type="button"
                   className={cn(quiet, "ml-auto h-5 px-1.5 text-2xs")}
@@ -2453,7 +2453,7 @@ export function ConfirmCandidate({
                   return;
                 }
               }
-              // Every browser or phone is a full device (the owner's decision of 2026-10-20).
+              // Every browser or phone is a full device (a decision of 2026-10-20).
               await account.pairDevice(candidate, { admin: true });
               onAdded();
               me?.soon();

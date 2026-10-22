@@ -1,5 +1,5 @@
 // Renewing a host's identity key on screen (docs/host-identity-rotation.md §4.4,
-// §3.7, §3.8, §7 decisions 1, 5, 7, 8, 9; contract §6, §9): each row state of
+// §3.7, §3.8, §7 decisions 1, 5, 7, 8, 9): each row state of
 // 「我的设备」, the "more" menu that keeps re-enrolling, the person's own
 // renewal and the dialog where the device's code is TYPED, the account
 // setting, the notice, the confirmations that say who will renew, a host that
@@ -194,7 +194,7 @@ test("§4.1 “renew identity key” cannot be pressed while an exposed host it 
   assert.match(zh.blocked ?? "", /请先更换 m-1 的身份密钥/);
 });
 
-test("isolated (§3.8 「页面」, decision B): first look at Droppen on it; “replaced elsewhere” makes removing the main action, a code makes confirming it; removing is one click away in both", () => {
+test("isolated (§3.8 「页面」): first look at Droppen on it; “replaced elsewhere” makes removing the main action, a code makes confirming it; removing is one click away in both", () => {
   const calls: string[] = [];
   const props = { id: "m-1", status: { kind: "isolated" } as RenewalStatus, viewerAdmin: true, onCode: () => calls.push("code"), onRemove: () => calls.push("remove"), onAddComputer: () => calls.push("add") };
   const html = draw(<RenewalLine {...props} />);
@@ -296,7 +296,7 @@ test("the account's 「总在设备上确认」 is off by default, written on th
   assert.deepEqual(local, [true]);
 });
 
-test("#178 L1/L2: turning confirming on the device off is asked before it is written; with no policy chosen, the admin is asked to choose first", async () => {
+test("turning confirming on the device off is asked before it is written; with no policy chosen, the admin is asked to choose first", async () => {
   const set: boolean[] = [];
   const runner = { setAlwaysAssured: async (on: boolean) => void set.push(on) } as unknown as RenewalRunner;
   const on = { alwaysAssured: true, renewalPolicyChosen: true, localAssured: () => false, setLocalAssured: () => undefined } as never;
@@ -405,7 +405,7 @@ test("R6: a host that lets an isolated one control it says to remove that one fi
   const html = rowHtml(host({ id: "m-2", isolatedControllers: ["m-1"] }));
   assert.match(html, /data-testid="isolated-controllers-m-2" data-signal="warn"/);
   assert.ok(html.includes("It lets m-1 control it, which is isolated: settle it on its row first."));
-  assert.doesNotMatch(html, /remove m-1 first/, "removing is not the only way any more (decision B)");
+  assert.doesNotMatch(html, /remove m-1 first/, "removing is not the only way any more");
   assert.ok(rowHtml(host({ id: "m-2", isolatedControllers: ["m-1"] }), {}, "zh-CN").includes("请先在那一行处理好它"));
   // A group renewing together (§4.1): control between them is paused, said on each row until the lists are back.
   const paused = rowHtml(host({ pausedWith: ["m-1", "m-2"] }));
@@ -447,14 +447,14 @@ test("the host's own Droppen settings: the code while it lasts, the last renewal
   assert.equal(linkRotation({ link: null }), null);
   assert.equal(linkRotation({ link: { rotation: { state: "idle" } } } as never), null);
   assert.deepEqual(linkRotation({ link: { rotation: { state: "foreign", reason: "renewed_elsewhere" } } } as never), { state: "foreign", reason: "renewed_elsewhere" });
-  // Refused while it syncs: said quietly — nothing is known yet (contract §10).
+  // Refused while it syncs: said quietly — nothing is known yet.
   const refused = note({ state: "refused" });
   assert.match(refused, /data-state="refused"/);
   assert.doesNotMatch(refused, /data-signal|droppen-fresh/);
   assert.ok(refused.includes("syncing the account before trying again"));
 });
 
-test("replaced elsewhere: red, said without alarm, and — asked first — “add this device again with a new identity” (§3.8, contract §10)", () => {
+test("replaced elsewhere: red, said without alarm, and — asked first — “add this device again with a new identity” (§3.8)", () => {
   const foreign = note({ state: "foreign", reason: "renewed_elsewhere" });
   assert.match(foreign, /data-state="foreign" data-signal="failed"/);
   assert.ok(foreign.includes("identity key was replaced elsewhere"));
@@ -476,7 +476,7 @@ test("replaced elsewhere: red, said without alarm, and — asked first — “ad
   assert.ok(foreignIn("ja").includes("新しい ID でこのデバイスを追加し直す"));
 });
 
-test("a join or an enrollment refused for a retired key reads as “add it again under a new identity” (contract §10)", async () => {
+test("a join or an enrollment refused for a retired key reads as “add it again under a new identity”", async () => {
   const { default: global } = await import("../src/i18n/index.js");
   const { errorText } = await import("../src/features/cloud/ui.js");
   const { AccountError } = await import("../src/lib/hub/account.js");

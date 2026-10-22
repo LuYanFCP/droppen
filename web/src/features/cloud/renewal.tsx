@@ -179,7 +179,7 @@ export function RenewalLine({
             {t("An identity key {{id}} renewed away from signed in again — for example, it was restored from a backup made before the renewal, or another copy of its old key is in use. Nothing here connects to it until this is settled.", { id })}
           </span>
           {viewerAdmin && (
-            // §3.8 「页面」 (the owner's decision B after the R6 re-review): first look at Droppen on that device; what it shows
+            // §3.8 「页面」: first look at Droppen on that device; what it shows
             // picks the main action — "replaced elsewhere": remove the id, then add it again under a new identity; a code:
             // confirm on the device. Removing stays one click away in both, and the row says all along why it matters.
             <span data-testid={`renewal-fresh-${id}`} className="flex flex-col items-start gap-1.5 text-muted">
@@ -437,7 +437,7 @@ export function AlwaysConfirmSetting({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [local, setLocal] = useState(() => account.localAssured());
-  // Renewing on their own is asked about first (#178 L1): every device of the account is asked "is this you?" after.
+  // Renewing on their own is asked about first: every device of the account is asked "is this you?" after.
   const [askingOff, setAskingOff] = useState(false);
   const badge = "px-1 text-[10px] tracking-[0.08em] text-fg uppercase shadow-[inset_0_0_0_1px_var(--color-border-strong)]";
   const write = async (on: boolean) => {
@@ -547,7 +547,7 @@ export function pauseHeldText(h: PauseEnding["held"][number], t: (key: string, o
 }
 
 /**
- * 「结束暂停」, asked first (§4.1 「卡住的暂停」, R6 L4): exactly which control comes
+ * 「结束暂停」, asked first (§4.1 「卡住的暂停」, R6 review): exactly which control comes
  * back — each device and the host it may control again — and, where a host's
  * list lets every device in, that it lets in every device again, those added
  * while it was paused among them. Refused while one of them must stay held:
