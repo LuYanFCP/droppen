@@ -109,7 +109,32 @@ function fakeHub({ marker = "self", csp = () => HUB_CSP } = {}) {
   return listen(server);
 }
 
-/** A GitHub with one release whose manifest is ours and no Sigstore bundle. */
+/**
+ * What release.yml attaches to the signer repository's release: the manifest
+ * CI built (the same files and digest as the release's, other bytes: it also
+ * names the repository and the build time) and a bundle that signs it. The
+ * stand-in `gh` below accepts a bundle only for the bytes, repository,
+ * workflow and tag it names, as the real one checks them.
+ */
+const signedManifest = Buffer.from(JSON.stringify({ ...manifest, repository: "s/r", source_date_epoch: 1700000000 }));
+const sha256Hex = (bytes) => createHash("sha256").update(bytes).digest("hex");
+const bundleFor = (bytes, repo = "s/r") =>
+  JSON.stringify({ subject: sha256Hex(bytes), repo, workflow: `${repo}/.github/workflows/release.yml`, ref: "refs/tags/v9.9.9" });
+/** Another build's manifest under the same tag. */
+const otherManifest = (() => {
+  const files2 = [...files, { path: "extra.js", size: 1, sha256: "0".repeat(64) }];
+  return Buffer.from(JSON.stringify({ ...manifest, digest: digestOf(files2), files: files2 }));
+})();
+
+/**
+ * A GitHub with one release in o/r whose manifest is ours and no Sigstore
+ * bundle, and signer repositories with a release of the same tag:
+ *   s/r  the signed manifest and its bundle;
+ *   x/r  the signed manifest and a bundle over other bytes (the release's own manifest);
+ *   d/r  another build's manifest, signed;
+ *   e/r  an error (HTTP 500) for anything;
+ *   anything else: nothing (404).
+ */
 function fakeGitHub() {
   const server = createServer((req, res) => {
     if (req.url.startsWith("/repos/o/r/releases")) {
@@ -117,10 +142,48 @@ function fakeGitHub() {
       return res.end(JSON.stringify([{ tag_name: "v9.9.9", draft: false, assets: [{ name: "web-manifest.json" }] }]));
     }
     if (req.url === "/o/r/releases/download/v9.9.9/web-manifest.json") return res.end(JSON.stringify(manifest));
+    const signer = /^\/([sxde])\/r\/releases\/download\/v9\.9\.9\/(web-manifest\.json|web-manifest\.sigstore\.json)$/.exec(req.url);
+    if (signer) {
+      const [, who, asset] = signer;
+      if (who === "e") {
+        res.statusCode = 500;
+        return res.end("oops");
+      }
+      const signed = who === "d" ? otherManifest : signedManifest;
+      if (asset === "web-manifest.json") return res.end(signed);
+      return res.end(bundleFor(who === "x" ? Buffer.from(JSON.stringify(manifest)) : signed, `${who}/r`));
+    }
     res.statusCode = 404;
     res.end("not found");
   });
   return listen(server);
+}
+
+/**
+ * A stand-in `gh` on PATH: `--version` answers; `attestation verify <file>
+ * --bundle <b> --repo <r> --signer-workflow <w> --source-ref <ref>` passes
+ * only when the bundle names the file's sha256 and that repository, workflow
+ * and tag. It records the bytes it was asked about.
+ */
+function standInGh(dir) {
+  const js = join(dir, "gh.mjs");
+  writeFileSync(
+    js,
+    `import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+if (args[0] === "--version") process.exit(0);
+const flag = (name) => args[args.indexOf(name) + 1];
+const file = readFileSync(args[2]);
+writeFileSync(process.env.GH_SEEN, file);
+const b = JSON.parse(readFileSync(flag("--bundle"), "utf8"));
+const subject = createHash("sha256").update(file).digest("hex");
+if (b.subject !== subject) { console.error("verification failed: the bundle signs other bytes"); process.exit(1); }
+if (b.repo !== flag("--repo") || b.workflow !== flag("--signer-workflow") || b.ref !== flag("--source-ref")) { console.error("verification failed: another signer"); process.exit(1); }
+`,
+  );
+  writeFileSync(join(dir, "gh"), `#!/bin/sh\nexec "${process.execPath}" "${js}" "$@"\n`, { mode: 0o755 });
+  return { PATH: `${dir}:${process.env.PATH}`, GH_SEEN: join(dir, "seen") };
 }
 
 function listen(server) {
@@ -220,9 +283,55 @@ describe("verify-web.mjs against a hub", () => {
     const env = { DROPPEN_VERIFY_GITHUB_API: github, DROPPEN_VERIFY_GITHUB: github };
     const strict = await verify(["--site", site, "--repo", "o/r"], env);
     assert.equal(strict.code, 1, strict.out);
-    assert.match(strict.out, /attestation not checked: no Sigstore bundle published with this release \(--allow-unattested accepts that\)/);
+    assert.match(strict.out, /attestation not checked: no Sigstore bundle published with this release, nor a signed manifest with getdroppen\/droppen's release v9\.9\.9 \(--allow-unattested accepts that\)/);
     const lax = await verify(["--site", site, "--repo", "o/r", "--allow-unattested"], env);
     assert.equal(lax.code, 0, lax.out);
     assert.match(lax.out, /release v9\.9\.9 of o\/r/);
+  });
+
+  describe("a release without a bundle of its own is checked through the signer repository's release of the tag", () => {
+    let bin, env;
+    before(() => {
+      bin = mkdtempSync(join(tmpdir(), "verify-web-gh-"));
+      env = { DROPPEN_VERIFY_GITHUB_API: github, DROPPEN_VERIFY_GITHUB: github, ...standInGh(bin) };
+    });
+    after(() => rmSync(bin, { recursive: true, force: true }));
+    const run = async (signer, ...more) => verify(["--site", await hub(), "--repo", "o/r", "--signer-repo", signer, ...more], env);
+
+    test("its signed manifest and that manifest's bundle pass", async () => {
+      const r = await run("s/r");
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /manifest: +release v9\.9\.9 of s\/r, the signed manifest of release v9\.9\.9 of o\/r/);
+      assert.match(r.out, /verified: built by s\/r\/\.github\/workflows\/release\.yml at v9\.9\.9/);
+      assert.deepEqual(readFileSync(env.GH_SEEN), signedManifest, "the signed bytes are what gh checks, not the release's own manifest");
+    });
+
+    test("a bundle over other bytes fails, --allow-unattested or not", async () => {
+      for (const more of [[], ["--allow-unattested"]]) {
+        const r = await run("x/r", ...more);
+        assert.equal(r.code, 1, r.out);
+        assert.match(r.out, /attestation FAILED: verification failed: the bundle signs other bytes/);
+      }
+    });
+
+    test("a signed manifest of another build under the tag fails, --allow-unattested or not", async () => {
+      for (const more of [[], ["--allow-unattested"]]) {
+        const r = await run("d/r", ...more);
+        assert.equal(r.code, 1, r.out);
+        assert.match(r.out, /the signed manifest of d\/r's release v9\.9\.9 is sha256:[0-9a-f]{64}, not the release's sha256:/);
+      }
+    });
+
+    test("none there, or the signer repository failing, is a missing attestation", async () => {
+      for (const [signer, why] of [["n/r", /nor a signed manifest with n\/r's release v9\.9\.9/], ["e/r", /e\/r's release v9\.9\.9 could not be read \(.*HTTP 500\)/]]) {
+        const strict = await run(signer);
+        assert.equal(strict.code, 1, strict.out);
+        assert.match(strict.out, why);
+        assert.match(strict.out, /\(--allow-unattested accepts that\)/);
+        const lax = await run(signer, "--allow-unattested");
+        assert.equal(lax.code, 0, lax.out);
+        assert.match(lax.out, /release v9\.9\.9 of o\/r \(attestation not checked\)/);
+      }
+    });
   });
 });
