@@ -1,0 +1,4 @@
+# The server binary, placed here by desktop/build.sh as
+# remote-hand-server-<target-triple> (Tauri's sidecar naming).
+*
+!.gitignore

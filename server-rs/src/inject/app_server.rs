@@ -1,0 +1,1868 @@
+//! A Codex App Server per session, connected over the restart-safe session shim.
+//!
+//! Only explicit turn/completed notifications end a turn. Steer is acknowledged
+//! by turn/steer, never implemented by killing the CLI. The journal checkpoints
+//! the output cursor and outstanding request IDs together; replay can therefore
+//! finish an acknowledged delivery without ever submitting it twice.
+
+use super::*;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+#[cfg(test)]
+use tokio::io::AsyncBufReadExt;
+use tokio::sync::{mpsc, oneshot};
+
+const RPC_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a retiring app-server is given to actually exit.
+///
+/// Generous, because the only alternative to waiting is refusing the send: a
+/// replacement started beside a process that still holds the thread's writer
+/// lock is two CLIs on one transcript, billed to two different accounts.
+const RETIRE_EXIT_WAIT: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(super) struct State {
+    cursor: u64,
+    active: Option<String>,
+    completed_turn: Option<String>,
+    queue: Vec<Message>,
+    settings: Value,
+    paused: bool,
+    injection: Option<Injection>,
+    interrupt_requested: bool,
+    // Persist before writing, so restart replay can reconcile a late archive
+    // acknowledgement without resending it or starting another turn.
+    archive_request: Option<String>,
+    archived: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Message {
+    id: String,
+    text: String,
+    params: Value,
+    // Persisted BEFORE writing. An unanswered request is never blindly retried.
+    request: Option<String>,
+    /// The old process died without acknowledging this request. Only an
+    /// explicit withdrawal is safe; automatically replaying may duplicate work.
+    #[serde(default)]
+    uncertain: bool,
+}
+
+#[derive(Clone)]
+pub(super) struct Handle {
+    tx: mpsc::UnboundedSender<Cmd>,
+    shared: Arc<Mutex<State>>,
+    /// The account this process was started under, or `None` for the machine's
+    /// own codex login.
+    ///
+    /// The codex answer to the claude resident's fingerprint: a live app-server
+    /// authenticates as whoever it was spawned as, and there is no way to hand
+    /// it another key over the socket. So the account is *part of the process*,
+    /// and a message for a different one cannot be delivered into it — see
+    /// [`InjectionRegistry::codex_deliver`].
+    account: Option<String>,
+}
+
+impl Handle {
+    pub(super) fn alive(&self) -> bool {
+        !self.tx.is_closed()
+    }
+
+    /// Whether this process is already running under the account a send wants.
+    fn runs_as(&self, account: Option<&str>) -> bool {
+        self.account.as_deref() == account
+    }
+
+    /// Whether anything is in flight that a shutdown would cut short.
+    fn busy(&self) -> bool {
+        let state = self.shared.lock().unwrap();
+        state.active.is_some() || !state.queue.is_empty() || state.archive_request.is_some()
+    }
+    pub(super) fn visible(&self) -> bool {
+        let state = self.shared.lock().unwrap();
+        !state.archived && (self.alive() || !state.queue.is_empty())
+    }
+    pub(super) fn injection(&self) -> Option<Injection> {
+        self.shared.lock().unwrap().injection.clone()
+    }
+    pub(super) fn state(&self) -> ResidentState {
+        let state = self.shared.lock().unwrap();
+        ResidentState {
+            phase: if state.active.is_some() || state.queue.iter().any(|q| q.request.is_some()) {
+                Phase::Working
+            } else {
+                Phase::Idle
+            },
+            stalled: state.paused,
+            queued: state.queue.len(),
+            queued_messages: state
+                .queue
+                .iter()
+                .map(|q| crate::sessions::QueuedMessage {
+                    id: q.id.clone(),
+                    text: q.text.chars().take(200).collect(),
+                    steered: q.request.is_some(),
+                })
+                .collect(),
+            background: 0,
+            tasks: vec![],
+            awaiting_background: false,
+            // Codex's app-server driver keeps no turn clock of its own.
+            turn_started_at: None,
+            // Approvals are off, and every interactive request the app server
+            // makes is refused: codex never stops to ask.
+            question: None,
+        }
+    }
+    pub(super) fn info(&self) -> crate::sessions::ResidentInfo {
+        self.state().into()
+    }
+    pub(super) fn interrupt(&self) -> bool {
+        let state = self.shared.lock().unwrap();
+        (state.active.is_some() || state.queue.iter().any(|q| q.request.is_some())) && self.tx.send(Cmd::Interrupt).is_ok()
+    }
+    pub(super) async fn queue_action(&self, id: &str, steer: bool) -> QueueOutcome {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(Cmd::Queue { id: id.into(), steer, reply }).is_err() {
+            return QueueOutcome::Unreachable;
+        }
+        rx.await.unwrap_or(QueueOutcome::Unreachable)
+    }
+}
+
+enum Cmd {
+    Deliver(Message, oneshot::Sender<Result<Sent, InjectError>>),
+    /// End this process cleanly so a replacement can run under another account.
+    Retire(oneshot::Sender<Result<(), InjectError>>),
+    Queue {
+        id: String,
+        steer: bool,
+        reply: oneshot::Sender<QueueOutcome>,
+    },
+    Interrupt,
+    Archive(oneshot::Sender<Result<(), InjectError>>),
+}
+
+fn message(text: &str, options: &SendOptions) -> Result<Message, InjectError> {
+    let mut input = vec![json!({"type":"text", "text":with_codex_files(text, options)})];
+    input.extend(options.images.iter().map(|path| json!({"type":"localImage","path":path})));
+    let mut params = json!({"input":input,"approvalPolicy":"never"});
+    if let Some(model) = &options.model {
+        params["model"] = json!(model);
+    }
+    if let Some(effort) = &options.effort {
+        params["effort"] = json!(effort);
+    }
+    let permission = if options.chat {
+        Some("read-only")
+    } else {
+        options.permission.as_deref()
+    };
+    if let Some(permission) = permission {
+        codex_permission_flags(permission)?;
+        params["sandboxPolicy"] = match permission {
+            "auto" | "workspace-write" => json!({"type":"workspaceWrite"}),
+            "read-only" => json!({"type":"readOnly"}),
+            _ => json!({"type":"dangerFullAccess"}),
+        };
+    }
+    Ok(Message {
+        // The send path's choice when a client named the message, so its
+        // receipt can follow it; see [`super::receipts`].
+        id: options.message_id.clone().unwrap_or_else(new_uuid),
+        text: text.into(),
+        params,
+        request: None,
+        uncertain: false,
+    })
+}
+
+async fn write(link: &mut shim::Link, value: Value) -> Result<(), InjectError> {
+    tokio::time::timeout(RPC_TIMEOUT, link.send_line(&value.to_string()))
+        .await
+        .map_err(|_| InjectError::message("Codex App Server write timed out"))?
+        .map_err(|e| InjectError::Internal(e.to_string()))
+}
+
+// Headless permissions remain `never`. Unexpected interactive requests must get
+// an explicit error, not hang the CLI or silently approve a tool invocation.
+async fn reject_request(link: &mut shim::Link, value: &Value) -> Result<(), InjectError> {
+    write(
+        link,
+        json!({"id":value["id"],"error":{"code":-32601,"message":"interactive requests are not supported by Droppen"}}),
+    )
+    .await
+}
+
+async fn rpc(registry: &InjectionRegistry, link: &mut shim::Link, method: &str, params: Value) -> Result<Value, InjectError> {
+    let id = new_uuid();
+    write(link, json!({"id":id,"method":method,"params":params})).await?;
+    tokio::time::timeout(RPC_TIMEOUT, async {
+        while let Some(output) = link.recv().await {
+            let shim::Output::Line(line) = output else {
+                return Err(InjectError::message("Codex handshake output was lost"));
+            };
+            let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
+            if value.get("method").is_some() && value.get("id").is_some() {
+                reject_request(link, &value).await?;
+            }
+            if value["id"] == id {
+                if let Some(error) = value.get("error") {
+                    return Err(InjectError::message(registry.redact(&error.to_string())));
+                }
+                return Ok(value["result"].clone());
+            }
+        }
+        Err(InjectError::message("Codex App Server disconnected during handshake"))
+    })
+    .await
+    .map_err(|_| InjectError::message("Codex App Server handshake timed out"))?
+}
+
+impl InjectionRegistry {
+    /// A dead CLI must not take already-accepted, undelivered messages with it.
+    pub(super) fn codex_dead(&self, mut record: runs::RunRecord) {
+        let mut state = record.codex.clone().unwrap_or_default();
+        let interrupted = state.interrupt_requested || state.injection.as_ref().is_some_and(|i| i.interrupted);
+        let unfinished = state.active.take().is_some() || state.queue.iter().any(|q| q.request.is_some());
+        for message in &mut state.queue {
+            if message.request.take().is_some() {
+                message.uncertain = true;
+            }
+        }
+        state.interrupt_requested = false;
+        state.paused = true;
+        if unfinished {
+            state.injection = Some(Injection {
+                state: InjectionRunState::Failed,
+                error: crate::openapi_ext::Nullable(Some(
+                    "Codex App Server exited. Queued messages are retained; inspect the transcript before resending any unacknowledged delivery."
+                        .into(),
+                )),
+                interrupted,
+                started_at: record.started_at.clone(),
+                finished_at: crate::openapi_ext::Nullable(Some(iso8601(SystemTime::now()))),
+            });
+        }
+        record.codex = Some(state.clone());
+        let id = record.session_id.clone();
+        let account = record.codex_account.clone();
+        self.runs.lock().unwrap().remove(&self.key_of(Source::Codex, &id));
+        if state.archived {
+            self.journal.remove(&record.run_id);
+        } else {
+            self.journal.add(record);
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        self.codex_servers.lock().unwrap().insert(
+            id,
+            Handle {
+                tx,
+                shared: Arc::new(Mutex::new(state)),
+                account,
+            },
+        );
+    }
+
+    pub(super) async fn codex_queue_action(&self, id: &str, qid: &str, steer: bool) -> QueueOutcome {
+        let Some(handle) = self.codex_handle(id) else {
+            return QueueOutcome::NoResident;
+        };
+        if handle.alive() {
+            return handle.queue_action(qid, steer).await;
+        }
+        if steer {
+            return QueueOutcome::Unreachable;
+        }
+        let Some(mut record) = self
+            .journal
+            .read()
+            .into_iter()
+            .find(|r| r.source == Source::Codex && r.session_id == id && r.codex.is_some())
+        else {
+            return QueueOutcome::NoResident;
+        };
+        {
+            let mut state = handle.shared.lock().unwrap();
+            let Some(index) = state.queue.iter().position(|m| m.id == qid) else {
+                return QueueOutcome::Unknown;
+            };
+            state.queue.remove(index);
+            record.codex = Some(state.clone());
+            self.journal.add(record);
+        }
+        self.note_receipt(Source::Codex, id, qid, super::receipts::ReceiptStatus::Failed);
+        QueueOutcome::Done
+    }
+
+    pub(super) fn codex_handle(&self, id: &str) -> Option<Handle> {
+        self.codex_servers.lock().unwrap().get(id).cloned()
+    }
+
+    /// A loaded thread's writer owns its archive operation too. A separate
+    /// `codex archive` cannot acquire that writer lock, even between turns.
+    pub async fn archive_codex(self: &Arc<Self>, id: &str) -> Result<(), crate::drive::archive::ArchiveError> {
+        use crate::drive::archive::{archive_codex_session, ArchiveError};
+        // Match delivery's gate: no new resident or accepted message can slip
+        // between selecting the archive path and committing its result.
+        let _gate = self.spawn_gate.lock().await;
+        if let Some(handle) = self.codex_handle(id) {
+            {
+                let state = handle.shared.lock().unwrap();
+                if state.archived {
+                    return Ok(());
+                }
+                if !state.queue.is_empty() {
+                    return Err(ArchiveError("Codex has queued messages; send or remove them before archiving".into()));
+                }
+            }
+            if handle.alive() {
+                let (reply, rx) = oneshot::channel();
+                handle
+                    .tx
+                    .send(Cmd::Archive(reply))
+                    .map_err(|_| ArchiveError("Codex App Server disconnected".into()))?;
+                return rx
+                    .await
+                    .map_err(|_| ArchiveError("Codex App Server disconnected before confirming archive".into()))?
+                    .map_err(|error| ArchiveError(error.to_string()));
+            }
+        }
+        // Includes legacy or unreachable residents and other server instances.
+        let _claim = claim_session(self, id).map_err(|error| ArchiveError(error.to_string()))?;
+        archive_codex_session(&self.paths, id).await?;
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        self.codex_servers.lock().unwrap().insert(
+            id.into(),
+            Handle {
+                tx,
+                shared: Arc::new(Mutex::new(State {
+                    archived: true,
+                    ..Default::default()
+                })),
+                account: None,
+            },
+        );
+        for record in self
+            .journal
+            .read()
+            .into_iter()
+            .filter(|r| r.source == Source::Codex && r.session_id == id)
+        {
+            self.journal.remove(&record.run_id);
+        }
+        Ok(())
+    }
+
+    pub(super) async fn codex_deliver(
+        self: &Arc<Self>,
+        id: Option<&str>,
+        cwd: Option<&str>,
+        text: &str,
+        options: &SendOptions,
+        account: Option<CodexAccount>,
+    ) -> Result<(String, Sent), InjectError> {
+        let message = message(text, options)?;
+        let _gate = self.spawn_gate.lock().await;
+        if let Some(handle) = id.and_then(|id| self.codex_handle(id)) {
+            let state = handle.shared.lock().unwrap();
+            if state.archived || state.archive_request.is_some() {
+                return Err(InjectError::message(
+                    "Codex session is archived or awaiting archive confirmation; refresh the session list",
+                ));
+            }
+        }
+        let wanted = account.as_ref().map(|account| account.id.as_str());
+        // A live app-server holds the credential it was started with, so a
+        // message for another account cannot go into it. From idle the process
+        // is retired and resumed under the new one; mid-turn it is the same
+        // refusal a second message would get, because killing a turn the user is
+        // watching is not what changing an account means.
+        if let Some(existing) = id.and_then(|id| self.codex_handle(id)).filter(Handle::alive) {
+            if !existing.runs_as(wanted) {
+                if existing.busy() {
+                    return Err(InjectError::message("a message is already running for this session"));
+                }
+                retire(&existing).await?;
+            }
+        }
+        let (id, handle) = match id
+            .and_then(|id| self.codex_handle(id).filter(Handle::alive).map(|h| (id.to_owned(), h)))
+            .filter(|(_, handle)| handle.runs_as(wanted))
+        {
+            Some(existing) => existing,
+            None => self.codex_spawn(id, cwd, options, account).await?,
+        };
+        let (reply, rx) = oneshot::channel();
+        handle
+            .tx
+            .send(Cmd::Deliver(message, reply))
+            .map_err(|_| InjectError::message("Codex App Server disconnected"))?;
+        let sent = rx.await.map_err(|_| InjectError::message("Codex App Server disconnected"))??;
+        Ok((id, sent))
+    }
+
+    async fn codex_spawn(
+        self: &Arc<Self>,
+        id: Option<&str>,
+        cwd: Option<&str>,
+        options: &SendOptions,
+        account: Option<CodexAccount>,
+    ) -> Result<(String, Handle), InjectError> {
+        // Also excludes a legacy codex exec inherited during this upgrade.
+        if id.is_some_and(|id| self.is_running(Source::Codex, id)) {
+            return Err(InjectError::message("a message is already running for this session"));
+        }
+        let claim = match id {
+            Some(id) => Some(claim_session(self, id)?),
+            None => None,
+        };
+        let sidecars = shim::Sidecars::new(self.shim_dir.clone(), new_uuid());
+        let cwd = claude_workdir(&self.paths, cwd);
+        // With no account, argv and environment are byte for byte what they
+        // have always been: `codex app-server`, the process environment, and
+        // whatever `~/.codex/auth.json` holds. An account adds a model
+        // provider that reads its key from a variable of ours, because
+        // `app-server` reads no key variable of codex's own — see
+        // [`crate::accounts::store::codex_provider_args`].
+        let launch = account.as_ref().map(|account| &account.launch);
+        let mut args: Vec<String> = vec!["app-server".into()];
+        args.extend(launch.into_iter().flat_map(|launch| launch.codex_args.iter().cloned()));
+        let env = match launch {
+            Some(launch) => clean_env(launch.env.iter().cloned()),
+            None => clean_env_bare(),
+        };
+        let mut link = shim::spawn_via_shim(shim::Spawn {
+            sidecars: &sidecars,
+            program: "codex",
+            args: &args,
+            workdir: Some(&cwd),
+            env: &env,
+            buffer_bytes: None,
+        })
+        .await
+        .map_err(|e| InjectError::message(e.to_string()))?;
+        let setup = async {
+            rpc(
+                self,
+                &mut link,
+                "initialize",
+                json!({"clientInfo":{"name":"remote_hand","title":"remote-hand","version":env!("CARGO_PKG_VERSION")}}),
+            )
+            .await?;
+            write(&mut link, json!({"method":"initialized","params":{}})).await?;
+            let mut params = json!({"cwd":cwd,"approvalPolicy":"never"});
+            if let Some(id) = id {
+                params["threadId"] = json!(id);
+            }
+            // Belt and braces with `-c model_provider=…` on the command line:
+            // the flag is what a `codex exec` probe proves works, and naming it
+            // on the thread as well costs nothing if the flag already took.
+            if launch.is_some_and(|launch| !launch.codex_args.is_empty()) {
+                params["modelProvider"] = json!(crate::accounts::store::CODEX_PROVIDER_ID);
+            }
+            if options.chat {
+                params["baseInstructions"] = json!(CHAT_SYSTEM_PROMPT);
+            }
+            let result = rpc(self, &mut link, if id.is_some() { "thread/resume" } else { "thread/start" }, params).await?;
+            let resolved = result["thread"]["id"]
+                .as_str()
+                .ok_or_else(|| InjectError::message("Codex returned no thread id"))?
+                .to_owned();
+            if id.is_some_and(|id| id != resolved) {
+                return Err(InjectError::message("Codex resumed a different thread"));
+            }
+            let claim = match claim {
+                Some(claim) => claim,
+                None => claim_session(self, &resolved)?,
+            };
+            Ok::<_, InjectError>((resolved, result, claim))
+        }
+        .await;
+        let (id, result, claim) = match setup {
+            Ok(setup) => setup,
+            Err(error) => {
+                let _ = link.close_stdin().await;
+                return Err(error);
+            }
+        };
+        let old = self
+            .journal
+            .read()
+            .into_iter()
+            .find(|r| r.source == Source::Codex && r.session_id == id && r.codex.is_some());
+        let mut state = old.as_ref().and_then(|r| r.codex.clone()).unwrap_or_default();
+        for message in &mut state.queue {
+            if message.request.take().is_some() {
+                message.uncertain = true;
+            }
+        }
+        state.cursor = link.at();
+        state.active = result["thread"]["turns"]
+            .as_array()
+            .and_then(|turns| turns.iter().rev().find(|t| t["status"] == "inProgress"))
+            .and_then(|t| t["id"].as_str())
+            .map(str::to_owned);
+        state.settings = json!({"model":result["model"],"effort":result["reasoningEffort"],"sandboxPolicy":result["sandbox"]});
+        state.paused = state.queue.iter().any(|m| m.uncertain);
+        state.interrupt_requested = false;
+        let record = runs::RunRecord {
+            run_id: new_uuid(),
+            source: Source::Codex,
+            session_id: id.clone(),
+            cwd: Some(cwd.to_string_lossy().into()),
+            cli_pid: link.claude_pid(),
+            started_at: iso8601(SystemTime::now()),
+            pid_token: procs::start_token(link.claude_pid()),
+            // Older binaries must adopt this as an opaque PID, never attach a
+            // Claude stream-json driver to the Codex JSON-RPC socket.
+            resident: false,
+            shim: Some(sidecars.id().into()),
+            fingerprint: None,
+            turn_at: None,
+            queued: vec![],
+            codex: Some(state),
+            codex_account: account.as_ref().map(|account| account.id.clone()),
+            hold: None,
+        };
+        self.journal.add(record.clone());
+        if let Some(old) = old {
+            self.journal.remove(&old.run_id);
+        }
+        let handle = self.codex_attached(record, link, claim);
+        Ok((id, handle))
+    }
+
+    pub(super) fn codex_attached(self: &Arc<Self>, record: runs::RunRecord, link: shim::Link, claim: lock::InjectLock) -> Handle {
+        // A finished legacy exec entry must not overwrite this driver's newer
+        // finish time in the list snapshot after the session migrates.
+        self.runs.lock().unwrap().remove(&self.key_of(Source::Codex, &record.session_id));
+        let state = record.codex.clone().unwrap_or_default();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = Handle {
+            tx,
+            shared: Arc::new(Mutex::new(state.clone())),
+            account: record.codex_account.clone(),
+        };
+        self.codex_servers.lock().unwrap().insert(record.session_id.clone(), handle.clone());
+        let driver = Driver {
+            registry: self.clone(),
+            record,
+            link,
+            claim: Some(claim),
+            state,
+            shared: handle.shared.clone(),
+            rx,
+            replies: HashMap::new(),
+            pending_since: Instant::now(),
+            interrupt: None,
+            archive_reply: None,
+            archive_since: Instant::now(),
+            retiring: false,
+            retire_wait: RETIRE_EXIT_WAIT,
+        };
+        tokio::spawn(driver.run());
+        handle
+    }
+}
+
+/// End a live app-server so the session can be resumed under another account.
+///
+/// The reply comes back only once the old process is gone and its claim is
+/// released, so the caller can spawn immediately; a driver that has already
+/// lost its socket answers with a refusal rather than a promise.
+async fn retire(handle: &Handle) -> Result<(), InjectError> {
+    let (reply, rx) = oneshot::channel();
+    handle
+        .tx
+        .send(Cmd::Retire(reply))
+        .map_err(|_| InjectError::message("Codex App Server disconnected"))?;
+    rx.await
+        .map_err(|_| InjectError::message("Codex App Server disconnected before shutting down"))?
+}
+
+fn claim_session(registry: &InjectionRegistry, id: &str) -> Result<lock::InjectLock, InjectError> {
+    match lock::acquire(&registry.lock_dir, Source::Codex, id) {
+        Ok(lock::Outcome::Acquired(claim)) => Ok(claim),
+        Ok(lock::Outcome::Busy { holder }) => Err(InjectError::message(busy_message(holder))),
+        Err(e) => Err(InjectError::Internal(e.to_string())),
+    }
+}
+
+struct Driver {
+    registry: Arc<InjectionRegistry>,
+    record: runs::RunRecord,
+    link: shim::Link,
+    /// Dropped with the driver, except on [`Cmd::Retire`] — which hands the
+    /// session straight to a replacement and so has to let go of the claim
+    /// before it answers.
+    claim: Option<lock::InjectLock>,
+    state: State,
+    shared: Arc<Mutex<State>>,
+    rx: mpsc::UnboundedReceiver<Cmd>,
+    replies: HashMap<String, oneshot::Sender<QueueOutcome>>,
+    pending_since: Instant,
+    // Target turn (unknown until turn/started), time sent, escalation rung.
+    interrupt: Option<(Option<String>, Instant, u8)>,
+    archive_reply: Option<oneshot::Sender<Result<(), InjectError>>>,
+    archive_since: Instant,
+    /// Set by [`Cmd::Retire`]: leave the loop without reporting a death.
+    retiring: bool,
+    /// How long [`Cmd::Retire`] waits for the CLI to exit; a field rather than
+    /// the constant so a test can drive the timeout in milliseconds.
+    retire_wait: Duration,
+}
+
+impl Driver {
+    fn checkpoint(&mut self) {
+        // The cursor only advances with the state it describes, in one DB row.
+        self.state.cursor = self.link.at().max(self.state.cursor);
+        self.record.codex = Some(self.state.clone());
+        self.registry.journal.add(self.record.clone());
+        *self.shared.lock().unwrap() = self.state.clone();
+    }
+
+    fn running(&mut self) {
+        self.state.injection = Some(Injection {
+            state: InjectionRunState::Running,
+            error: crate::openapi_ext::Nullable(None),
+            interrupted: false,
+            started_at: iso8601(SystemTime::now()),
+            finished_at: crate::openapi_ext::Nullable(None),
+        });
+    }
+
+    fn finish(&mut self, error: Option<String>, interrupted: bool) {
+        let started_at = self
+            .state
+            .injection
+            .as_ref()
+            .map(|i| i.started_at.clone())
+            .unwrap_or_else(|| self.record.started_at.clone());
+        self.state.injection = Some(Injection {
+            state: if error.is_some() || interrupted {
+                InjectionRunState::Failed
+            } else {
+                InjectionRunState::Ok
+            },
+            error: crate::openapi_ext::Nullable(error),
+            interrupted,
+            started_at,
+            finished_at: crate::openapi_ext::Nullable(Some(iso8601(SystemTime::now()))),
+        });
+    }
+
+    async fn submit(&mut self, index: usize, steer: bool) -> Result<(), InjectError> {
+        let mut params = self.state.queue[index].params.clone();
+        let id = format!("{}:{}", if steer { "steer" } else { "start" }, self.state.queue[index].id);
+        params["threadId"] = json!(self.record.session_id);
+        params["clientUserMessageId"] = json!(self.state.queue[index].id);
+        if steer {
+            params = json!({"threadId":self.record.session_id,"expectedTurnId":self.state.active,"input":params["input"],"clientUserMessageId":self.state.queue[index].id});
+        } else {
+            self.running();
+        }
+        self.state.queue[index].request = Some(id.clone());
+        self.pending_since = Instant::now();
+        self.checkpoint();
+        write(
+            &mut self.link,
+            json!({"id":id,"method":if steer {"turn/steer"} else {"turn/start"},"params":params}),
+        )
+        .await
+    }
+
+    async fn run(mut self) {
+        if self.state.archived {
+            self.close_archived().await;
+            return;
+        }
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            let outcome = tokio::select! {
+                output = self.link.recv() => match output {
+                    Some(output) => self.output(output).await,
+                    None => Err(InjectError::message("Codex App Server disconnected; undelivered messages remain in the session journal")),
+                },
+                cmd = self.rx.recv() => match cmd { Some(cmd) => self.command(cmd).await, None => break },
+                _ = tick.tick() => self.tick().await,
+            };
+            if let Err(error) = outcome {
+                if let Some(reply) = self.archive_reply.take() {
+                    let _ = reply.send(Err(InjectError::message(self.registry.redact(&error.to_string()))));
+                }
+                self.state.paused = true;
+                let reported = self.registry.redact(&error.to_string());
+                self.finish(Some(reported), self.state.interrupt_requested);
+                self.checkpoint();
+                // Keep the claim while the process is alive, even if the socket
+                // has failed: a replacement must never run beside an orphan.
+                while procs::is_same_process(self.record.cli_pid, self.record.pid_token.as_deref()) {
+                    match tokio::time::timeout(Duration::from_secs(2), self.rx.recv()).await {
+                        Ok(Some(Cmd::Interrupt)) => self.link.kill_claude(libc::SIGTERM),
+                        Ok(Some(Cmd::Deliver(_, reply))) => {
+                            let _ = reply.send(Err(InjectError::message("Codex connection lost; restart the server to reattach")));
+                        }
+                        Ok(Some(Cmd::Archive(reply))) => {
+                            let _ = reply.send(Err(InjectError::message(
+                                "Codex connection lost; restart the server to reattach before archiving",
+                            )));
+                        }
+                        Ok(Some(Cmd::Queue { reply, .. })) => {
+                            let _ = reply.send(QueueOutcome::Unreachable);
+                        }
+                        Ok(Some(Cmd::Retire(reply))) => {
+                            // The process is going anyway; the caller only needs
+                            // to know it may not respawn yet.
+                            let _ = reply.send(Err(InjectError::message("Codex connection lost; restart the server to reattach")));
+                        }
+                        Ok(None) => break,
+                        Err(_) => {}
+                    }
+                }
+                self.registry.codex_dead(self.record.clone());
+                break;
+            }
+            if self.state.archived || self.retiring {
+                break;
+            }
+            if self.link.at() >= self.link.total()
+                && self.state.archive_request.is_none()
+                && self.state.active.is_none()
+                && !self.state.paused
+                && !self.state.queue.is_empty()
+                && self.state.queue.iter().all(|q| q.request.is_none())
+            {
+                if let Err(error) = self.submit(0, false).await {
+                    self.state.paused = true;
+                    self.finish(Some(error.to_string()), false);
+                    self.checkpoint();
+                }
+            }
+        }
+    }
+
+    async fn command(&mut self, cmd: Cmd) -> Result<(), InjectError> {
+        match cmd {
+            Cmd::Archive(reply) => {
+                if self.state.active.is_some() || !self.state.queue.is_empty() {
+                    let _ = reply.send(Err(InjectError::message(
+                        "Codex is running or has queued messages; stop it and clear the queue before archiving",
+                    )));
+                    return Ok(());
+                }
+                if self.state.archive_request.is_some() || self.link.at() < self.link.total() {
+                    let _ = reply.send(Err(InjectError::message(
+                        "Codex is awaiting archive confirmation or replaying session state; retry after it settles",
+                    )));
+                    return Ok(());
+                }
+                let id = format!("archive:{}", new_uuid());
+                self.state.archive_request = Some(id.clone());
+                self.archive_reply = Some(reply);
+                self.archive_since = Instant::now();
+                self.checkpoint();
+                write(
+                    &mut self.link,
+                    json!({"id":id,"method":"thread/archive","params":{"threadId":self.record.session_id}}),
+                )
+                .await?;
+            }
+            Cmd::Deliver(message, reply) => {
+                if self.state.archived || self.state.archive_request.is_some() {
+                    let _ = reply.send(Err(InjectError::message("Codex session is archived or awaiting archive confirmation")));
+                    return Ok(());
+                }
+                let queued = self.state.active.is_some() || !self.state.queue.is_empty();
+                self.state.queue.push(message);
+                if self.state.queue.iter().all(|q| q.request.is_none() && !q.uncertain) {
+                    self.state.paused = false;
+                }
+                self.checkpoint();
+                let _ = reply.send(Ok(Sent { queued }));
+            }
+            Cmd::Retire(reply) => {
+                if self.state.active.is_some() || !self.state.queue.is_empty() || self.state.archive_request.is_some() {
+                    let _ = reply.send(Err(InjectError::message("a message is already running for this session")));
+                    return Ok(());
+                }
+                // EOF is the polite end: codex finishes, writes nothing further
+                // and exits. A link that will not take it is a process nobody
+                // can replace safely, so the caller is told rather than raced.
+                if tokio::time::timeout(RPC_TIMEOUT, self.link.close_stdin()).await.is_err() {
+                    let _ = reply.send(Err(InjectError::message(
+                        "the running Codex process did not accept the shutdown; try again",
+                    )));
+                    return Ok(());
+                }
+                // Waited out rather than assumed. A process that has not gone
+                // when the budget runs out has *not* retired, and saying it has
+                // is the worst answer available: the caller would immediately
+                // start a second app-server on the same thread, under the new
+                // key, beside one still holding the old key and the writer
+                // lock. So nothing is torn down and nothing is handed over —
+                // the run, the claim and the handle all stay exactly where they
+                // are, and the send is refused. The EOF already sent still
+                // stands, so the ordinary disconnect path cleans up when the
+                // process does finally go.
+                let deadline = Instant::now() + self.retire_wait;
+                while procs::is_same_process(self.record.cli_pid, self.record.pid_token.as_deref()) && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                if procs::is_same_process(self.record.cli_pid, self.record.pid_token.as_deref()) {
+                    tracing::warn!(
+                        session = %self.record.session_id,
+                        pid = self.record.cli_pid,
+                        "the Codex process did not exit after its stdin was closed; keeping the session on the account it is already running under"
+                    );
+                    let _ = reply.send(Err(InjectError::message(
+                        "the running Codex process did not accept the shutdown; try again",
+                    )));
+                    return Ok(());
+                }
+                self.retiring = true;
+                self.registry.journal.remove(&self.record.run_id);
+                self.registry
+                    .runs
+                    .lock()
+                    .unwrap()
+                    .remove(&self.registry.key_of(Source::Codex, &self.record.session_id));
+                self.registry.codex_servers.lock().unwrap().remove(&self.record.session_id);
+                // Released before the reply, because the caller's very next move
+                // is to claim this session for the process it is about to start.
+                drop(self.claim.take());
+                let _ = reply.send(Ok(()));
+            }
+            Cmd::Interrupt => {
+                self.state.interrupt_requested = true;
+                self.checkpoint();
+                self.send_interrupt().await?;
+            }
+            Cmd::Queue { id, steer, reply } => {
+                let Some(index) = self.state.queue.iter().position(|q| q.id == id) else {
+                    let _ = reply.send(QueueOutcome::Unknown);
+                    return Ok(());
+                };
+                if self.state.queue[index].request.is_some() {
+                    let _ = reply.send(QueueOutcome::AlreadySteered);
+                    return Ok(());
+                }
+                if !steer {
+                    let dropped = self.state.queue.remove(index);
+                    self.checkpoint();
+                    self.registry.note_receipt(
+                        Source::Codex,
+                        &self.record.session_id,
+                        &dropped.id,
+                        super::receipts::ReceiptStatus::Failed,
+                    );
+                    let _ = reply.send(QueueOutcome::Done);
+                } else {
+                    if self.state.queue[index].uncertain {
+                        let _ = reply.send(QueueOutcome::Refused { reason: "delivery was not acknowledged before Codex exited; inspect the transcript, then remove this queued entry before resending".into() });
+                        return Ok(());
+                    }
+                    let busy = self.state.active.is_some();
+                    if busy
+                        && ["model", "effort", "sandboxPolicy"].iter().any(|key| {
+                            self.state.queue[index].params.get(*key).is_some_and(|wanted| {
+                                if *key == "sandboxPolicy" {
+                                    self.state.settings[*key]["type"] != wanted["type"]
+                                } else {
+                                    self.state.settings.get(*key) != Some(wanted)
+                                }
+                            })
+                        })
+                    {
+                        let _ = reply.send(QueueOutcome::Refused {
+                            reason: "Codex steer keeps the active turn's model, effort and permissions; wait for the next turn to change them".into(),
+                        });
+                        return Ok(());
+                    }
+                    if !busy && self.state.queue.iter().any(|q| q.request.is_some()) {
+                        let _ = reply.send(QueueOutcome::Unreachable);
+                        return Ok(());
+                    }
+                    self.state.paused = false;
+                    self.replies.insert(id, reply);
+                    self.submit(index, busy).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn output(&mut self, output: shim::Output) -> Result<(), InjectError> {
+        if self.link.at() <= self.state.cursor {
+            return Ok(());
+        }
+        let shim::Output::Line(line) = output else {
+            return Err(InjectError::message("Codex replay buffer overflowed; refusing to guess delivery state"));
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            return Ok(());
+        };
+        if value.get("method").is_some() && value.get("id").is_some() {
+            return reject_request(&mut self.link, &value).await;
+        }
+        if self.state.archive_request.is_some() && self.state.archive_request.as_deref() == value["id"].as_str() {
+            self.state.archive_request = None;
+            let result = if let Some(error) = value.get("error") {
+                self.checkpoint();
+                Err(InjectError::message(self.registry.redact(&error.to_string())))
+            } else {
+                self.state.archived = true;
+                self.state.injection = None;
+                self.checkpoint();
+                self.close_archived().await;
+                Ok(())
+            };
+            if let Some(reply) = self.archive_reply.take() {
+                let _ = reply.send(result);
+            }
+            return Ok(());
+        }
+        if let Some(index) = self
+            .state
+            .queue
+            .iter()
+            .position(|q| q.request.as_deref() == value["id"].as_str() && q.request.is_some())
+        {
+            let request = self.state.queue[index].request.take().unwrap();
+            let qid = self.state.queue[index].id.clone();
+            let outcome = if let Some(error) = value.get("error") {
+                self.state.paused = true;
+                if request.starts_with("start:") {
+                    self.state.interrupt_requested = false;
+                    self.interrupt = None;
+                    let reported = self.registry.redact(&error.to_string());
+                    self.finish(Some(reported), false);
+                }
+                QueueOutcome::Refused {
+                    reason: self.registry.redact(&error.to_string()),
+                }
+            } else {
+                let sent = self.state.queue.remove(index);
+                // Acknowledged: a turn started with it, or it was steered into
+                // the one running. Either way codex has it.
+                self.registry
+                    .note_receipt(Source::Codex, &self.record.session_id, &sent.id, super::receipts::ReceiptStatus::Sent);
+                if request.starts_with("start:") {
+                    if let Some(turn) = value["result"]["turn"]["id"].as_str() {
+                        // A response may follow turn/completed; do not resurrect it.
+                        if self.state.completed_turn.as_deref() != Some(turn) {
+                            self.state.active = Some(turn.into());
+                            if !self.state.injection.as_ref().is_some_and(|i| i.state == InjectionRunState::Running) {
+                                self.running();
+                            }
+                        }
+                    }
+                    for key in ["model", "effort", "sandboxPolicy"] {
+                        if let Some(v) = sent.params.get(key) {
+                            self.state.settings[key] = v.clone();
+                        }
+                    }
+                }
+                QueueOutcome::Done
+            };
+            self.checkpoint();
+            if let Some(reply) = self.replies.remove(&qid) {
+                let _ = reply.send(outcome);
+            }
+        }
+        // Ahead of the thread filter, which it would not pass: the update is
+        // about the *account*, carries no `threadId`, and this process is that
+        // account's for its whole life. Recorded, and otherwise ignored exactly
+        // as it always was.
+        if value["method"] == "account/rateLimits/updated" {
+            self.note_rate_limits(&value["params"]);
+            return Ok(());
+        }
+        if value["params"]["threadId"] != self.record.session_id {
+            return Ok(());
+        }
+        match value["method"].as_str() {
+            Some("turn/started") => {
+                self.state.active = value["params"]["turn"]["id"].as_str().map(str::to_owned);
+                if !self.state.injection.as_ref().is_some_and(|i| i.state == InjectionRunState::Running) {
+                    self.running();
+                }
+                self.checkpoint();
+                self.send_interrupt().await?;
+            }
+            Some("turn/completed") => {
+                let turn = &value["params"]["turn"];
+                if self.state.active.as_deref().is_none_or(|active| Some(active) == turn["id"].as_str()) {
+                    self.state.active = None;
+                    self.state.completed_turn = turn["id"].as_str().map(str::to_owned);
+                    self.state.interrupt_requested = false;
+                    self.interrupt = None;
+                    let interrupted = turn["status"] == "interrupted";
+                    let failed = turn["status"] == "failed";
+                    self.state.paused |= failed;
+                    self.finish(
+                        if failed {
+                            Some(self.registry.redact(&turn["error"].to_string()))
+                        } else {
+                            None
+                        },
+                        interrupted,
+                    );
+                    self.checkpoint();
+                    if failed {
+                        self.note_turn_error(&turn["error"]);
+                    } else if turn["status"] == "completed" {
+                        self.note_turn_completed();
+                    }
+                    if self.link.at() > self.link.total() {
+                        if let Some(injection) = &self.state.injection {
+                            crate::push::notify_turn(
+                                self.registry.paths.clone(),
+                                Source::Codex,
+                                self.record.session_id.clone(),
+                                injection.state,
+                                injection.error.0.clone(),
+                                self.registry.driver_states(),
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Whether the line just read is new, rather than history an attach is
+    /// replaying — the same boundary the push notification keeps, and for the
+    /// same reason: a limit hit before this server existed is not news.
+    fn live(&self) -> bool {
+        self.link.at() > self.link.total()
+    }
+
+    /// The account and model this process runs, as the limit log names them.
+    fn limit_subject(&self) -> (String, Option<String>) {
+        (
+            crate::accounts::rest::account_key(self.record.codex_account.as_deref(), AccountProvider::Codex),
+            self.state.settings.get("model").and_then(Value::as_str).map(str::to_owned),
+        )
+    }
+
+    /// A turn that completed: the login it ran on took its credential, so a
+    /// refused-credential rest on it is over. Codex has no reading to heal its
+    /// local login the way claude's heals ([`crate::accounts::local_login`]);
+    /// this is how a `signed_out` codex login comes back.
+    fn note_turn_completed(&self) {
+        if !self.live() {
+            return;
+        }
+        let (account_id, _) = self.limit_subject();
+        self.registry.credential_accepted(&account_id, &self.record.session_id);
+    }
+
+    /// Record a failed turn whose error is an account limit. Recording only:
+    /// the queue pauses exactly as it did before.
+    fn note_turn_error(&self, error: &Value) {
+        if !self.live() {
+            return;
+        }
+        let (account_id, model) = self.limit_subject();
+        let Some(verdict) = crate::accounts::limits::read_codex_turn_error(error) else {
+            return;
+        };
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| error.as_str())
+            .unwrap_or_default()
+            .to_string();
+        self.registry.record_limit(crate::accounts::rest::Observation {
+            account_id,
+            session_id: Some(self.record.session_id.clone()),
+            source: "codex:turn",
+            model,
+            verdict,
+            raw: error.to_string(),
+            reason: message,
+            may_rest: true,
+        });
+    }
+
+    /// Record an `account/rateLimits/updated` that says a limit was reached.
+    ///
+    /// Most of these are readings — codex sends one after every response — and
+    /// are not events. One with a full window, or a limit or spend control
+    /// reached, is; it rests the account only when it says until when.
+    fn note_rate_limits(&self, params: &Value) {
+        if !self.live() {
+            return;
+        }
+        let Some(verdict) = crate::accounts::limits::read_codex_rate_limits(params) else {
+            return;
+        };
+        let (account_id, model) = self.limit_subject();
+        let may_rest = verdict.until_ms.is_some();
+        let reason = params
+            .pointer("/rateLimits/rateLimitReachedType")
+            .and_then(Value::as_str)
+            .map(|kind| format!("codex rate limits: {kind}"))
+            .unwrap_or_else(|| "codex rate limits: a window is at 100%".to_string());
+        self.registry.record_limit(crate::accounts::rest::Observation {
+            account_id,
+            session_id: Some(self.record.session_id.clone()),
+            source: "codex:rate_limits",
+            model,
+            verdict,
+            raw: params.to_string(),
+            reason,
+            may_rest,
+        });
+    }
+
+    async fn tick(&mut self) -> Result<(), InjectError> {
+        if self.archive_reply.is_some() && self.archive_since.elapsed() > RPC_TIMEOUT {
+            let _ = self.archive_reply.take().unwrap().send(Err(InjectError::message(
+                "Codex archive acknowledgement timed out; waiting for confirmation without retrying or accepting new messages",
+            )));
+            // Keep the persisted ID for a late reply or restart replay.
+        }
+        if self.link.at() >= self.link.total() {
+            self.send_interrupt().await?;
+        }
+        if !self.state.paused && self.state.queue.iter().any(|q| q.request.is_some()) && self.pending_since.elapsed() > RPC_TIMEOUT {
+            self.state.paused = true;
+            for (_, reply) in self.replies.drain() {
+                let _ = reply.send(QueueOutcome::Unreachable);
+            }
+            // Keep the request IDs for late acknowledgements/replay. Never resend.
+            if self.state.active.is_none() {
+                self.finish(
+                    Some("Codex delivery acknowledgement timed out; message retained without automatic retry".into()),
+                    false,
+                );
+            }
+            self.checkpoint();
+        }
+        if let Some((turn, at, rung)) = &self.interrupt {
+            let patience = if *rung == 0 { RPC_TIMEOUT } else { self.registry.interrupt_step };
+            let still_target = self.state.active == *turn && (turn.is_some() || self.state.queue.iter().any(|q| q.request.is_some()));
+            if at.elapsed() > patience && still_target {
+                // A CLI wedged before announcing a turn is cancellable too.
+                self.link.kill_claude(if *rung == 0 { libc::SIGTERM } else { libc::SIGKILL });
+                self.interrupt = Some((turn.clone(), Instant::now(), 1));
+            }
+        }
+        Ok(())
+    }
+
+    async fn close_archived(&mut self) {
+        // Closing this per-session server is safe only after archive succeeds.
+        // Keep its archived checkpoint if EOF cannot be sent, for next boot.
+        match tokio::time::timeout(RPC_TIMEOUT, self.link.close_stdin()).await {
+            Ok(Ok(())) => self.registry.journal.remove(&self.record.run_id),
+            _ => tracing::warn!(session = %self.record.session_id, "archived Codex server could not be closed; keeping its cleanup record"),
+        }
+    }
+
+    async fn send_interrupt(&mut self) -> Result<(), InjectError> {
+        let waiting_for_id = self.interrupt.as_ref().is_some_and(|(turn, _, rung)| turn.is_none() && *rung == 0);
+        if self.state.interrupt_requested && (self.interrupt.is_none() || waiting_for_id) && self.link.at() >= self.link.total() {
+            if let Some(turn) = self.state.active.clone() {
+                let id = new_uuid();
+                self.interrupt = Some((Some(turn.clone()), Instant::now(), 0));
+                write(
+                    &mut self.link,
+                    json!({"id":id,"method":"turn/interrupt","params":{"threadId":self.record.session_id,"turnId":turn}}),
+                )
+                .await?;
+            } else if self.interrupt.is_none() && self.state.queue.iter().any(|q| q.request.is_some()) {
+                self.interrupt = Some((None, Instant::now(), 0));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncWriteExt, BufReader};
+    use tokio::net::{
+        unix::{OwnedReadHalf, OwnedWriteHalf},
+        UnixListener,
+    };
+
+    struct Harness {
+        driver: Driver,
+        input: BufReader<OwnedReadHalf>,
+        output: OwnedWriteHalf,
+        _home: tempfile::TempDir,
+    }
+
+    impl Harness {
+        async fn new() -> Self {
+            let home = tempfile::tempdir().unwrap();
+            let paths = Arc::new(Paths::new(home.path().into()));
+            let dirs = InstanceDirs::new(&paths.data_dir(), "codex-test").unwrap();
+            dirs.create().unwrap();
+            let accounts = Arc::new(crate::accounts::store::AccountsStore::new(paths.clone()));
+            let quota = Arc::new(crate::quota::QuotaCache::new(paths.clone()));
+            let registry = InjectionRegistry::new(paths, &dirs, accounts, quota);
+            let socket = home.path().join("mock.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let connector = tokio::spawn(async move { shim::connect_in_process(&socket).await.unwrap() });
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut output) = stream.into_split();
+            let mut input = BufReader::new(read);
+            let mut hello = String::new();
+            input.read_line(&mut hello).await.unwrap();
+            output
+                .write_all(format!("{{\"shim_hello\":{{\"claude_pid\":{},\"total\":0}}}}\n", std::process::id()).as_bytes())
+                .await
+                .unwrap();
+            let link = connector.await.unwrap();
+            let record = runs::RunRecord {
+                run_id: new_uuid(),
+                source: Source::Codex,
+                session_id: "test-thread".into(),
+                cwd: None,
+                cli_pid: std::process::id(),
+                started_at: iso8601(SystemTime::now()),
+                pid_token: procs::start_token(std::process::id()),
+                resident: true,
+                shim: None,
+                fingerprint: None,
+                turn_at: None,
+                queued: vec![],
+                codex: Some(State::default()),
+                codex_account: None,
+                hold: None,
+            };
+            let (_tx, rx) = mpsc::unbounded_channel();
+            let driver = Driver {
+                claim: Some(claim_session(&registry, "test-thread").unwrap()),
+                registry,
+                record,
+                link,
+                state: State::default(),
+                shared: Arc::new(Mutex::new(State::default())),
+                rx,
+                replies: HashMap::new(),
+                pending_since: Instant::now(),
+                interrupt: None,
+                archive_reply: None,
+                archive_since: Instant::now(),
+                retiring: false,
+                // Milliseconds, not the half-minute a real shutdown is given:
+                // every test here drives a mock socket whose "CLI" is this very
+                // process, so the live branch would otherwise wait out the lot.
+                retire_wait: Duration::from_millis(100),
+            };
+            Self {
+                driver,
+                input,
+                output,
+                _home: home,
+            }
+        }
+        /// A handle wired to this driver's shared state, as the registry holds
+        /// one. The receiver comes back with it so the caller can keep the
+        /// handle *alive* — a dropped one reads as a driver that has stopped.
+        fn handle(&self) -> (Handle, mpsc::UnboundedReceiver<Cmd>) {
+            let (tx, rx) = mpsc::unbounded_channel();
+            (
+                Handle {
+                    tx,
+                    shared: self.driver.shared.clone(),
+                    account: None,
+                },
+                rx,
+            )
+        }
+        async fn event(&mut self, value: Value) {
+            self.output.write_all(format!("{value}\n").as_bytes()).await.unwrap();
+            let output = self.driver.link.recv().await.unwrap();
+            self.driver.output(output).await.unwrap();
+        }
+        async fn request(&mut self) -> Value {
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(2), self.input.read_line(&mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            serde_json::from_str(&line).unwrap()
+        }
+        async fn enqueue(&mut self, text: &str) -> String {
+            let message = message(text, &SendOptions::default()).unwrap();
+            let id = message.id.clone();
+            let (tx, rx) = oneshot::channel();
+            self.driver.command(Cmd::Deliver(message, tx)).await.unwrap();
+            rx.await.unwrap().unwrap();
+            id
+        }
+        async fn start(&mut self) -> Value {
+            self.enqueue("first").await;
+            self.driver.submit(0, false).await.unwrap();
+            let request = self.request().await;
+            self.event(json!({"method":"turn/started","params":{"threadId":"test-thread","turn":{"id":"turn-1","status":"inProgress"}}}))
+                .await;
+            self.event(json!({"id":request["id"],"result":{"turn":{"id":"turn-1","status":"inProgress"}}}))
+                .await;
+            request
+        }
+        async fn complete(&mut self, status: &str) {
+            self.event(json!({"method":"turn/completed","params":{"threadId":"test-thread","turn":{"id":"turn-1","status":status,"error":{"message":"test failure"}}}})).await;
+        }
+    }
+
+    /// The codex local login is `signed_out` on a refused credential, a rest
+    /// with no end of its own. A turn that completes on it proves the
+    /// credential works again and ends that rest; a failed one does not, and a
+    /// quota rest is left alone.
+    #[tokio::test]
+    async fn a_completed_turn_ends_a_refused_credential_rest_on_its_login() {
+        use crate::accounts::limits::{LimitClass, Verdict};
+        use crate::accounts::local_login::LocalLoginState;
+        use crate::accounts::rest::{now_ms, Observation, LOCAL_CODEX};
+        let mut h = Harness::new().await;
+        h.start().await;
+        let accounts = h.driver.registry.accounts.clone();
+        let rest = |class: LimitClass, until_ms: Option<i64>| Observation {
+            account_id: LOCAL_CODEX.to_string(),
+            session_id: Some("test-thread".into()),
+            source: "codex:turn",
+            model: None,
+            verdict: Verdict {
+                class,
+                scope: "all".into(),
+                until_ms,
+            },
+            raw: "401 Unauthorized".into(),
+            reason: String::new(),
+            may_rest: true,
+        };
+        accounts.limit_log().record(&rest(LimitClass::Auth, None), now_ms()).expect("refused");
+        assert_eq!(accounts.local_logins().codex.state, LocalLoginState::SignedOut);
+
+        h.complete("failed").await;
+        assert_eq!(accounts.local_logins().codex.state, LocalLoginState::SignedOut, "a failed turn proves nothing");
+
+        accounts
+            .limit_log()
+            .record(&rest(LimitClass::Session, Some(now_ms() + 3_600_000)), now_ms())
+            .expect("spent");
+        h.complete("completed").await;
+        let local = accounts.local_logins().codex;
+        assert_eq!(local.state, LocalLoginState::Unknown, "signed in again, as far as anything says");
+        assert_eq!(
+            local.rest.iter().map(|rest| rest.class).collect::<Vec<_>>(),
+            vec![LimitClass::Session],
+            "only the refused credential ends"
+        );
+    }
+
+    /// A failed turn that is an account limit, and a rate-limit update with a
+    /// full window, land in the limit log — and nothing else about the driver
+    /// changes: the failed turn pauses the queue exactly as any failed turn
+    /// always has.
+    #[tokio::test]
+    async fn a_usage_limit_is_recorded_and_changes_nothing_else() {
+        use crate::accounts::limits::LimitClass;
+        let mut h = Harness::new().await;
+        h.start().await;
+        let log = h.driver.registry.accounts.limit_log();
+
+        h.event(json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":40,"resetsAt":1790000000}}}}))
+            .await;
+        assert!(log.events(None, 10).is_empty(), "a reading is not an event");
+
+        // A full window resetting in 2100, then the turn failing on it.
+        h.event(json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":100,"windowDurationMins":300,"resetsAt":4_102_444_800i64}}}}))
+            .await;
+        h.event(json!({"method":"turn/completed","params":{"threadId":"test-thread","turn":{"id":"turn-1","status":"failed","error":{"message":"You've hit your usage limit. Try again later.","codexErrorInfo":"usageLimitExceeded"}}}}))
+            .await;
+        assert!(h.driver.state.paused, "the queue pauses on a failed turn, as it always did");
+        assert!(h.driver.state.active.is_none());
+
+        let events = log.events(None, 10);
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!((events[0].source.as_str(), events[0].class), ("codex:turn", LimitClass::Session));
+        assert_eq!(events[0].account_id.0, None, "the machine's own codex login goes out as null");
+        assert_eq!(events[0].session_id.0.as_deref(), Some("test-thread"));
+        assert_eq!((events[1].source.as_str(), events[1].class), ("codex:rate_limits", LimitClass::Rate));
+        assert!(events[1].until_at.0.as_deref().is_some_and(|at| at.starts_with("2100-01-01")));
+
+        // One rest for the whole account: the known reset, which the usage
+        // limit's thirty-minute default did not cut short.
+        let rests = log.active_rests(crate::accounts::rest::now_ms());
+        let local = &rests[crate::accounts::rest::LOCAL_CODEX];
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].class, LimitClass::Rate);
+        assert!(local[0].until_at.0.as_deref().is_some_and(|at| at.starts_with("2100-01-01")));
+
+        // A failure that is not a limit is not an event.
+        h.complete("failed").await;
+        assert_eq!(log.events(None, 10).len(), 2);
+    }
+
+    #[test]
+    fn turn_params_preserve_settings_and_attachments() {
+        let m = message(
+            "hello",
+            &SendOptions {
+                model: Some("gpt-5".into()),
+                effort: Some("high".into()),
+                permission: Some("auto".into()),
+                images: vec!["/uploads/a.png".into()],
+                files: vec!["/uploads/a.txt".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(m.params["sandboxPolicy"]["type"], "workspaceWrite");
+        assert_eq!(m.params["approvalPolicy"], "never");
+        assert_eq!(m.params["model"], "gpt-5");
+        assert_eq!(m.params["effort"], "high");
+        assert_eq!(m.params["input"][1], json!({"type":"localImage","path":"/uploads/a.png"}));
+        assert!(m.params["input"][0]["text"].as_str().unwrap().contains("/uploads/a.txt"));
+        assert!(message(
+            "x",
+            &SendOptions {
+                permission: Some("invalid".into()),
+                ..Default::default()
+            }
+        )
+        .is_err());
+    }
+
+    /// Switching account retires the running process — but only when it has
+    /// really gone. A CLI that ignores the EOF must leave everything exactly
+    /// where it was, because the caller's next move is to start a second
+    /// app-server on the same thread under a different key.
+    #[tokio::test]
+    async fn a_process_that_will_not_exit_keeps_its_claim_instead_of_being_replaced() {
+        let mut h = Harness::new().await;
+        let run_id = h.driver.record.run_id.clone();
+        h.driver.registry.journal.add(h.driver.record.clone());
+        let (handle, _rx) = h.handle();
+        h.driver.registry.codex_servers.lock().unwrap().insert("test-thread".into(), handle);
+
+        // `cli_pid` is this test process, which is not going anywhere.
+        let (reply, rx) = oneshot::channel();
+        h.driver.command(Cmd::Retire(reply)).await.unwrap();
+        let error = rx.await.unwrap().expect_err("a process that is still there has not retired");
+        assert!(error.to_string().contains("did not accept the shutdown"), "{error}");
+
+        assert!(!h.driver.retiring, "the driver stays in its loop");
+        assert!(h.driver.claim.is_some(), "and keeps the whole-machine claim");
+        assert!(
+            h.driver.registry.journal.read().iter().any(|record| record.run_id == run_id),
+            "the run is still the one on disk"
+        );
+        assert!(
+            h.driver.registry.codex_handle("test-thread").is_some(),
+            "so a send is refused rather than double-spawned"
+        );
+    }
+
+    /// The other half: once the process is gone, the claim is released *before*
+    /// the reply, so the caller can spawn the replacement immediately.
+    #[tokio::test]
+    async fn a_retired_process_hands_over_its_claim_and_its_journal_entry() {
+        let mut h = Harness::new().await;
+        let run_id = h.driver.record.run_id.clone();
+        h.driver.registry.journal.add(h.driver.record.clone());
+        let (handle, _rx) = h.handle();
+        h.driver.registry.codex_servers.lock().unwrap().insert("test-thread".into(), handle);
+        // A pid that has really been and gone, reaped before it is named here:
+        // a made-up number risks `kill(-1, 0)` and other pids that are not pids.
+        let mut gone = std::process::Command::new("true").spawn().expect("spawn");
+        let gone_pid = gone.id();
+        gone.wait().expect("reap");
+        h.driver.record.cli_pid = gone_pid;
+        h.driver.record.pid_token = None;
+        assert!(!procs::is_same_process(gone_pid, None), "the fixture must really be dead");
+
+        let (reply, rx) = oneshot::channel();
+        h.driver.command(Cmd::Retire(reply)).await.unwrap();
+        rx.await.unwrap().expect("the process is gone, so the session is free");
+
+        assert!(h.driver.retiring, "the loop is asked to end without reporting a death");
+        assert!(h.driver.claim.is_none(), "the claim is released before the caller is told");
+        assert!(!h.driver.registry.journal.read().iter().any(|record| record.run_id == run_id));
+        assert!(h.driver.registry.codex_handle("test-thread").is_none());
+    }
+
+    #[tokio::test]
+    async fn archive_uses_the_resident_and_removes_its_journal_only_after_ack() {
+        let mut h = Harness::new().await;
+        let (reply, rx) = oneshot::channel();
+        h.driver.command(Cmd::Archive(reply)).await.unwrap();
+        let request = h.request().await;
+        assert_eq!(request["method"], "thread/archive");
+        assert_eq!(request["params"]["threadId"], "test-thread");
+        let saved = h.driver.registry.journal.read().pop().unwrap().codex.unwrap();
+        assert_eq!(saved.archive_request.as_deref(), request["id"].as_str());
+        assert!(!saved.archived);
+        h.event(json!({"id":request["id"],"result":{}})).await;
+        rx.await.unwrap().unwrap();
+        assert!(h.driver.shared.lock().unwrap().archived);
+        assert!(h.driver.registry.journal.read().is_empty());
+        assert!(h.driver.state.injection.is_none());
+    }
+
+    #[tokio::test]
+    async fn archive_rejection_preserves_the_resident_and_allows_delivery() {
+        let mut h = Harness::new().await;
+        let (reply, rx) = oneshot::channel();
+        h.driver.command(Cmd::Archive(reply)).await.unwrap();
+        let request = h.request().await;
+        h.event(json!({"id":request["id"],"error":{"code":-32600,"message":"archive refused"}}))
+            .await;
+        assert!(rx.await.unwrap().unwrap_err().to_string().contains("archive refused"));
+        assert!(!h.driver.state.archived);
+        assert!(h.driver.state.archive_request.is_none());
+        assert_eq!(h.driver.registry.journal.read().len(), 1);
+        h.enqueue("still usable").await;
+        assert_eq!(h.driver.state.queue[0].text, "still usable");
+    }
+
+    #[tokio::test]
+    async fn archive_refuses_running_and_queued_work_without_dropping_it() {
+        for running in [false, true] {
+            let mut h = Harness::new().await;
+            if running {
+                h.start().await;
+            } else {
+                h.enqueue("keep me").await;
+            }
+            let before = serde_json::to_value(&h.driver.state).unwrap();
+            let (reply, rx) = oneshot::channel();
+            h.driver.command(Cmd::Archive(reply)).await.unwrap();
+            assert!(rx.await.unwrap().is_err());
+            assert_eq!(serde_json::to_value(&h.driver.state).unwrap(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn archive_timeout_blocks_delivery_and_reconciles_late_ack_after_replay() {
+        let mut h = Harness::new().await;
+        let (reply, rx) = oneshot::channel();
+        h.driver.command(Cmd::Archive(reply)).await.unwrap();
+        let request = h.request().await;
+        h.driver.archive_since = Instant::now() - RPC_TIMEOUT - Duration::from_secs(1);
+        h.driver.tick().await.unwrap();
+        assert!(rx.await.unwrap().unwrap_err().to_string().contains("timed out"));
+        let (reply, rx) = oneshot::channel();
+        h.driver
+            .command(Cmd::Deliver(message("too late", &SendOptions::default()).unwrap(), reply))
+            .await
+            .unwrap();
+        assert!(rx.await.unwrap().is_err());
+        assert!(h.driver.state.queue.is_empty());
+        h.driver.state = h.driver.registry.journal.read().pop().unwrap().codex.unwrap();
+        assert_eq!(h.driver.state.archive_request.as_deref(), request["id"].as_str());
+        h.event(json!({"id":request["id"],"result":{}})).await;
+        assert!(h.driver.state.archived);
+        assert!(h.driver.registry.journal.read().is_empty());
+    }
+
+    #[tokio::test]
+    async fn archive_gate_prevents_a_concurrent_send_from_resurrecting_the_session() {
+        let mut h = Harness::new().await;
+        let registry = h.driver.registry.clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        h.driver.rx = rx;
+        let handle = Handle {
+            tx,
+            shared: h.driver.shared.clone(),
+            account: None,
+        };
+        registry.codex_servers.lock().unwrap().insert("test-thread".into(), handle.clone());
+        let driver = tokio::spawn(h.driver.run());
+        let archiver = registry.clone();
+        let archive = tokio::spawn(async move { archiver.archive_codex("test-thread").await });
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(2), h.input.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], "thread/archive");
+        let sender = registry.clone();
+        let send = tokio::spawn(async move {
+            sender
+                .codex_deliver(Some("test-thread"), None, "stale send", &SendOptions::default(), None)
+                .await
+        });
+        h.output
+            .write_all(format!("{}\n", json!({"id":request["id"],"result":{}})).as_bytes())
+            .await
+            .unwrap();
+        archive.await.unwrap().unwrap();
+        assert!(send.await.unwrap().unwrap_err().to_string().contains("archived"));
+        driver.await.unwrap();
+        assert!(!handle.visible());
+        assert!(registry.journal.read().is_empty());
+        assert!(claim_session(&registry, "test-thread").is_ok(), "the driver released its claim");
+    }
+
+    #[tokio::test]
+    async fn native_steer_is_acknowledged_without_ending_the_turn() {
+        let mut h = Harness::new().await;
+        h.start().await;
+        let id = h.enqueue("correction").await;
+        let (reply, rx) = oneshot::channel();
+        h.driver
+            .command(Cmd::Queue {
+                id: id.clone(),
+                steer: true,
+                reply,
+            })
+            .await
+            .unwrap();
+        let request = h.request().await;
+        assert_eq!(request["method"], "turn/steer");
+        assert_eq!(request["params"]["expectedTurnId"], "turn-1");
+        assert_eq!(request["params"]["input"][0]["text"], "correction");
+        assert!(h.driver.state.queue[0].request.is_some());
+        h.event(json!({"id":request["id"],"result":{"turnId":"turn-1"}})).await;
+        assert_eq!(rx.await.unwrap(), QueueOutcome::Done);
+        assert!(h.driver.state.queue.is_empty());
+        assert_eq!(h.driver.state.active.as_deref(), Some("turn-1"));
+        assert_eq!(h.driver.state.injection.as_ref().unwrap().state, InjectionRunState::Running);
+    }
+
+    #[tokio::test]
+    async fn rejected_steer_preserves_the_message_and_current_turn() {
+        let mut h = Harness::new().await;
+        h.start().await;
+        let id = h.enqueue("correction").await;
+        let (reply, rx) = oneshot::channel();
+        h.driver
+            .command(Cmd::Queue {
+                id: id.clone(),
+                steer: true,
+                reply,
+            })
+            .await
+            .unwrap();
+        let request = h.request().await;
+        h.event(json!({"id":request["id"],"error":{"code":-32600,"message":"turn changed"}}))
+            .await;
+        assert!(matches!(rx.await.unwrap(), QueueOutcome::Refused { reason } if reason.contains("turn changed")));
+        assert_eq!(h.driver.state.queue[0].id, id);
+        assert!(h.driver.state.queue[0].request.is_none());
+        assert_eq!(h.driver.state.active.as_deref(), Some("turn-1"));
+    }
+
+    #[tokio::test]
+    async fn interrupt_waits_for_completion_and_keeps_the_queue() {
+        let mut h = Harness::new().await;
+        h.start().await;
+        h.enqueue("next").await;
+        h.driver.command(Cmd::Interrupt).await.unwrap();
+        let request = h.request().await;
+        assert_eq!(request["method"], "turn/interrupt");
+        assert_eq!(request["params"]["turnId"], "turn-1");
+        h.event(json!({"id":request["id"],"result":{}})).await;
+        assert!(h.driver.state.active.is_some());
+        h.complete("interrupted").await;
+        assert!(h.driver.state.active.is_none());
+        assert!(h.driver.state.injection.as_ref().unwrap().interrupted);
+        assert_eq!(h.driver.state.queue.len(), 1);
+        assert!(!h.driver.state.paused);
+    }
+
+    #[tokio::test]
+    async fn stop_during_start_handshake_is_not_lost() {
+        let mut h = Harness::new().await;
+        h.enqueue("first").await;
+        h.driver.submit(0, false).await.unwrap();
+        h.request().await;
+        h.driver.command(Cmd::Interrupt).await.unwrap();
+        h.event(json!({"method":"turn/started","params":{"threadId":"test-thread","turn":{"id":"turn-1"}}}))
+            .await;
+        assert_eq!(h.request().await["method"], "turn/interrupt");
+    }
+
+    #[tokio::test]
+    async fn late_start_response_does_not_resurrect_a_completed_turn() {
+        let mut h = Harness::new().await;
+        h.enqueue("first").await;
+        h.driver.submit(0, false).await.unwrap();
+        let request = h.request().await;
+        h.complete("completed").await;
+        h.event(json!({"id":request["id"],"result":{"turn":{"id":"turn-1","status":"inProgress"}}}))
+            .await;
+        assert!(h.driver.state.active.is_none());
+        assert!(h.driver.state.queue.is_empty());
+        assert_eq!(h.driver.state.injection.as_ref().unwrap().state, InjectionRunState::Ok);
+    }
+
+    #[tokio::test]
+    async fn queue_and_pending_rpc_are_durable_before_acknowledgement() {
+        let mut h = Harness::new().await;
+        h.start().await;
+        h.enqueue("next").await;
+        h.driver.submit(0, true).await.unwrap();
+        let request = h.request().await;
+        let saved = h.driver.registry.journal.read().pop().unwrap().codex.unwrap();
+        assert_eq!(saved.queue[0].request.as_deref(), request["id"].as_str());
+        // Reconstruct exactly the state adoption starts with, then consume the
+        // response produced while remote-hand was disconnected.
+        h.driver.state = serde_json::from_value(serde_json::to_value(saved).unwrap()).unwrap();
+        h.event(json!({"id":request["id"],"result":{"turnId":"turn-1"}})).await;
+        assert!(h.driver.registry.journal.read()[0].codex.as_ref().unwrap().queue.is_empty());
+        assert_eq!(h.driver.state.active.as_deref(), Some("turn-1"));
+    }
+
+    #[tokio::test]
+    async fn failed_turn_pauses_queue_and_other_thread_events_are_ignored() {
+        let mut h = Harness::new().await;
+        h.start().await;
+        h.enqueue("next").await;
+        h.event(json!({"method":"turn/completed","params":{"threadId":"other-thread","turn":{"id":"turn-1","status":"completed"}}}))
+            .await;
+        assert!(h.driver.state.active.is_some());
+        h.complete("failed").await;
+        assert!(h.driver.state.paused);
+        assert_eq!(h.driver.state.queue[0].text, "next");
+    }
+
+    #[tokio::test]
+    async fn unexpected_approval_requests_are_rejected_not_approved() {
+        let mut h = Harness::new().await;
+        h.event(json!({"id":42,"method":"item/commandExecution/requestApproval","params":{}}))
+            .await;
+        let response = h.request().await;
+        assert_eq!(response["id"], 42);
+        assert_eq!(response["error"]["code"], -32601);
+        assert!(response.get("result").is_none());
+    }
+
+    #[tokio::test]
+    async fn dead_process_retains_queue_and_allows_explicit_withdrawal() {
+        let mut h = Harness::new().await;
+        let id = h.enqueue("possibly delivered").await;
+        h.driver.submit(0, false).await.unwrap();
+        h.request().await;
+        let record = h.driver.registry.journal.read().pop().unwrap();
+        h.driver.registry.codex_dead(record);
+        let handle = h.driver.registry.codex_handle("test-thread").unwrap();
+        assert!(!handle.alive());
+        assert!(handle.visible());
+        assert_eq!(handle.info().queued, 1);
+        assert!(!handle.info().queued_messages[0].steered, "withdrawal is safe once the process is dead");
+        assert!(h.driver.registry.journal.read()[0].codex.as_ref().unwrap().queue[0].uncertain);
+        assert_eq!(h.driver.registry.codex_queue_action("test-thread", &id, false).await, QueueOutcome::Done);
+        assert!(h.driver.registry.journal.read()[0].codex.as_ref().unwrap().queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn acknowledgement_timeout_never_resubmits_and_late_ack_still_reconciles() {
+        let mut h = Harness::new().await;
+        h.enqueue("first").await;
+        h.driver.submit(0, false).await.unwrap();
+        let request = h.request().await;
+        h.driver.pending_since = Instant::now() - RPC_TIMEOUT - Duration::from_secs(1);
+        h.driver.tick().await.unwrap();
+        assert!(h.driver.state.paused);
+        assert!(h.driver.state.queue[0].request.is_some());
+        h.event(json!({"id":request["id"],"result":{"turn":{"id":"turn-1","status":"inProgress"}}}))
+            .await;
+        assert!(h.driver.state.queue.is_empty());
+        assert_eq!(h.driver.state.active.as_deref(), Some("turn-1"));
+        assert_eq!(h.driver.state.injection.as_ref().unwrap().state, InjectionRunState::Running);
+    }
+
+    #[tokio::test]
+    async fn steering_cannot_change_model_or_drop_a_written_message() {
+        let mut h = Harness::new().await;
+        h.start().await;
+        let id = h.enqueue("use different model").await;
+        h.driver.state.queue[0].params["model"] = json!("other-model");
+        let (reply, rx) = oneshot::channel();
+        h.driver
+            .command(Cmd::Queue {
+                id: id.clone(),
+                steer: true,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(rx.await.unwrap(), QueueOutcome::Refused { .. }));
+        h.driver.state.queue[0].params.as_object_mut().unwrap().remove("model");
+        h.driver.submit(0, true).await.unwrap();
+        h.request().await;
+        let (reply, rx) = oneshot::channel();
+        h.driver.command(Cmd::Queue { id, steer: false, reply }).await.unwrap();
+        assert_eq!(rx.await.unwrap(), QueueOutcome::AlreadySteered);
+    }
+
+    /// Codex gets the same receipts: a named message is queued until codex
+    /// acknowledges the `turn/start` that carries it, sent once it has, and
+    /// failed when it is withdrawn instead.
+    #[tokio::test]
+    async fn a_named_messages_receipt_follows_it_into_codex_and_out_of_the_queue() {
+        use crate::inject::receipts::{Claim, Kind, ReceiptStatus};
+        let mut h = Harness::new().await;
+        let receipts = h.driver.registry.receipts().clone();
+        let named = |text: &str| {
+            let client = new_uuid();
+            let now = crate::inject::receipts::now_ms();
+            let Claim::Owned { qid } = receipts.claim(&client, Kind::Message, Source::Codex, Some("test-thread"), now).unwrap() else {
+                panic!("a fresh id is owned");
+            };
+            receipts.complete(&client, "{}", None, now);
+            let options = SendOptions {
+                message_id: Some(qid.clone()),
+                ..SendOptions::default()
+            };
+            let message = message(text, &options).unwrap();
+            assert_eq!(message.id, qid, "the message travels under the queue id the claim chose");
+            message
+        };
+        let status = |receipts: &crate::inject::receipts::Receipts, qid: &str| {
+            receipts
+                .for_session(Source::Codex, "test-thread", crate::inject::receipts::now_ms())
+                .into_iter()
+                .find(|receipt| receipt.qid.0.as_deref() == Some(qid))
+                .map(|receipt| receipt.status)
+        };
+
+        let first = named("first");
+        let first_id = first.id.clone();
+        let (tx, rx) = oneshot::channel();
+        h.driver.command(Cmd::Deliver(first, tx)).await.unwrap();
+        rx.await.unwrap().unwrap();
+        h.driver.submit(0, false).await.unwrap();
+        let request = h.request().await;
+        assert_eq!(request["params"]["clientUserMessageId"], first_id.as_str());
+        assert_eq!(status(&receipts, &first_id), Some(ReceiptStatus::Queued), "written, not yet acknowledged");
+        h.event(json!({"id":request["id"],"result":{"turn":{"id":"turn-1","status":"inProgress"}}}))
+            .await;
+        assert_eq!(status(&receipts, &first_id), Some(ReceiptStatus::Sent));
+
+        let second = named("withdrawn");
+        let second_id = second.id.clone();
+        let (tx, rx) = oneshot::channel();
+        h.driver.command(Cmd::Deliver(second, tx)).await.unwrap();
+        rx.await.unwrap().unwrap();
+        let (reply, rx) = oneshot::channel();
+        h.driver
+            .command(Cmd::Queue {
+                id: second_id.clone(),
+                steer: false,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(rx.await.unwrap(), QueueOutcome::Done);
+        assert_eq!(status(&receipts, &second_id), Some(ReceiptStatus::Failed));
+    }
+}

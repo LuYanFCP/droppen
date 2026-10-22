@@ -1,0 +1,27 @@
+{
+  "name": "remote-hand",
+  "private": true,
+  "version": "0.1.0",
+  "license": "AGPL-3.0-only",
+  "packageManager": "pnpm@10.6.3",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev:server": "DROPPEN_ALLOW_MISSING_WEB_DIST=1 cargo run --manifest-path server-rs/Cargo.toml -- serve",
+    "dev:web": "pnpm --filter @remote-hand/web dev",
+    "build:server": "cargo build --release --manifest-path server-rs/Cargo.toml",
+    "build:web": "pnpm --filter @remote-hand/web build",
+    "gen:api": "DROPPEN_EXPORT_ROOT=$(mktemp -d) && DROPPEN_CONFIG_DIR=$DROPPEN_EXPORT_ROOT/config DROPPEN_DATA_DIR=$DROPPEN_EXPORT_ROOT/data APP_INSTANCE=openapi-export DROPPEN_ALLOW_MISSING_WEB_DIST=1 cargo run --quiet --manifest-path server-rs/Cargo.toml -- export-openapi --out openapi/openapi.json; status=$?; rm -rf $DROPPEN_EXPORT_ROOT; [ $status -eq 0 ] && pnpm --filter @remote-hand/web gen:api",
+    "typecheck": "pnpm -r typecheck",
+    "check:hub-api": "node docs/hub-api/check.mjs",
+    "test": "pnpm --filter @remote-hand/web test && DROPPEN_ALLOW_MISSING_WEB_DIST=1 cargo test --manifest-path server-rs/Cargo.toml",
+    "check:plugins": "node scripts/check-plugin-boundary.mjs",
+    "check:machines": "node scripts/check-machine-keys.mjs",
+    "check:boundary": "node scripts/check-open-boundary.mjs",
+    "test:boundary": "node --test scripts/check-open-boundary.test.mjs",
+    "test:verify-web": "node --test scripts/verify-web.test.mjs",
+    "test:publish-release": "node --test scripts/publish-release.test.mjs",
+    "test:sdk": "pnpm --filter @droppen/plugin-sdk test"
+  }
+}

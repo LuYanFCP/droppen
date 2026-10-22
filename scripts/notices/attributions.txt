@@ -1,0 +1,73 @@
+Other third-party material
+
+BIP-39 English word list
+  server-rs/crates/rh-proto/src/data/bip39-english.txt and
+  web/src/lib/e2e/wordlist.ts carry the English word list of BIP-39,
+  "Mnemonic code for generating deterministic keys", by Marek Palatinus,
+  Pavol Rusnak, Aaron Voisine and Sean Bowe
+  (https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki), which is
+  published under the MIT License below. The BIP has no "Copyright (c)" line;
+  its header names the authors and "License: MIT", and its notice, verbatim,
+  is its Copyright section:
+
+    This BIP falls under the MIT License.
+
+magpie
+  The rate-limit signal phrases in server-rs/src/accounts/limits.rs are
+  adapted from the router of magpie (https://github.com/yetone/magpie), which
+  is published under the MIT License below with this notice:
+
+    Copyright (c) 2026 yetone
+
+MIT License (for the two items above; copyright their respective authors)
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+The Rust Standard Library
+  Every Rust program here links the Rust Standard Library (core, alloc, std)
+  and the crates the Rust toolchain builds it with (among them hashbrown,
+  addr2line, gimli, object, miniz_oxide, rustc-demangle, std_detect, unwind,
+  panic_unwind and compiler_builtins), from the Rust project
+  (https://github.com/rust-lang/rust). They are used under the MIT License or
+  the Apache License, Version 2.0 (both texts are in the Rust crates' part
+  below); compiler_builtins under the Apache License, Version 2.0 with the LLVM
+  exception below, or the MIT License. The Rust project's notice, verbatim:
+
+    Copyrights in the Rust Standard Library are retained by their
+    contributors. No copyright assignment is required to contribute to the
+    Rust project.
+
+  The toolchain's share/doc/rust/COPYRIGHT-library.html lists every crate it
+  is built from, with its notices.
+
+LLVM Exceptions to the Apache 2.0 License (for compiler_builtins)
+
+  As an exception, if, as a result of your compiling your source code, portions
+  of this Software are embedded into an Object form of such source code, you
+  may redistribute such embedded portions in such Object form without complying
+  with the conditions of Sections 4(a), 4(b) and 4(d) of the License.
+
+  In addition, if you combine or link compiled forms of this Software with
+  software that is licensed under the GPLv2 ("Combined Software") and if a
+  court of competent jurisdiction determines that the patent provision (Section
+  3), the indemnity provision (Section 9) or other Section of the License
+  conflicts with the conditions of the GPLv2, you may retroactively and
+  prospectively choose to deem waived or otherwise exclude such Section(s) of
+  the License, but only in their entirety and only with respect to the Combined
+  Software.

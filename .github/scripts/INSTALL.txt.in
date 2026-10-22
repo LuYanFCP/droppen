@@ -1,0 +1,55 @@
+Droppen server — macOS (@ARCH@)
+===============================
+
+This is the Droppen server, for running Droppen in the background or on a
+device with no screen. For everyday use, the Droppen desktop App is the
+recommended way: https://github.com/getdroppen/releases/releases/latest
+
+Droppen was called remote-hand. The server is now `droppen`; the binary its
+supervisor runs, `<data>/bin/remote-hand-server`, and its data directory keep
+the old name, so an existing install carries on unchanged.
+
+Droppen is licensed under AGPL-3.0-only (see LICENSE); THIRD_PARTY_NOTICES lists
+the third-party software in the server and its licences.
+Copyright (C) 2026 Kilerd
+
+@CONTENTS@
+Install it as `remote-hand-server` — the supervisor looks for exactly
+`<data>/bin/remote-hand-server` — with `droppen` beside it, the command you
+type:
+
+    mkdir -p ~/.local/share/remote-hand/bin
+    mv remote-hand-server ~/.local/share/remote-hand/bin/
+    chmod +x ~/.local/share/remote-hand/bin/remote-hand-server
+    ln -sf remote-hand-server ~/.local/share/remote-hand/bin/droppen
+
+If you downloaded the tarball with a browser, macOS attached a quarantine flag
+and Gatekeeper will refuse to run the binary. Clear it (a `curl` download has
+no such flag):
+
+    xattr -d com.apple.quarantine ~/.local/share/remote-hand/bin/remote-hand-server
+
+Run it under its supervisor, which is what makes self-update and
+restart-survival work:
+
+    ~/.local/share/remote-hand/bin/remote-hand-server up -- serve
+
+Then open http://127.0.0.1:8700.
+
+This server binds 127.0.0.1 by default and asks every browser who it is.
+Until it has an account it shows a setup page:
+`~/.local/share/remote-hand/bin/droppen open` on this device opens it signed in
+as the device's owner, and from anywhere else the first account takes the
+one-time code the server keeps (`droppen setup-code`). Create the account with
+`~/.local/share/remote-hand/bin/droppen user add <name>` (or on the page)
+before exposing it beyond localhost; from then on every request needs a login.
+Access to this server includes files and interactive shells. For remote access,
+use an authenticating reverse proxy, an SSH tunnel, or Tailscale.
+
+The one-line installer does all of the above, creates the first account,
+and starts the server at login with launchd:
+
+    curl -fsSL https://droppen.app/install.sh | sh
+
+Everything else, including how to uninstall:
+https://github.com/getdroppen/releases#readme

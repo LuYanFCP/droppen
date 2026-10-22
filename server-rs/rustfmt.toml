@@ -1,0 +1,3 @@
+# Matches the gotcha framework's own formatting, so a reader moving between
+# this crate and the framework source is not switching wrap widths.
+max_width = 150

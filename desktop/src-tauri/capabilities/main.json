@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "The start-up page (bundled, tauri://) may ask how the start is going, retry it and open the logs. Nothing else: the server's web app (http://127.0.0.1:<port>) gets no capability at all, so it has no IPC into the app.",
+  "windows": ["main"],
+  "permissions": ["allow-startup-status", "allow-retry-start", "allow-open-logs"]
+}

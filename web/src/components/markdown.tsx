@@ -1,0 +1,120 @@
+import { createContext, useContext } from "react";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { DownloadLink } from "@/components/host-file";
+import { LightboxImage } from "@/components/image-lightbox";
+import { ImageFallback } from "@/components/source-image";
+import { cn } from "@/lib/cn";
+import { localFilePath } from "@/lib/fs-url";
+import { imageSource } from "@/lib/image-source";
+
+/** A link the agent wrote to a file on the host, turned into a real download. */
+function FileLink({ path, children }: { path: string; children: React.ReactNode }) {
+  return (
+    <DownloadLink
+      path={path}
+      name={path.split("/").pop() || undefined}
+      title={path}
+      className="text-fg underline decoration-border-strong underline-offset-[3px] hover:decoration-fg"
+    >
+      {children}
+    </DownloadLink>
+  );
+}
+
+/**
+ * Whether an image is the content of a link (`[![badge](…)](…)`), where a
+ * thumbnail button would fight the link for the click and a fallback card's
+ * own anchor would be nested inside it.
+ */
+const InLink = createContext(false);
+
+/**
+ * A picture the agent put in its reply: a bounded thumbnail that opens full
+ * size, from the host, through the GitHub proxy or straight from the web —
+ * see `lib/image-source.ts` for which. Only `![]()` gets here; a plain link to
+ * an image file stays a link.
+ */
+function MarkdownImage({ src, alt }: { src?: string; alt: string }) {
+  const inLink = useContext(InLink);
+  const source = imageSource(src);
+  if (!source) return <ImageFallback alt={alt} reason={src || null} />;
+  return (
+    <LightboxImage
+      source={source}
+      alt={alt}
+      caption={inLink ? undefined : alt || undefined}
+      zoom={!inLink}
+      thumbClassName="max-h-60 max-w-[min(24rem,100%)] rounded border border-border object-contain"
+    />
+  );
+}
+
+/**
+ * react-markdown's own sanitiser, plus `file:`: it drops every protocol it
+ * does not know to an empty string, and `file:///…` is a host path that
+ * `localFilePath` turns into the same download route as `/…`.
+ */
+function urlTransform(url: string): string {
+  return /^file:/i.test(url) ? url : defaultUrlTransform(url);
+}
+
+const components: React.ComponentProps<typeof ReactMarkdown>["components"] = {
+  h1: ({ children }) => <h1 className="mt-3 mb-1 text-sm font-semibold first:mt-0">{children}</h1>,
+  h2: ({ children }) => <h2 className="mt-3 mb-1 text-[13px] font-semibold first:mt-0">{children}</h2>,
+  h3: ({ children }) => <h3 className="mt-2 mb-1 text-xs font-semibold first:mt-0">{children}</h3>,
+  h4: ({ children }) => <h4 className="mt-2 mb-0.5 text-xs font-semibold first:mt-0">{children}</h4>,
+  p: ({ children }) => <p className="my-1 first:mt-0 last:mb-0">{children}</p>,
+  ul: ({ children }) => <ul className="my-1 list-[square] space-y-0.5 pl-4 marker:text-faint">{children}</ul>,
+  ol: ({ children }) => <ol className="my-1 list-decimal space-y-0.5 pl-5 marker:font-mono marker:text-faint">{children}</ol>,
+  li: ({ children }) => <li className="[&>p]:my-0">{children}</li>,
+  a: ({ href, children }) => {
+    const path = localFilePath(href);
+    if (path) {
+      return (
+        <FileLink path={path}>
+          <InLink.Provider value>{children}</InLink.Provider>
+        </FileLink>
+      );
+    }
+    return (
+      <a href={href} target="_blank" rel="noreferrer" className="text-fg underline decoration-border-strong underline-offset-[3px] hover:decoration-fg">
+        <InLink.Provider value>{children}</InLink.Provider>
+      </a>
+    );
+  },
+  img: ({ src, alt }) => <MarkdownImage src={typeof src === "string" ? src : undefined} alt={alt ?? ""} />,
+  blockquote: ({ children }) => (
+    <blockquote className="my-1 border-l border-border-strong pl-3 text-muted">{children}</blockquote>
+  ),
+  hr: () => <hr className="my-2 border-border" />,
+  table: ({ children }) => (
+    <div className="my-1.5 overflow-x-auto">
+      <table className="w-max min-w-48 border-collapse text-2xs">{children}</table>
+    </div>
+  ),
+  th: ({ children }) => (
+    <th className="border border-border bg-raised px-1.5 py-0.5 text-left font-semibold">{children}</th>
+  ),
+  td: ({ children }) => <td className="border border-border px-1.5 py-0.5 align-top">{children}</td>,
+  code: ({ className, children }) => {
+    const block = /language-/.test(className ?? "");
+    if (block) {
+      return <code className={cn("block font-mono text-2xs leading-[18px]", className)}>{children}</code>;
+    }
+    return <code className="bg-raised px-1 py-px font-mono text-[0.9em] text-fg shadow-[inset_0_0_0_1px_var(--color-border)]">{children}</code>;
+  },
+  pre: ({ children }) => (
+    <pre className="my-1.5 overflow-x-auto border border-border bg-raised px-2.5 py-2">{children}</pre>
+  ),
+};
+
+export function Markdown({ text, className }: { text: string; className?: string }) {
+  return (
+    <div className={cn("min-w-0 text-[13px] leading-[21px] break-words max-md:text-sm max-md:leading-[22px]", className)}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={urlTransform}>
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}

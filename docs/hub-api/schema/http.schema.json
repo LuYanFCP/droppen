@@ -1,0 +1,3132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://droppen.app/hub-api/v1/http.schema.json",
+  "title": "Droppen hub API v1: HTTP bodies",
+  "description": "Look up a route as $defs[\"<METHOD> <path template>\"]; its $defs hold `request` (the JSON body sent), `response` (the JSON body of a 2xx answer) and, where it differs from #/$defs/error, `error` (the body of any other answer). Templates are the ones in docs/hub-api/index.json. Every object may carry fields not listed here: /v1/ only grows, and a client must ignore what it does not know. Binary fields are lower-case hex.",
+  "$defs": {
+    "relayPrefs": {
+      "type": "object",
+      "description": "The account's relay preferences (relay-and-plans §2.7): `standby`, whether the hub keeps a standby relay in the account's set (two instead of one). Absent from /v1/me on hubs before it.",
+      "required": [
+        "standby"
+      ],
+      "properties": {
+        "standby": {
+          "type": "boolean"
+        }
+      }
+    },
+    "hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]*$"
+    },
+    "hex16": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "16 bytes"
+    },
+    "hex32": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "32 bytes: a key, a nonce, a hash"
+    },
+    "hex64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{128}$",
+      "description": "64 bytes: an Ed25519 signature"
+    },
+    "b64url": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]*$",
+      "description": "base64url without padding: WebAuthn's own JSON encoding, used for the passkey routes' binary values (and only there)"
+    },
+    "challenge": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{56}$",
+      "description": "A passkey ceremony's challenge (42 bytes, base64url): stateless, good for 2 minutes, answered once. Send it back exactly as given."
+    },
+    "removalGrant": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{56}$",
+      "description": "DELETE /v1/passkeys/{id}'s grant (42 bytes, base64url), given with 409 unlock_on after a proof: finishes removing that passkey from that device once the passkey slot naming it is off. Stateless, good for 2 minutes, taken once. Send it back exactly as given."
+    },
+    "registrationResponse": {
+      "type": "object",
+      "description": "WebAuthn's RegistrationResponseJSON (what PublicKeyCredential.toJSON() gives after create()). Of clientExtensionResults the hub reads only prf.enabled; send no more than credProps.rk and prf.enabled, never prf.results.",
+      "required": [
+        "id",
+        "rawId",
+        "type",
+        "response"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/b64url"
+        },
+        "rawId": {
+          "$ref": "#/$defs/b64url"
+        },
+        "type": {
+          "const": "public-key"
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "clientDataJSON",
+            "attestationObject"
+          ],
+          "properties": {
+            "clientDataJSON": {
+              "$ref": "#/$defs/b64url"
+            },
+            "attestationObject": {
+              "$ref": "#/$defs/b64url"
+            },
+            "transports": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "clientExtensionResults": {
+          "type": "object"
+        },
+        "authenticatorAttachment": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "authenticationResponse": {
+      "type": "object",
+      "description": "WebAuthn's AuthenticationResponseJSON (PublicKeyCredential.toJSON() after get()). userHandle is required for a sign-in: passkeys here are discoverable.",
+      "required": [
+        "id",
+        "rawId",
+        "type",
+        "response"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/b64url"
+        },
+        "rawId": {
+          "$ref": "#/$defs/b64url"
+        },
+        "type": {
+          "const": "public-key"
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "clientDataJSON",
+            "authenticatorData",
+            "signature"
+          ],
+          "properties": {
+            "clientDataJSON": {
+              "$ref": "#/$defs/b64url"
+            },
+            "authenticatorData": {
+              "$ref": "#/$defs/b64url"
+            },
+            "signature": {
+              "$ref": "#/$defs/b64url"
+            },
+            "userHandle": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[A-Za-z0-9_-]*$"
+            }
+          }
+        },
+        "clientExtensionResults": {
+          "type": "object"
+        },
+        "authenticatorAttachment": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[!-~]+$",
+      "description": "An account, device, machine or pairing id: 1-64 printable ASCII characters"
+    },
+    "relayId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}$"
+    },
+    "ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Milliseconds since the Unix epoch"
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "limitValue": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "An entitlement's value; null: no limit"
+    },
+    "error": {
+      "type": "object",
+      "description": "Every hub error: a stable machine-readable `error` code and a human `message`. 429s add `retry_after_ms` (and a Retry-After header); 409 `limit` adds the entitlement `key`, its `limit` and what is `used`; 409 `unlock_on` from DELETE /v1/passkeys/{id}, after a password or passkey proof, adds a removal `grant`.",
+      "required": [
+        "error",
+        "message"
+      ],
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string"
+        },
+        "retry_after_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "key": {
+          "type": "string"
+        },
+        "limit": {
+          "$ref": "#/$defs/limitValue"
+        },
+        "used": {
+          "type": "integer"
+        },
+        "grant": {
+          "$ref": "#/$defs/removalGrant"
+        }
+      }
+    },
+    "relayError": {
+      "type": "object",
+      "description": "A relay's error: `message` is absent on its 429 (`{error: \"rate\", retry_after_ms}`).",
+      "required": [
+        "error"
+      ],
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string"
+        },
+        "retry_after_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "signedIn": {
+      "type": "object",
+      "description": "A login session: good for 15 minutes, for POST /v1/devices, GET /v1/me, GET /v1/chain and POST /v1/logout only.",
+      "required": [
+        "account",
+        "token",
+        "expires_ms",
+        "email_verified",
+        "verification"
+      ],
+      "properties": {
+        "account": {
+          "$ref": "#/$defs/id"
+        },
+        "token": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "expires_ms": {
+          "$ref": "#/$defs/ms"
+        },
+        "email_verified": {
+          "type": "boolean"
+        },
+        "verification": {
+          "enum": [
+            "required",
+            "off"
+          ]
+        },
+        "known_client": {
+          "type": "string",
+          "maxLength": 160,
+          "description": "kc1.<account>.<expires_ms>.<tag>: send it with this client's next login (30 days); opaque to clients"
+        }
+      }
+    },
+    "presence": {
+      "type": "object",
+      "required": [
+        "id",
+        "state",
+        "since_ms"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "state": {
+          "enum": [
+            "online",
+            "offline",
+            "unknown"
+          ]
+        },
+        "since_ms": {
+          "$ref": "#/$defs/ms"
+        },
+        "via": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "relay"
+            ],
+            "properties": {
+              "relay": {
+                "type": "string"
+              },
+              "rtt_ms": {
+                "$ref": "#/$defs/count"
+              }
+            }
+          }
+        },
+        "relays": {
+          "type": "boolean"
+        }
+      }
+    },
+    "planView": {
+      "type": "object",
+      "description": "The account's plan, entitlements and usage (GET /v1/me `plan`; also a device's `plan` control message `detail`).",
+      "required": [
+        "id",
+        "source",
+        "status",
+        "period_start_ms",
+        "period_end_ms",
+        "grace_plan",
+        "grace_until_ms",
+        "entitlements",
+        "usage"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "period_start_ms": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "period_end_ms": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "grace_plan": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "grace_until_ms": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "entitlements": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/limitValue"
+          }
+        },
+        "usage": {
+          "type": "object",
+          "required": [
+            "storage_bytes",
+            "devices",
+            "machines",
+            "relays",
+            "transfer"
+          ],
+          "properties": {
+            "storage_bytes": {
+              "type": "integer"
+            },
+            "devices": {
+              "type": "integer",
+              "description": "Current devices of the chain, hosts included (counted against devices.max)."
+            },
+            "machines": {
+              "type": "integer"
+            },
+            "relays": {
+              "type": "integer"
+            },
+            "transfer": {
+              "type": "object",
+              "required": [
+                "period_start_ms",
+                "period_end_ms",
+                "bytes",
+                "included",
+                "overage_bytes",
+                "throttled"
+              ],
+              "properties": {
+                "period_start_ms": {
+                  "$ref": "#/$defs/ms"
+                },
+                "period_end_ms": {
+                  "$ref": "#/$defs/ms"
+                },
+                "bytes": {
+                  "type": "integer"
+                },
+                "included": {
+                  "$ref": "#/$defs/limitValue"
+                },
+                "overage_bytes": {
+                  "type": "integer"
+                },
+                "throttled": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "hosts": {
+              "type": "integer",
+              "description": "Current devices that run AI (counted against hosts.max). Since chain v3; `machines` is its old name, kept one version."
+            }
+          }
+        }
+      }
+    },
+    "relayListed": {
+      "type": "object",
+      "required": [
+        "id",
+        "city",
+        "region",
+        "origin",
+        "state",
+        "load"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/relayId"
+        },
+        "city": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "up",
+            "draining",
+            "down",
+            "retired"
+          ]
+        },
+        "load": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
+    "tickets": {
+      "type": "object",
+      "required": [
+        "tickets",
+        "errors"
+      ],
+      "properties": {
+        "tickets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "relay",
+              "origin",
+              "ticket",
+              "expires_ms"
+            ],
+            "properties": {
+              "relay": {
+                "$ref": "#/$defs/relayId"
+              },
+              "origin": {
+                "type": "string"
+              },
+              "ticket": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 8192
+              },
+              "expires_ms": {
+                "$ref": "#/$defs/ms"
+              },
+              "emergency": {
+                "type": "boolean"
+              },
+              "throttled": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "relay",
+              "error"
+            ],
+            "properties": {
+              "relay": {
+                "type": "string"
+              },
+              "error": {
+                "type": "string",
+                "description": "unknown | unavailable | limit | forbidden"
+              },
+              "key": {
+                "type": "string"
+              },
+              "limit": {
+                "type": "integer"
+              },
+              "account_set": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "mainDevice": {
+      "type": "object",
+      "required": [
+        "machine",
+        "set_ms"
+      ],
+      "properties": {
+        "machine": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A current host of the account's chain, or null: none"
+        },
+        "set_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "When it was last set or cleared (ms); null: never"
+        }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "description": "Proof it is still the person (http.md, \"The account's ways to sign in\"): the current password (only where the account has one), or a passkey of the account's answering a challenge POST /v1/passkeys/reauth/options gave this device",
+      "properties": {
+        "current_password": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 1024
+        },
+        "passkey": {
+          "$ref": "#/$defs/reauthPasskey"
+        }
+      }
+    },
+    "reauthPasskey": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Proof it is still the person: one of the account's passkeys answering a challenge POST /v1/passkeys/reauth/options gave this device",
+      "required": [
+        "challenge",
+        "credential"
+      ],
+      "properties": {
+        "challenge": {
+          "$ref": "#/$defs/challenge"
+        },
+        "credential": {
+          "$ref": "#/$defs/authenticationResponse"
+        }
+      }
+    },
+    "passkey": {
+      "type": "object",
+      "description": "One of the account's passkeys (GET /v1/passkeys): nothing here is a secret",
+      "required": [
+        "id",
+        "label",
+        "provider",
+        "credential_id",
+        "cred_hash",
+        "backup_eligible",
+        "backup_state",
+        "prf",
+        "created_ms",
+        "unlock"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^pk-"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Its provider's name by AAGUID when added, else Passkey; renamed with PATCH"
+        },
+        "provider": {
+          "type": "string",
+          "description": "Its provider's name by AAGUID, else Passkey"
+        },
+        "credential_id": {
+          "$ref": "#/$defs/b64url"
+        },
+        "cred_hash": {
+          "$ref": "#/$defs/hex32",
+          "description": "SHA-256 of the credential id: what a passkey slot on the chain names (docs/passkeys.md §4.2)"
+        },
+        "backup_eligible": {
+          "type": "boolean",
+          "description": "BE: it may sync (a passkey manager's, not a security key's)"
+        },
+        "backup_state": {
+          "type": "boolean",
+          "description": "BS: it does sync, as of its last use"
+        },
+        "prf": {
+          "enum": [
+            "yes",
+            "no",
+            "unknown"
+          ],
+          "description": "Whether the browser said it can do PRF when it was made: a hint only"
+        },
+        "transports": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "created_ms": {
+          "$ref": "#/$defs/ms"
+        },
+        "created_by": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The device that added it; null for one made at sign-up"
+        },
+        "last_used_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Its last sign-in (ms); null: never"
+        },
+        "unlock": {
+          "enum": [
+            "on",
+            "off"
+          ],
+          "description": "on: a current passkey slot on the account's chain names it, so a new device can join with it"
+        }
+      }
+    },
+    "POST /v1/signup": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "email",
+            "password"
+          ],
+          "properties": {
+            "invite": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Required with DROPPEN_HUB_SIGNUP=invite; at most 128 bytes once trimmed"
+            },
+            "email": {
+              "type": "string",
+              "maxLength": 254
+            },
+            "password": {
+              "type": "string",
+              "minLength": 10,
+              "maxLength": 1024,
+              "description": "10-1024 bytes"
+            },
+            "turnstile": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 2048
+            },
+            "lang": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 16
+            }
+          }
+        },
+        "response": {
+          "$ref": "#/$defs/signedIn"
+        }
+      }
+    },
+    "POST /v1/signup/passkey": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "challenge",
+            "email",
+            "credential"
+          ],
+          "properties": {
+            "challenge": {
+              "$ref": "#/$defs/challenge"
+            },
+            "email": {
+              "type": "string",
+              "maxLength": 254,
+              "description": "The e-mail the options were asked for (the challenge is bound to it)"
+            },
+            "invite": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "As with the options"
+            },
+            "lang": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 16
+            },
+            "credential": {
+              "$ref": "#/$defs/registrationResponse"
+            }
+          }
+        },
+        "response": {
+          "$ref": "#/$defs/signedIn"
+        }
+      }
+    },
+    "GET /.well-known/droppen-build": {
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "commit",
+            "web"
+          ],
+          "properties": {
+            "commit": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{7,64}$"
+                }
+              ],
+              "description": "the commit the hub's image was built from, when it knows"
+            },
+            "web": {
+              "type": "object",
+              "required": [
+                "digest",
+                "files"
+              ],
+              "properties": {
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "description": "sha256 of one `<sha256>  <path>\\n` line per file of the build as written, sorted by path bytewise (docs/web-integrity.md)"
+                },
+                "files": {
+                  "$ref": "#/$defs/count"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/signup/config": {
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "signup",
+            "invite_required",
+            "turnstile",
+            "verification"
+          ],
+          "properties": {
+            "signup": {
+              "enum": [
+                "invite",
+                "open",
+                "closed"
+              ]
+            },
+            "invite_required": {
+              "type": "boolean"
+            },
+            "turnstile": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "site_key",
+                    "origin"
+                  ],
+                  "properties": {
+                    "site_key": {
+                      "type": "string"
+                    },
+                    "origin": {
+                      "type": "string"
+                    }
+                  }
+                }
+              ]
+            },
+            "verification": {
+              "enum": [
+                "required",
+                "off"
+              ]
+            },
+            "passkeys": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "rp_id"
+                  ],
+                  "properties": {
+                    "rp_id": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              ],
+              "description": "Passkeys offered, for this relying party id (docs/passkeys.md §3.1); null when the hub has them off. Absent from hubs before passkeys."
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/email/verify": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "token"
+          ],
+          "properties": {
+            "token": {
+              "type": "string"
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "account",
+            "verified"
+          ],
+          "properties": {
+            "account": {
+              "$ref": "#/$defs/id"
+            },
+            "verified": {
+              "const": true
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/login": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "email",
+            "password"
+          ],
+          "properties": {
+            "email": {
+              "type": "string",
+              "maxLength": 254
+            },
+            "password": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "turnstile": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "known_client": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 160,
+              "description": "The known-client token an earlier sign-in to this account gave this client"
+            }
+          }
+        },
+        "response": {
+          "$ref": "#/$defs/signedIn"
+        }
+      }
+    },
+    "POST /v1/login/passkey": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "challenge",
+            "credential"
+          ],
+          "properties": {
+            "challenge": {
+              "$ref": "#/$defs/challenge"
+            },
+            "credential": {
+              "$ref": "#/$defs/authenticationResponse"
+            }
+          }
+        },
+        "response": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/signedIn"
+            },
+            {
+              "type": "object",
+              "required": [
+                "passkey"
+              ],
+              "properties": {
+                "passkey": {
+                  "type": "object",
+                  "description": "The passkey that signed in: the hub's id, its label, and whether a current passkey slot on the account's chain names it (unlock on: a new device can join with it; a hint — the device goes by the chain it verifies). paused and none are not sent any more",
+                  "required": [
+                    "id",
+                    "label",
+                    "unlock"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^pk-"
+                    },
+                    "label": {
+                      "type": "string",
+                      "maxLength": 64
+                    },
+                    "unlock": {
+                      "enum": [
+                        "on",
+                        "off",
+                        "paused",
+                        "none"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "POST /v1/passkeys/login/options": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "description": "Nothing: the passkey says whose it is",
+          "properties": {}
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "challenge",
+            "options"
+          ],
+          "properties": {
+            "challenge": {
+              "$ref": "#/$defs/challenge"
+            },
+            "options": {
+              "type": "object",
+              "description": "PublicKeyCredentialRequestOptionsJSON: challenge, rpId, timeout 120000, userVerification required, allowCredentials [] (any of the account's passkeys)",
+              "required": [
+                "challenge",
+                "rpId"
+              ],
+              "properties": {
+                "challenge": {
+                  "$ref": "#/$defs/challenge"
+                },
+                "rpId": {
+                  "type": "string"
+                },
+                "userVerification": {
+                  "const": "required"
+                },
+                "allowCredentials": {
+                  "type": "array"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/passkeys/options": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "purpose"
+          ],
+          "properties": {
+            "purpose": {
+              "enum": [
+                "signup"
+              ],
+              "description": "signup: create an account with a passkey (adding one to an account: POST /v1/passkeys/add/options)"
+            },
+            "email": {
+              "type": "string",
+              "maxLength": 254,
+              "description": "Required with purpose signup"
+            },
+            "invite": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Required with DROPPEN_HUB_SIGNUP=invite; at most 128 bytes once trimmed"
+            },
+            "turnstile": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 2048,
+              "description": "The widget's token, when the hub uses Turnstile"
+            },
+            "lang": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 16
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "challenge",
+            "options"
+          ],
+          "properties": {
+            "challenge": {
+              "$ref": "#/$defs/challenge"
+            },
+            "options": {
+              "type": "object",
+              "description": "PublicKeyCredentialCreationOptionsJSON: rp {id, name}, user {id, name, displayName}, challenge, pubKeyCredParams (-8, -7, -257), timeout 120000, authenticatorSelection {residentKey: required, userVerification: required}, attestation none, excludeCredentials, extensions {credProps, prf.eval.first}",
+              "required": [
+                "rp",
+                "user",
+                "challenge",
+                "pubKeyCredParams"
+              ],
+              "properties": {
+                "rp": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "name"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "user": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "name",
+                    "displayName"
+                  ],
+                  "properties": {
+                    "id": {
+                      "$ref": "#/$defs/b64url"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "displayName": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "challenge": {
+                  "$ref": "#/$defs/challenge"
+                },
+                "pubKeyCredParams": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "type",
+                      "alg"
+                    ],
+                    "properties": {
+                      "type": {
+                        "const": "public-key"
+                      },
+                      "alg": {
+                        "enum": [
+                          -8,
+                          -7,
+                          -257
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/session/challenge": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "account",
+            "device"
+          ],
+          "properties": {
+            "account": {
+              "$ref": "#/$defs/id"
+            },
+            "device": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "nonce"
+          ],
+          "properties": {
+            "nonce": {
+              "$ref": "#/$defs/hex32"
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/session": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "account",
+            "device",
+            "time_ms",
+            "nonce",
+            "signature"
+          ],
+          "properties": {
+            "account": {
+              "$ref": "#/$defs/id"
+            },
+            "device": {
+              "$ref": "#/$defs/id"
+            },
+            "time_ms": {
+              "$ref": "#/$defs/ms"
+            },
+            "nonce": {
+              "$ref": "#/$defs/hex32"
+            },
+            "signature": {
+              "$ref": "#/$defs/hex64"
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "account",
+            "device",
+            "token",
+            "expires_ms"
+          ],
+          "properties": {
+            "account": {
+              "$ref": "#/$defs/id"
+            },
+            "device": {
+              "$ref": "#/$defs/id"
+            },
+            "token": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "expires_ms": {
+              "$ref": "#/$defs/ms"
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/waitlist": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "email",
+            "plan"
+          ],
+          "properties": {
+            "email": {
+              "type": "string",
+              "maxLength": 254,
+              "description": "Trimmed and lower-cased; one @, at most 64 bytes before it, a domain of two or more host labels"
+            },
+            "plan": {
+              "enum": [
+                "free",
+                "pro"
+              ],
+              "description": "A public plan"
+            },
+            "locale": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 16,
+              "description": "The page's language; kept as one of en, zh-CN, zh-TW, ja"
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "ok"
+          ],
+          "properties": {
+            "ok": {
+              "const": true
+            }
+          },
+          "description": "The same whether the address is new or already on the list"
+        }
+      }
+    },
+    "POST /v1/admin/invites": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "properties": {
+            "uses": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "expires_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "plan": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "plan_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "code"
+          ],
+          "properties": {
+            "code": {
+              "type": "string",
+              "pattern": "^rhi_"
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/admin/accounts/{who}": {
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "account",
+            "email",
+            "created_ms",
+            "row",
+            "overrides",
+            "plan",
+            "storage",
+            "events"
+          ],
+          "properties": {
+            "account": {
+              "type": "string"
+            },
+            "email": {
+              "type": "string"
+            },
+            "created_ms": {
+              "$ref": "#/$defs/ms"
+            },
+            "row": {
+              "type": "object"
+            },
+            "overrides": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "plan": {
+              "$ref": "#/$defs/planView"
+            },
+            "storage": {
+              "type": "object"
+            },
+            "events": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "PUT /v1/admin/accounts/{who}/plan": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "plan"
+          ],
+          "properties": {
+            "plan": {
+              "type": "string"
+            },
+            "until_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "grace": {
+              "type": "boolean"
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "response": {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": [
+                "account",
+                "from",
+                "to",
+                "grace_until_ms"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string"
+                },
+                "from": {
+                  "type": "string"
+                },
+                "to": {
+                  "type": "string"
+                },
+                "grace_until_ms": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "account",
+                "already_applied"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string"
+                },
+                "already_applied": {
+                  "const": true
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "PUT /v1/admin/accounts/{who}/overrides/{key}": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "description": "null: no limit"
+            },
+            "until_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "account",
+            "key",
+            "value",
+            "expires_ms"
+          ],
+          "properties": {
+            "account": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/limitValue"
+            },
+            "expires_ms": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "DELETE /v1/admin/accounts/{who}/overrides/{key}": {
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "account",
+            "key",
+            "removed"
+          ],
+          "properties": {
+            "account": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            },
+            "removed": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/admin/relays": {
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "relays",
+            "tokens"
+          ],
+          "properties": {
+            "relays": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "tokens": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/admin/relays/tokens": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "id",
+            "region",
+            "city"
+          ],
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/relayId"
+            },
+            "region": {
+              "type": "string"
+            },
+            "city": {
+              "type": "string"
+            },
+            "hidden": {
+              "type": "boolean"
+            },
+            "expires_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "relay",
+            "token",
+            "expires_ms"
+          ],
+          "properties": {
+            "relay": {
+              "type": "string"
+            },
+            "token": {
+              "type": "string",
+              "pattern": "^RHR1-"
+            },
+            "expires_ms": {
+              "$ref": "#/$defs/ms"
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/admin/relays/cutover": {
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "ready",
+            "public_up",
+            "blockers",
+            "machines",
+            "days"
+          ],
+          "properties": {
+            "ready": {
+              "type": "boolean"
+            },
+            "public_up": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "blockers": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "machines": {
+              "$ref": "#/$defs/count"
+            },
+            "days": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 90
+            }
+          }
+        }
+      }
+    },
+    "PATCH /v1/admin/relays/{id}": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "properties": {
+            "visibility": {
+              "enum": [
+                "public",
+                "hidden",
+                null
+              ]
+            },
+            "state": {
+              "enum": [
+                "retired",
+                null
+              ]
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "relay"
+          ],
+          "properties": {
+            "relay": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/admin/waitlist": {
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "count",
+            "entries"
+          ],
+          "properties": {
+            "count": {
+              "$ref": "#/$defs/count"
+            },
+            "entries": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "email",
+                  "plan",
+                  "locale",
+                  "created_ms",
+                  "updated_ms"
+                ],
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "plan": {
+                    "enum": [
+                      "free",
+                      "pro"
+                    ],
+                    "description": "A public plan"
+                  },
+                  "locale": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "created_ms": {
+                    "$ref": "#/$defs/ms"
+                  },
+                  "updated_ms": {
+                    "$ref": "#/$defs/ms"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "DELETE /v1/admin/waitlist/{email}": {
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "removed"
+          ],
+          "properties": {
+            "removed": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/me": {
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "account",
+            "email",
+            "plan",
+            "chain_seq",
+            "devices",
+            "machines"
+          ],
+          "properties": {
+            "account": {
+              "$ref": "#/$defs/id"
+            },
+            "email": {
+              "type": "object",
+              "required": [
+                "address",
+                "verified",
+                "verification",
+                "due_ms",
+                "delivery",
+                "delivery_error"
+              ],
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "verified": {
+                  "type": "boolean"
+                },
+                "verification": {
+                  "enum": [
+                    "required",
+                    "off"
+                  ]
+                },
+                "due_ms": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "delivery": {
+                  "enum": [
+                    "pending",
+                    "sent",
+                    "failed",
+                    null
+                  ]
+                },
+                "delivery_error": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "plan": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/planView"
+                }
+              ]
+            },
+            "chain_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "devices": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "sign_key",
+                  "dh_key",
+                  "created_ms",
+                  "last_seen_ms",
+                  "in_chain"
+                ],
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "sign_key": {
+                    "$ref": "#/$defs/hex32"
+                  },
+                  "dh_key": {
+                    "$ref": "#/$defs/hex32"
+                  },
+                  "created_ms": {
+                    "$ref": "#/$defs/ms"
+                  },
+                  "last_seen_ms": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "in_chain": {
+                    "type": "boolean"
+                  },
+                  "kind": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "As registered (metadata only); absent from hubs before local sign-in"
+                  },
+                  "host": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "As registered (metadata only); absent from hubs before local sign-in"
+                  },
+                  "ua_label": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "pattern": "^(?:(?:iPhone|iPad|Mac|Windows|Android|Linux|ChromeOS)(?: \u00b7 (?:Safari|Chrome|Firefox|Edge|Opera|Samsung Internet))?|Safari|Chrome|Firefox|Edge|Opera|Samsung Internet)$",
+                    "description": "The device's browser by a short name, from the User-Agent of its own requests: \"<device> · <browser>\" or either alone, words of a fixed list only, never the User-Agent itself (metadata only); an iPad asking for desktop sites is \"Mac\" until its page asks for GET /v1/me?touch=1; null until one named something known; absent from hubs before it"
+                  }
+                }
+              }
+            },
+            "machines": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "sign_key",
+                  "dh_key",
+                  "created_ms",
+                  "last_seen_ms",
+                  "in_chain",
+                  "presence",
+                  "copy"
+                ],
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "sign_key": {
+                    "$ref": "#/$defs/hex32"
+                  },
+                  "dh_key": {
+                    "$ref": "#/$defs/hex32"
+                  },
+                  "created_ms": {
+                    "$ref": "#/$defs/ms"
+                  },
+                  "last_seen_ms": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "in_chain": {
+                    "type": "boolean"
+                  },
+                  "presence": {
+                    "$ref": "#/$defs/presence"
+                  },
+                  "copy": {
+                    "type": "object",
+                    "required": [
+                      "streams",
+                      "bytes",
+                      "last_write_ms"
+                    ],
+                    "properties": {
+                      "streams": {
+                        "$ref": "#/$defs/count"
+                      },
+                      "bytes": {
+                        "$ref": "#/$defs/count"
+                      },
+                      "last_write_ms": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      }
+                    }
+                  },
+                  "reads_v3": {
+                    "type": "boolean",
+                    "description": "Its agent last declared `chain/3` and `policy/1`. Absent from hubs before chain v3."
+                  }
+                }
+              }
+            },
+            "relay_prefs": {
+              "$ref": "#/$defs/relayPrefs"
+            },
+            "chain_v3": {
+              "type": "object",
+              "description": "Chain v3 (docs/local-aggregator.md §3.5): `mode` is the hub's DROPPEN_HUB_CHAIN_V3; `writable` says the account takes v3 entries now; `waiting` lists the current hosts whose agents have not declared `chain/3` and `policy/1`; `in_use` says the chain holds a v3 entry. Absent from hubs before chain v3.",
+              "required": [
+                "mode",
+                "writable",
+                "waiting",
+                "in_use"
+              ],
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "off",
+                    "read",
+                    "write"
+                  ]
+                },
+                "writable": {
+                  "type": "boolean"
+                },
+                "waiting": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/id"
+                  }
+                },
+                "in_use": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "known_client": {
+              "type": "string",
+              "maxLength": 160,
+              "description": "Device sessions only: a fresh known-client token (as a sign-in's), to keep for this account's next password login"
+            },
+            "credentials": {
+              "type": "object",
+              "description": "What the account signs in with: whether it has a password (an account made with a passkey has none), and how many passkeys. Absent from hubs before passkeys.",
+              "required": [
+                "password",
+                "passkeys"
+              ],
+              "properties": {
+                "password": {
+                  "type": "boolean"
+                },
+                "passkeys": {
+                  "$ref": "#/$defs/count"
+                }
+              }
+            },
+            "sign_in_changes": {
+              "type": "array",
+              "maxItems": 50,
+              "description": "How the account's sign-in changed in the last 30 days, oldest first, at most the newest 50: each as the websocket's sign_in_changed says it (without `t`). Absent from hubs before it.",
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "kind",
+                  "device",
+                  "label",
+                  "at_ms"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "kind": {
+                    "enum": [
+                      "passkey_added",
+                      "passkey_renamed",
+                      "passkey_removed",
+                      "password_set",
+                      "password_changed",
+                      "password_removed"
+                    ]
+                  },
+                  "device": {
+                    "oneOf": [
+                      {
+                        "$ref": "#/$defs/id"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The device session that made the change"
+                  },
+                  "label": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 64,
+                    "description": "The passkey's label (the new one, for a rename); null for the password"
+                  },
+                  "at_ms": {
+                    "$ref": "#/$defs/ms"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/email/resend": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "properties": {
+            "turnstile": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "queued"
+          ],
+          "properties": {
+            "queued": {
+              "type": "integer"
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/devices": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "sign_key",
+            "dh_key"
+          ],
+          "properties": {
+            "sign_key": {
+              "$ref": "#/$defs/hex32"
+            },
+            "dh_key": {
+              "$ref": "#/$defs/hex32"
+            },
+            "kind": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[a-z][a-z0-9-]{0,31}$",
+              "description": "What the device is, e.g. \"aggregator\" (a computer's limited device). Metadata only."
+            },
+            "host": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "description": "The machine an aggregator runs on. Metadata only."
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "device"
+          ],
+          "properties": {
+            "device": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/chain": {
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "entries",
+            "seq"
+          ],
+          "properties": {
+            "entries": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/hex"
+              }
+            },
+            "seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/chain": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "entries"
+          ],
+          "properties": {
+            "entries": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "$ref": "#/$defs/hex"
+              }
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "seq"
+          ],
+          "properties": {
+            "seq": {
+              "$ref": "#/$defs/count"
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/enrollments": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "device",
+            "token"
+          ],
+          "properties": {
+            "device": {
+              "$ref": "#/$defs/id"
+            },
+            "token": {
+              "$ref": "#/$defs/hex16"
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "expires_ms"
+          ],
+          "properties": {
+            "expires_ms": {
+              "$ref": "#/$defs/ms"
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/enrollments/{token}": {
+      "$defs": {
+        "response": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "state",
+                "expires_ms"
+              ],
+              "properties": {
+                "state": {
+                  "enum": [
+                    "waiting",
+                    "expired"
+                  ]
+                },
+                "expires_ms": {
+                  "$ref": "#/$defs/ms"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "state",
+                "machine",
+                "device",
+                "sign_key",
+                "dh_key",
+                "proof"
+              ],
+              "properties": {
+                "state": {
+                  "const": "proved"
+                },
+                "machine": {
+                  "$ref": "#/$defs/id"
+                },
+                "device": {
+                  "$ref": "#/$defs/id"
+                },
+                "sign_key": {
+                  "$ref": "#/$defs/hex32"
+                },
+                "dh_key": {
+                  "$ref": "#/$defs/hex32"
+                },
+                "proof": {
+                  "$ref": "#/$defs/hex32"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "POST /v1/mailbox": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "recipient",
+            "sender",
+            "purpose",
+            "epoch",
+            "sealed"
+          ],
+          "properties": {
+            "recipient": {
+              "$ref": "#/$defs/id"
+            },
+            "sender": {
+              "$ref": "#/$defs/id"
+            },
+            "purpose": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "epoch": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "sealed": {
+              "$ref": "#/$defs/hex",
+              "maxLength": 16384
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "id"
+          ],
+          "properties": {
+            "id": {
+              "type": "integer"
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/mailbox": {
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "mail"
+          ],
+          "properties": {
+            "mail": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "sender",
+                  "purpose",
+                  "epoch",
+                  "sealed"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "integer"
+                  },
+                  "sender": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "purpose": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255
+                  },
+                  "epoch": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "sealed": {
+                    "$ref": "#/$defs/hex"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/keys": {
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "keys"
+          ],
+          "properties": {
+            "keys": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "blob",
+                  "updated_ms",
+                  "writer"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9._/-]{1,128}$"
+                  },
+                  "blob": {
+                    "$ref": "#/$defs/hex"
+                  },
+                  "updated_ms": {
+                    "$ref": "#/$defs/ms"
+                  },
+                  "writer": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "PUT /v1/keys/{*name}": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "blob"
+          ],
+          "properties": {
+            "blob": {
+              "$ref": "#/$defs/hex",
+              "maxLength": 8192
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "name",
+            "stored"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "stored": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/pairings": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "properties": {
+            "device": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/id"
+                }
+              ]
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "id"
+          ],
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/pairings": {
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "pairings"
+          ],
+          "properties": {
+            "pairings": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "device",
+                  "created_ms"
+                ],
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "device": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "created_ms": {
+                    "$ref": "#/$defs/ms"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/pairings/{id}/messages": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "from",
+            "body"
+          ],
+          "properties": {
+            "from": {
+              "enum": [
+                "initiator",
+                "responder"
+              ]
+            },
+            "body": {
+              "$ref": "#/$defs/hex",
+              "maxLength": 8192
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "n"
+          ],
+          "properties": {
+            "n": {
+              "$ref": "#/$defs/count"
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/pairings/{id}/messages": {
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "messages"
+          ],
+          "properties": {
+            "messages": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "n",
+                  "from",
+                  "body"
+                ],
+                "properties": {
+                  "n": {
+                    "$ref": "#/$defs/count"
+                  },
+                  "from": {
+                    "enum": [
+                      "initiator",
+                      "responder"
+                    ]
+                  },
+                  "body": {
+                    "$ref": "#/$defs/hex"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/relays": {
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "relays",
+            "limit",
+            "account_set",
+            "emergency",
+            "agents",
+            "throttled"
+          ],
+          "properties": {
+            "relays": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/relayListed"
+              }
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "relay.max; 9223372036854775807 (i64::MAX) means no limit"
+            },
+            "account_set": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "last_used_ms"
+                ],
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/relayId"
+                  },
+                  "last_used_ms": {
+                    "$ref": "#/$defs/ms"
+                  }
+                }
+              }
+            },
+            "emergency": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/relayId"
+              }
+            },
+            "agents": {
+              "type": "object",
+              "description": "machine id -> relay id -> round trip in ms, as each machine last reported",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/count"
+                }
+              }
+            },
+            "throttled": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "PATCH /v1/relays/prefs": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "properties": {
+            "standby": {
+              "type": "boolean",
+              "description": "Keep a standby relay: the hub keeps two relays in the account's set instead of one (relay.max allowing)"
+            }
+          }
+        },
+        "response": {
+          "$ref": "#/$defs/relayPrefs"
+        }
+      }
+    },
+    "POST /v1/relays/tickets": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "relays"
+          ],
+          "properties": {
+            "relays": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {
+                "$ref": "#/$defs/relayId"
+              }
+            }
+          }
+        },
+        "response": {
+          "$ref": "#/$defs/tickets"
+        }
+      }
+    },
+    "GET /v1/main-device": {
+      "$defs": {
+        "response": {
+          "$ref": "#/$defs/mainDevice"
+        }
+      }
+    },
+    "PUT /v1/main-device": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "machine"
+          ],
+          "properties": {
+            "machine": {
+              "$ref": "#/$defs/id"
+            },
+            "if_unset": {
+              "type": "boolean",
+              "description": "Write only while the account has none (never set, or it left the account)"
+            }
+          }
+        },
+        "response": {
+          "$ref": "#/$defs/mainDevice"
+        }
+      }
+    },
+    "GET /v1/passkeys": {
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "passkeys",
+            "password",
+            "max"
+          ],
+          "properties": {
+            "passkeys": {
+              "type": "array",
+              "description": "Oldest first",
+              "items": {
+                "$ref": "#/$defs/passkey"
+              }
+            },
+            "password": {
+              "type": "boolean",
+              "description": "Whether the account has a password"
+            },
+            "max": {
+              "$ref": "#/$defs/count",
+              "description": "How many passkeys the account may have at once"
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/passkeys/add/options": {
+      "$defs": {
+        "request": {
+          "$ref": "#/$defs/proof"
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "challenge",
+            "options"
+          ],
+          "properties": {
+            "challenge": {
+              "$ref": "#/$defs/challenge"
+            },
+            "options": {
+              "type": "object",
+              "description": "PublicKeyCredentialCreationOptionsJSON as POST /v1/passkeys/options gives it, under the account's own user handle (user.id) and with the account's passkeys in excludeCredentials",
+              "required": [
+                "rp",
+                "user",
+                "challenge",
+                "pubKeyCredParams",
+                "excludeCredentials"
+              ],
+              "properties": {
+                "user": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "name",
+                    "displayName"
+                  ],
+                  "properties": {
+                    "id": {
+                      "$ref": "#/$defs/b64url"
+                    }
+                  }
+                },
+                "challenge": {
+                  "$ref": "#/$defs/challenge"
+                },
+                "excludeCredentials": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "type",
+                      "id"
+                    ],
+                    "properties": {
+                      "type": {
+                        "const": "public-key"
+                      },
+                      "id": {
+                        "$ref": "#/$defs/b64url"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/passkeys": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "challenge",
+            "credential"
+          ],
+          "properties": {
+            "challenge": {
+              "$ref": "#/$defs/challenge"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 64,
+              "description": "1–64 characters once trimmed, no control characters; absent: the provider's name"
+            },
+            "credential": {
+              "$ref": "#/$defs/registrationResponse"
+            }
+          }
+        },
+        "response": {
+          "$ref": "#/$defs/passkey"
+        }
+      }
+    },
+    "PATCH /v1/passkeys/{id}": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "label"
+          ],
+          "properties": {
+            "label": {
+              "type": "string",
+              "maxLength": 64,
+              "description": "1–64 characters once trimmed, no control characters"
+            }
+          }
+        },
+        "response": {
+          "$ref": "#/$defs/passkey"
+        }
+      }
+    },
+    "DELETE /v1/passkeys/{id}": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "description": "Proof it is still the person (as #/$defs/proof), or instead the grant a 409 unlock_on gave this device for this passkey",
+          "properties": {
+            "current_password": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 1024
+            },
+            "passkey": {
+              "$ref": "#/$defs/reauthPasskey"
+            },
+            "grant": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/removalGrant"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "id",
+            "removed"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "removed": {
+              "const": true
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/passkeys/reauth/options": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "description": "Nothing: the device session says whose account and which device",
+          "properties": {}
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "challenge",
+            "options"
+          ],
+          "properties": {
+            "challenge": {
+              "$ref": "#/$defs/challenge"
+            },
+            "options": {
+              "type": "object",
+              "description": "PublicKeyCredentialRequestOptionsJSON: challenge, rpId, timeout 120000, userVerification required, allowCredentials the account's own passkeys (type, id, transports)",
+              "required": [
+                "challenge",
+                "rpId",
+                "allowCredentials"
+              ],
+              "properties": {
+                "challenge": {
+                  "$ref": "#/$defs/challenge"
+                },
+                "rpId": {
+                  "type": "string"
+                },
+                "allowCredentials": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "type",
+                      "id"
+                    ],
+                    "properties": {
+                      "type": {
+                        "const": "public-key"
+                      },
+                      "id": {
+                        "$ref": "#/$defs/b64url"
+                      },
+                      "transports": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "PUT /v1/password": {
+      "$defs": {
+        "request": {
+          "type": "object",
+          "required": [
+            "password"
+          ],
+          "properties": {
+            "password": {
+              "type": "string",
+              "minLength": 10,
+              "maxLength": 1024,
+              "description": "10–1024 bytes"
+            },
+            "current_password": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 1024,
+              "description": "Proof it is still the person, where the account has a password: that password"
+            },
+            "passkey": {
+              "$ref": "#/$defs/reauthPasskey"
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "password"
+          ],
+          "properties": {
+            "password": {
+              "const": true
+            }
+          }
+        }
+      }
+    },
+    "DELETE /v1/password": {
+      "$defs": {
+        "request": {
+          "$ref": "#/$defs/proof"
+        },
+        "response": {
+          "type": "object",
+          "required": [
+            "password"
+          ],
+          "properties": {
+            "password": {
+              "const": false
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/relay-id": {
+      "description": "Served by a relay, asked by the hub when the relay registers or moves (query: nonce=<64 hex>).",
+      "$defs": {
+        "response": {
+          "type": "object",
+          "required": [
+            "relay_id",
+            "sign_key",
+            "origin",
+            "sig"
+          ],
+          "properties": {
+            "relay_id": {
+              "$ref": "#/$defs/relayId"
+            },
+            "sign_key": {
+              "$ref": "#/$defs/hex32"
+            },
+            "origin": {
+              "type": "string"
+            },
+            "sig": {
+              "$ref": "#/$defs/hex64"
+            }
+          }
+        },
+        "error": {
+          "$ref": "#/$defs/relayError"
+        }
+      }
+    },
+    "GET /v1/ping": {
+      "description": "Served by a relay: 204, no body.",
+      "$defs": {
+        "error": {
+          "$ref": "#/$defs/relayError"
+        }
+      }
+    },
+    "GET /v1/connect": {
+      "description": "Served by a relay: the WebSocket upgrade; refused with a 429 when the address is over its limit.",
+      "$defs": {
+        "error": {
+          "$ref": "#/$defs/relayError"
+        }
+      }
+    }
+  }
+}

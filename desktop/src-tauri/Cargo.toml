@@ -1,0 +1,63 @@
+[package]
+name = "droppen-desktop"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Droppen for macOS: runs Droppen on this device and is where you use it"
+default-run = "droppen-desktop"
+
+[lib]
+name = "droppen_desktop_lib"
+crate-type = ["rlib"]
+
+[dev-dependencies]
+tempfile = "3"
+# To make the updater's signature errors in `updater.rs`'s tests.
+minisign-verify = "0.2"
+
+[build-dependencies]
+tauri-build = { version = "=2.7.3", features = [] }
+# To read the bundle identifier the build gets (`build.rs`).
+serde_json = "1"
+
+[dependencies]
+droppen-desktop-core = { path = "../core" }
+tauri = { version = "=2.12.4", features = ["tray-icon", "image-png"] }
+tauri-plugin-autostart = "=2.7.0"
+tauri-plugin-opener = "=2.7.2"
+# The app's own updates (`src/updater.rs`): signed archives from the releases.
+tauri-plugin-updater = "=2.13.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+sys-locale = "0.3"
+url = "2"
+signal-hook = "0.3"
+libc = "0.2"
+
+[features]
+default = []
+# The end-to-end test hooks: the test-control directory (testctl.rs), the web
+# view probe, `DROPPEN_DESKTOP_KEYCHAIN=0`, `DROPPEN_DESKTOP_UPDATE_ENDPOINT`/
+# `_PUBKEY` (updater.rs), `DROPPEN_DESKTOP_TEST_HUB` (shell.rs: the hub the
+# server signs in to), and links logged instead of opened; and the test
+# build's own identity (core's `e2e`: `app.droppen.desktop.e2e`, refusing the
+# account's real HOME). Only `desktop/build.sh --e2e` turns it on; a release
+# build never has it.
+e2e = ["droppen-desktop-core/e2e", "dep:objc2-web-kit", "dep:objc2-app-kit", "objc2-foundation/NSArray", "objc2-foundation/NSGeometry"]
+
+# The same versions wry and tauri-plugin-autostart already link, so nothing new
+# is compiled. objc2, objc2-foundation and objc2-service-management: *Start at
+# Login* through SMAppService, and the Apple event that says a launch is a
+# login item's (`login_item.rs`). block2: the updater's watch on the network
+# (`updater/network.rs`). The optional ones, and objc2-foundation's NSArray and
+# NSGeometry, only for the test hook's snapshots of the web view and the
+# menu-bar menu (`testctl.rs`, feature `e2e`).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSAppleEventManager", "NSData", "NSDictionary", "NSError", "NSString", "NSURL"] }
+objc2-service-management = { version = "0.3.2", default-features = false, features = ["std", "SMAppService", "objc2", "objc2-foundation"] }
+block2 = "0.6"
+objc2-web-kit = { version = "0.3.2", optional = true, default-features = false, features = ["std", "objc2-app-kit", "block2", "WKWebView", "WKSnapshotConfiguration"] }
+objc2-app-kit = { version = "0.3.2", optional = true, default-features = false, features = ["std", "NSApplication", "NSBitmapImageRep", "NSGraphics", "NSImage", "NSImageRep", "NSMenu", "NSResponder", "NSStatusItem", "NSView", "NSWindow"] }

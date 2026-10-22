@@ -1,0 +1,152 @@
+import { useSyncExternalStore } from "react";
+import { DOWNLOAD_PATH } from "./get-droppen";
+
+/*
+ * Cloud mode's public pages have no router: the landing page at `/` (signed
+ * in or not), the download page at `/download`, the pricing page at
+ * `/pricing` and the privacy notice at `/privacy` (each signed in or not), sign-in /
+ * sign-up at their own paths, and `/verify`, where the verification mail's
+ * link lands (signed in or not). The app's router only
+ * mounts once a machine is open (`features/cloud/cloud-app.tsx`), so these
+ * few paths are read straight off `location` and moved between with the
+ * History API; TanStack's history (patched onto `pushState` /
+ * `replaceState`) follows along, so the app later boots from whatever path
+ * is current.
+ *
+ * Local mode (a remote-hand server's own shell) never reaches any of this.
+ */
+
+export const SIGN_IN_PATH = "/signin";
+export const SIGN_UP_PATH = "/signup";
+/** The verification mail's link: `/verify#t=<token>` (the token in the fragment). */
+export const VERIFY_PATH = "/verify";
+/** The plans, and the waitlist (`#waitlist`). */
+export const PRICING_PATH = "/pricing";
+/** The privacy notice. */
+export const PRIVACY_PATH = "/privacy";
+/** The waitlist's form, on the pricing page. */
+export const WAITLIST_HREF = `${PRICING_PATH}#waitlist`;
+
+/**
+ * Where the app starts: the machine list, or the sessions of the machine
+ * last opened here. "Open app" on the landing page goes here, sign-in lands
+ * here, and the installed app starts here (`start_url` in
+ * `public/manifest.webmanifest`), so it never opens on the landing page.
+ */
+export const APP_PATH = "/sessions";
+
+/** What a signed-out visitor sees at `pathname`. */
+export type PublicPage = "landing" | "download" | "pricing" | "privacy" | "signin" | "signup" | "verify";
+
+/**
+ * Only the bare root is the landing page. Sign-in and sign-up have their own
+ * paths; every other path is a deep link into the app (a session, a terminal),
+ * which keeps showing the sign-in form in place so the link still opens once
+ * the visitor is in.
+ */
+export function publicPage(pathname: string): PublicPage {
+  const path = pathname.replace(/\/+$/, "") || "/";
+  if (path === "/") return "landing";
+  if (path === DOWNLOAD_PATH) return "download";
+  if (path === PRICING_PATH) return "pricing";
+  if (path === PRIVACY_PATH) return "privacy";
+  if (path === SIGN_UP_PATH) return "signup";
+  if (path === VERIFY_PATH) return "verify";
+  return "signin";
+}
+
+/** Whether `pathname` is the landing page. */
+export function isLandingPath(pathname: string): boolean {
+  return publicPage(pathname) === "landing";
+}
+
+/** The pages that are pages of their own whether or not this browser is signed in. */
+export type FrontPage = "landing" | "download" | "pricing" | "privacy";
+
+const FRONT_PAGES: readonly PublicPage[] = ["landing", "download", "pricing", "privacy"];
+
+/** `pathname`'s page if it is one of the {@link FrontPage}s. */
+export function frontPage(pathname: string): FrontPage | null {
+  const page = publicPage(pathname);
+  return FRONT_PAGES.includes(page) ? (page as FrontPage) : null;
+}
+
+/**
+ * Whether `pathname` is a page of its own whether or not this browser is
+ * signed in — the landing page, the download page, the pricing page or the
+ * privacy notice — which starts nothing of the app until the visitor goes on
+ * into it.
+ */
+export function isFrontPath(pathname: string): boolean {
+  return frontPage(pathname) !== null;
+}
+
+/**
+ * What a page loading at `pathname` shows: the landing page at `/`, the
+ * download page at `/download`, the pricing page at `/pricing` and the
+ * privacy notice at `/privacy` whether or not a device session is kept here;
+ * signed out, the sign-in / sign-up forms (in place on a deep link); signed
+ * in, the app — from its start rather than from a sign-in page (`replace`),
+ * and from a deep link where it points. The verification link's page shows
+ * signed in or not.
+ */
+export function bootRoute(
+  pathname: string,
+  signedIn: boolean,
+): { [P in FrontPage]: { show: P } }[FrontPage] | { show: "verify" } | { show: "auth" } | { show: "app"; replace?: string } {
+  const front = frontPage(pathname);
+  if (front) return { show: front } as { [P in FrontPage]: { show: P } }[FrontPage];
+  if (publicPage(pathname) === "verify") return { show: "verify" };
+  if (!signedIn) return { show: "auth" };
+  return isAuthPath(pathname) ? { show: "app", replace: APP_PATH } : { show: "app" };
+}
+
+/** Whether `pathname` is one of the sign-in / sign-up pages (not a route the app knows). */
+export function isAuthPath(pathname: string): boolean {
+  const path = pathname.replace(/\/+$/, "");
+  return path === SIGN_IN_PATH || path === SIGN_UP_PATH;
+}
+
+const listeners = new Set<() => void>();
+
+function notify(): void {
+  for (const listener of listeners) listener();
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  addEventListener("popstate", listener);
+  return () => {
+    listeners.delete(listener);
+    removeEventListener("popstate", listener);
+  };
+}
+
+/** The current path, re-read on back / forward and on {@link goPublic}. */
+export function usePathname(): string {
+  return useSyncExternalStore(
+    subscribe,
+    () => location.pathname,
+    () => "/",
+  );
+}
+
+/** Move between the public pages without a reload (a new history entry unless `replace`). */
+export function goPublic(path: string, { replace = false }: { replace?: boolean } = {}): void {
+  if (location.pathname === path) return;
+  if (replace) history.replaceState(history.state, "", path);
+  else history.pushState(null, "", path);
+  notify();
+}
+
+/**
+ * A link's click, done in place: a plain left click moves without a reload;
+ * a modified click (new tab, new window) is left to the browser.
+ */
+export function onPublicLink(path: string) {
+  return (event: { button: number; metaKey: boolean; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; preventDefault(): void }) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    goPublic(path);
+  };
+}

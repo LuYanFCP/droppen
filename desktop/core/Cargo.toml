@@ -1,0 +1,38 @@
+[package]
+name = "droppen-desktop-core"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The Droppen desktop app's shell logic, without Tauri: port, PATH, sidecar lifecycle, local credentials, login"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+getrandom = "0.3"
+base64 = "0.22"
+ureq = { version = "3", default-features = false, features = ["json"] }
+log = { version = "0.4", features = ["std"] }
+url = "2"
+percent-encoding = "2"
+# Checks update signatures the way the app's updater does (`update.rs`).
+minisign-verify = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[features]
+default = []
+# An end-to-end test build's own identity (`src/identity.rs`): bundle id,
+# name, server instance and port range, apart from the release's. Only the
+# app's own `e2e` feature (`desktop/build.sh --e2e`) turns it on.
+e2e = []
+
+[dev-dependencies]
+tempfile = "3"
+
+# Only for a test that checks code on disk against the signing requirement
+# (`login_item.rs`); already in the lock through security-framework.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+core-foundation = "0.10"

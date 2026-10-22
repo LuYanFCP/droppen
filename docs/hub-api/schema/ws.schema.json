@@ -1,0 +1,735 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://droppen.app/hub-api/v1/ws.schema.json",
+  "title": "Droppen hub API v1: control messages",
+  "description": "The JSON text messages on the WebSockets (and the Turnstile page's postMessage), each an object tagged by `t`. Look up a channel and direction as $defs[\"<channel> c2s\"] or $defs[\"<channel> s2c\"] (c2s: client to server — device, agent, relay or app to the hub, a relay or the Turnstile page); one message type as $defs[\"<short>.<dir>.<t>\"], short being client, agent, relay, connect or turnstile. Unknown fields are allowed everywhere: /v1/ only grows. Binary fields are lower-case hex. Binary WebSocket messages are rh-proto frames (websocket.md) and are not described here.",
+  "$defs": {
+    "hex": { "type": "string", "pattern": "^[0-9a-f]*$" },
+    "hex16": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "hex32": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{128}$" },
+    "id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[!-~]+$" },
+    "relayId": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+    "ms": { "type": "integer", "minimum": 0 },
+    "count": { "type": "integer", "minimum": 0 },
+    "u32": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "presence": {
+      "type": "object",
+      "required": ["id", "state", "since_ms"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "state": { "enum": ["online", "offline", "unknown"] },
+        "since_ms": { "$ref": "#/$defs/ms" },
+        "via": {
+          "type": "array",
+          "items": { "type": "object", "required": ["relay"], "properties": { "relay": { "type": "string" }, "rtt_ms": { "$ref": "#/$defs/u32" } } }
+        },
+        "relays": { "type": "boolean" }
+      }
+    },
+    "relayRef": {
+      "type": "object",
+      "required": ["id", "origin"],
+      "properties": { "id": { "$ref": "#/$defs/relayId" }, "origin": { "type": "string" } }
+    },
+    "ticketKey": {
+      "type": "object",
+      "required": ["kid", "key"],
+      "properties": { "kid": { "type": "integer", "minimum": 0, "maximum": 255 }, "key": { "$ref": "#/$defs/hex32" } }
+    },
+    "issuedTicket": {
+      "type": "object",
+      "required": ["relay", "origin", "ticket", "expires_ms"],
+      "properties": {
+        "relay": { "$ref": "#/$defs/relayId" },
+        "origin": { "type": "string" },
+        "ticket": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "expires_ms": { "$ref": "#/$defs/ms" },
+        "emergency": { "type": "boolean" },
+        "throttled": { "type": "boolean" }
+      }
+    },
+    "ticketRefusal": {
+      "type": "object",
+      "required": ["relay", "error"],
+      "properties": {
+        "relay": { "type": "string" },
+        "error": { "type": "string", "description": "unknown | unavailable | limit | forbidden" },
+        "key": { "type": "string" },
+        "limit": { "type": "integer" },
+        "account_set": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "hubChallenge": {
+      "type": "object",
+      "required": ["t", "nonce", "hub", "version"],
+      "properties": {
+        "t": { "const": "challenge" },
+        "nonce": { "$ref": "#/$defs/hex32" },
+        "hub": { "type": "string", "description": "The hub's origin as it sees itself (wss://…); a signer names the origin it dialled, never this" },
+        "version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "hubWelcome": {
+      "type": "object",
+      "required": ["t", "account", "id", "chain_seq"],
+      "properties": {
+        "t": { "const": "welcome" },
+        "account": { "$ref": "#/$defs/id" },
+        "id": { "$ref": "#/$defs/id" },
+        "chain_seq": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "hubError": {
+      "type": "object",
+      "required": ["t", "code", "message"],
+      "properties": { "t": { "const": "error" }, "code": { "type": "string", "minLength": 1 }, "message": { "type": "string" } }
+    },
+    "mail": {
+      "type": "object",
+      "required": ["t", "id", "sender", "purpose", "epoch", "sealed"],
+      "properties": {
+        "t": { "const": "mail" },
+        "id": { "type": "integer" },
+        "sender": { "$ref": "#/$defs/id" },
+        "purpose": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "epoch": { "$ref": "#/$defs/u32" },
+        "sealed": { "$ref": "#/$defs/hex" }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "required": ["t", "plan", "retention_days", "storage_bytes", "usage_bytes"],
+      "properties": {
+        "t": { "const": "plan" },
+        "plan": { "type": "string" },
+        "retention_days": { "type": "integer" },
+        "storage_bytes": { "type": ["integer", "null"], "description": "null: no limit" },
+        "usage_bytes": { "type": "integer" },
+        "machine_usage_bytes": { "type": "integer", "description": "agents: this machine's own share" },
+        "grace_until_ms": { "$ref": "#/$defs/ms" },
+        "detail": { "type": "object", "description": "devices: GET /v1/me's `plan`" }
+      }
+    },
+    "chainSub": {
+      "type": "object",
+      "required": ["t", "from"],
+      "properties": { "t": { "const": "chain_sub" }, "from": { "$ref": "#/$defs/count" } }
+    },
+    "streamRefused": {
+      "type": "object",
+      "required": ["t", "ch", "stream", "code"],
+      "properties": {
+        "t": { "const": "stream_refused" },
+        "ch": { "$ref": "#/$defs/u32" },
+        "stream": { "$ref": "#/$defs/hex32" },
+        "code": { "type": "string", "description": "quota | rate | compact | forbidden | missing_pages | invalid | unavailable | limit" },
+        "retry_ms": { "$ref": "#/$defs/count" }
+      }
+    },
+
+    "/v1/client c2s": {
+      "type": "object",
+      "required": ["t"],
+      "properties": { "t": { "enum": ["login", "chain_sub", "stream_unsub"] } },
+      "oneOf": [
+        { "$ref": "#/$defs/client.c2s.login" },
+        { "$ref": "#/$defs/client.c2s.chain_sub" },
+        { "$ref": "#/$defs/client.c2s.stream_unsub" }
+      ]
+    },
+    "client.c2s.login": {
+      "type": "object",
+      "required": ["t", "role", "account", "id", "time_ms", "sig", "session"],
+      "properties": {
+        "t": { "const": "login" },
+        "role": { "const": "device" },
+        "account": { "$ref": "#/$defs/id" },
+        "id": { "$ref": "#/$defs/id" },
+        "time_ms": { "$ref": "#/$defs/ms" },
+        "sig": { "$ref": "#/$defs/hex64" },
+        "session": { "type": "string", "minLength": 1, "maxLength": 128, "description": "this device's own device session token" }
+      }
+    },
+    "client.c2s.chain_sub": { "$ref": "#/$defs/chainSub" },
+    "client.c2s.stream_unsub": {
+      "type": "object",
+      "required": ["t", "ch"],
+      "properties": { "t": { "const": "stream_unsub" }, "ch": { "$ref": "#/$defs/u32" } }
+    },
+
+    "/v1/client s2c": {
+      "type": "object",
+      "required": ["t"],
+      "properties": {
+        "t": { "enum": ["challenge", "welcome", "presence", "plan", "mail", "chain_result", "error", "stream_synced", "stream_refused", "device_registered", "main_device", "sign_in_changed"] }
+      },
+      "oneOf": [
+        { "$ref": "#/$defs/client.s2c.challenge" },
+        { "$ref": "#/$defs/client.s2c.welcome" },
+        { "$ref": "#/$defs/client.s2c.presence" },
+        { "$ref": "#/$defs/client.s2c.plan" },
+        { "$ref": "#/$defs/client.s2c.mail" },
+        { "$ref": "#/$defs/client.s2c.chain_result" },
+        { "$ref": "#/$defs/client.s2c.error" },
+        { "$ref": "#/$defs/client.s2c.stream_synced" },
+        { "$ref": "#/$defs/client.s2c.stream_refused" },
+        { "$ref": "#/$defs/client.s2c.device_registered" },
+        { "$ref": "#/$defs/client.s2c.main_device" },
+        { "$ref": "#/$defs/client.s2c.sign_in_changed" }
+      ]
+    },
+    "client.s2c.challenge": { "$ref": "#/$defs/hubChallenge" },
+    "client.s2c.welcome": { "$ref": "#/$defs/hubWelcome" },
+    "client.s2c.presence": {
+      "type": "object",
+      "required": ["t", "machines"],
+      "properties": { "t": { "const": "presence" }, "machines": { "type": "array", "items": { "$ref": "#/$defs/presence" } } }
+    },
+    "client.s2c.plan": { "$ref": "#/$defs/plan" },
+    "client.s2c.mail": { "$ref": "#/$defs/mail" },
+    "client.s2c.chain_result": {
+      "type": "object",
+      "required": ["t", "ok", "seq", "error"],
+      "properties": {
+        "t": { "const": "chain_result" },
+        "ok": { "type": "boolean" },
+        "seq": { "type": ["integer", "null"], "minimum": 0 },
+        "error": { "type": ["string", "null"] }
+      }
+    },
+    "client.s2c.error": { "$ref": "#/$defs/hubError" },
+    "client.s2c.stream_synced": {
+      "type": "object",
+      "required": ["t", "ch", "stream", "next_seq", "exists"],
+      "properties": {
+        "t": { "const": "stream_synced" },
+        "ch": { "$ref": "#/$defs/u32" },
+        "stream": { "$ref": "#/$defs/hex32" },
+        "next_seq": { "$ref": "#/$defs/count" },
+        "exists": { "type": "boolean" }
+      }
+    },
+    "client.s2c.stream_refused": { "$ref": "#/$defs/streamRefused" },
+    "client.s2c.device_registered": {
+      "type": "object",
+      "required": ["t", "device", "created_ms"],
+      "properties": { "t": { "const": "device_registered" }, "device": { "$ref": "#/$defs/id" }, "created_ms": { "$ref": "#/$defs/ms" } }
+    },
+    "client.s2c.main_device": {
+      "type": "object",
+      "required": ["t", "machine", "set_ms"],
+      "properties": {
+        "t": { "const": "main_device" },
+        "machine": { "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }], "description": "the account's main device, a current host of its chain; null: none" },
+        "set_ms": { "type": ["integer", "null"], "minimum": 0, "description": "when it was last set or cleared; null: never" }
+      }
+    },
+    "client.s2c.sign_in_changed": {
+      "type": "object",
+      "description": "How the account signs in changed (http.md, \"The account's ways to sign in\"), exactly as GET /v1/me's sign_in_changes lists it",
+      "required": ["t", "id", "kind", "device", "label", "at_ms"],
+      "properties": {
+        "t": { "const": "sign_in_changed" },
+        "id": { "type": "integer", "minimum": 1, "description": "grows with every change the hub records" },
+        "kind": { "enum": ["passkey_added", "passkey_renamed", "passkey_removed", "password_set", "password_changed", "password_removed"] },
+        "device": { "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }], "description": "the device session that made the change" },
+        "label": { "type": ["string", "null"], "maxLength": 64, "description": "the passkey's label (the new one, for a rename); null for the password" },
+        "at_ms": { "$ref": "#/$defs/ms" }
+      }
+    },
+
+    "/v1/agent c2s": {
+      "type": "object",
+      "required": ["t"],
+      "properties": {
+        "t": { "enum": ["login", "enroll", "enroll_proof", "chain_sub", "mail_ack", "mail_release", "agent_info", "relay_tickets", "relay_state", "stream_list", "stream_delete"] }
+      },
+      "oneOf": [
+        { "$ref": "#/$defs/agent.c2s.login" },
+        { "$ref": "#/$defs/agent.c2s.enroll" },
+        { "$ref": "#/$defs/agent.c2s.enroll_proof" },
+        { "$ref": "#/$defs/agent.c2s.chain_sub" },
+        { "$ref": "#/$defs/agent.c2s.mail_ack" },
+        { "$ref": "#/$defs/agent.c2s.mail_release" },
+        { "$ref": "#/$defs/agent.c2s.agent_info" },
+        { "$ref": "#/$defs/agent.c2s.relay_tickets" },
+        { "$ref": "#/$defs/agent.c2s.relay_state" },
+        { "$ref": "#/$defs/agent.c2s.stream_list" },
+        { "$ref": "#/$defs/agent.c2s.stream_delete" }
+      ]
+    },
+    "agent.c2s.login": {
+      "type": "object",
+      "required": ["t", "role", "account", "id", "time_ms", "sig"],
+      "properties": {
+        "t": { "const": "login" },
+        "role": { "const": "agent" },
+        "account": { "$ref": "#/$defs/id" },
+        "id": { "$ref": "#/$defs/id" },
+        "time_ms": { "$ref": "#/$defs/ms" },
+        "sig": { "$ref": "#/$defs/hex64" }
+      }
+    },
+    "agent.c2s.enroll": {
+      "type": "object",
+      "required": ["t", "token"],
+      "properties": { "t": { "const": "enroll" }, "token": { "$ref": "#/$defs/hex16" } }
+    },
+    "agent.c2s.enroll_proof": {
+      "type": "object",
+      "required": ["t", "sign_key", "dh_key", "time_ms", "sig", "proof"],
+      "properties": {
+        "t": { "const": "enroll_proof" },
+        "sign_key": { "$ref": "#/$defs/hex32" },
+        "dh_key": { "$ref": "#/$defs/hex32" },
+        "time_ms": { "$ref": "#/$defs/ms" },
+        "sig": { "$ref": "#/$defs/hex64" },
+        "proof": { "$ref": "#/$defs/hex32" }
+      }
+    },
+    "agent.c2s.chain_sub": { "$ref": "#/$defs/chainSub" },
+    "agent.c2s.mail_ack": {
+      "type": "object",
+      "required": ["t", "id"],
+      "properties": { "t": { "const": "mail_ack" }, "id": { "type": "integer" } }
+    },
+    "agent.c2s.mail_release": {
+      "type": "object",
+      "required": ["t", "id"],
+      "properties": { "t": { "const": "mail_release" }, "id": { "type": "integer" } }
+    },
+    "agent.c2s.agent_info": {
+      "type": "object",
+      "required": ["t", "version"],
+      "properties": {
+        "t": { "const": "agent_info" },
+        "version": { "type": "string", "description": "kept to 64 characters" },
+        "features": { "type": "array", "items": { "type": "string" }, "description": "e.g. relays/1" }
+      }
+    },
+    "agent.c2s.relay_tickets": {
+      "type": "object",
+      "required": ["t", "relays"],
+      "properties": { "t": { "const": "relay_tickets" }, "relays": { "type": "array", "items": { "type": "string" } } }
+    },
+    "agent.c2s.relay_state": {
+      "type": "object",
+      "required": ["t"],
+      "properties": {
+        "t": { "const": "relay_state" },
+        "rtts": { "type": "object", "additionalProperties": { "$ref": "#/$defs/u32" } },
+        "attached": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "agent.c2s.stream_list": {
+      "type": "object",
+      "required": ["t"],
+      "properties": { "t": { "const": "stream_list" } }
+    },
+    "agent.c2s.stream_delete": {
+      "type": "object",
+      "required": ["t", "stream"],
+      "properties": { "t": { "const": "stream_delete" }, "stream": { "$ref": "#/$defs/hex32" } }
+    },
+
+    "/v1/agent s2c": {
+      "type": "object",
+      "required": ["t"],
+      "properties": {
+        "t": { "enum": ["challenge", "welcome", "enroll_assigned", "mail", "error", "plan", "stream_refused", "stream_watched", "stream_list", "relay_set", "relay_tickets"] }
+      },
+      "oneOf": [
+        { "$ref": "#/$defs/agent.s2c.challenge" },
+        { "$ref": "#/$defs/agent.s2c.welcome" },
+        { "$ref": "#/$defs/agent.s2c.enroll_assigned" },
+        { "$ref": "#/$defs/agent.s2c.mail" },
+        { "$ref": "#/$defs/agent.s2c.error" },
+        { "$ref": "#/$defs/agent.s2c.plan" },
+        { "$ref": "#/$defs/agent.s2c.stream_refused" },
+        { "$ref": "#/$defs/agent.s2c.stream_watched" },
+        { "$ref": "#/$defs/agent.s2c.stream_list" },
+        { "$ref": "#/$defs/agent.s2c.relay_set" },
+        { "$ref": "#/$defs/agent.s2c.relay_tickets" }
+      ]
+    },
+    "agent.s2c.challenge": { "$ref": "#/$defs/hubChallenge" },
+    "agent.s2c.welcome": { "$ref": "#/$defs/hubWelcome" },
+    "agent.s2c.enroll_assigned": {
+      "type": "object",
+      "required": ["t", "account", "machine"],
+      "properties": { "t": { "const": "enroll_assigned" }, "account": { "$ref": "#/$defs/id" }, "machine": { "$ref": "#/$defs/id" } }
+    },
+    "agent.s2c.mail": { "$ref": "#/$defs/mail" },
+    "agent.s2c.error": { "$ref": "#/$defs/hubError" },
+    "agent.s2c.plan": { "$ref": "#/$defs/plan" },
+    "agent.s2c.stream_refused": { "$ref": "#/$defs/streamRefused" },
+    "agent.s2c.stream_watched": {
+      "type": "object",
+      "required": ["t", "streams"],
+      "properties": { "t": { "const": "stream_watched" }, "streams": { "type": "array", "items": { "$ref": "#/$defs/hex32" } } }
+    },
+    "agent.s2c.stream_list": {
+      "type": "object",
+      "required": ["t", "streams"],
+      "properties": {
+        "t": { "const": "stream_list" },
+        "streams": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["stream", "next_seq"],
+            "properties": { "stream": { "$ref": "#/$defs/hex32" }, "next_seq": { "$ref": "#/$defs/count" } }
+          }
+        }
+      }
+    },
+    "agent.s2c.relay_set": {
+      "type": "object",
+      "required": ["t", "relays", "emergency", "limit", "directory"],
+      "properties": {
+        "t": { "const": "relay_set" },
+        "relays": { "type": "array", "items": { "$ref": "#/$defs/relayRef" } },
+        "emergency": { "type": "array", "items": { "$ref": "#/$defs/relayRef" } },
+        "limit": { "type": "integer", "minimum": 0, "description": "relay.max; 9223372036854775807 (i64::MAX) means no limit" },
+        "directory": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "origin", "state"],
+            "properties": { "id": { "$ref": "#/$defs/relayId" }, "origin": { "type": "string" }, "state": { "enum": ["up", "draining"] } }
+          }
+        }
+      }
+    },
+    "agent.s2c.relay_tickets": {
+      "type": "object",
+      "required": ["t", "tickets", "errors"],
+      "properties": {
+        "t": { "const": "relay_tickets" },
+        "tickets": { "type": "array", "items": { "$ref": "#/$defs/issuedTicket" } },
+        "errors": { "type": "array", "items": { "$ref": "#/$defs/ticketRefusal" } }
+      }
+    },
+
+    "/v1/relay c2s": {
+      "type": "object",
+      "required": ["t"],
+      "properties": { "t": { "enum": ["login", "register", "health", "usage", "meta", "draining", "deregister", "rotate"] } },
+      "oneOf": [
+        { "$ref": "#/$defs/relay.c2s.login" },
+        { "$ref": "#/$defs/relay.c2s.register" },
+        { "$ref": "#/$defs/relay.c2s.health" },
+        { "$ref": "#/$defs/relay.c2s.usage" },
+        { "$ref": "#/$defs/relay.c2s.meta" },
+        { "$ref": "#/$defs/relay.c2s.draining" },
+        { "$ref": "#/$defs/relay.c2s.deregister" },
+        { "$ref": "#/$defs/relay.c2s.rotate" }
+      ]
+    },
+    "relay.c2s.login": {
+      "type": "object",
+      "required": ["t", "id", "time_ms", "sig"],
+      "properties": {
+        "t": { "const": "login" },
+        "id": { "$ref": "#/$defs/relayId" },
+        "time_ms": { "$ref": "#/$defs/ms" },
+        "sig": { "$ref": "#/$defs/hex64" },
+        "version": { "type": "string" }
+      }
+    },
+    "relay.c2s.register": {
+      "type": "object",
+      "required": ["t", "token", "sign_key", "origin", "time_ms", "sig"],
+      "properties": {
+        "t": { "const": "register" },
+        "token": { "type": "string" },
+        "sign_key": { "$ref": "#/$defs/hex32" },
+        "origin": { "type": "string" },
+        "version": { "type": "string" },
+        "time_ms": { "$ref": "#/$defs/ms" },
+        "sig": { "$ref": "#/$defs/hex64" }
+      }
+    },
+    "relay.c2s.health": {
+      "type": "object",
+      "required": ["t"],
+      "properties": {
+        "t": { "const": "health" },
+        "conns": { "$ref": "#/$defs/count" },
+        "channels": { "$ref": "#/$defs/count" },
+        "bytes_in_per_s": { "$ref": "#/$defs/count" },
+        "bytes_out_per_s": { "$ref": "#/$defs/count" },
+        "load": { "type": "number" },
+        "version": { "type": ["string", "null"] }
+      }
+    },
+    "relay.c2s.usage": {
+      "type": "object",
+      "required": ["t", "boot", "seq", "from_ms", "to_ms"],
+      "properties": {
+        "t": { "const": "usage" },
+        "boot": { "type": "string" },
+        "seq": { "$ref": "#/$defs/count" },
+        "from_ms": { "$ref": "#/$defs/ms" },
+        "to_ms": { "$ref": "#/$defs/ms" },
+        "accounts": {
+          "type": "array",
+          "items": { "type": "object", "required": ["account", "bytes"], "properties": { "account": { "type": "string" }, "bytes": { "$ref": "#/$defs/count" } } }
+        }
+      }
+    },
+    "relay.c2s.meta": {
+      "type": "object",
+      "required": ["t"],
+      "properties": {
+        "t": { "const": "meta" },
+        "city": { "type": ["string", "null"] },
+        "version": { "type": ["string", "null"] },
+        "origin": { "type": ["string", "null"] }
+      }
+    },
+    "relay.c2s.draining": {
+      "type": "object",
+      "required": ["t"],
+      "properties": { "t": { "const": "draining" }, "until_ms": { "$ref": "#/$defs/ms" } }
+    },
+    "relay.c2s.deregister": {
+      "type": "object",
+      "required": ["t"],
+      "properties": { "t": { "const": "deregister" }, "reason": { "type": "string" } }
+    },
+    "relay.c2s.rotate": {
+      "type": "object",
+      "required": ["t", "new_key", "time_ms", "sig_new"],
+      "properties": {
+        "t": { "const": "rotate" },
+        "new_key": { "$ref": "#/$defs/hex32" },
+        "time_ms": { "$ref": "#/$defs/ms" },
+        "sig_new": { "$ref": "#/$defs/hex64" }
+      }
+    },
+
+    "/v1/relay s2c": {
+      "type": "object",
+      "required": ["t"],
+      "properties": {
+        "t": { "enum": ["challenge", "welcome", "registered", "error", "usage_ok", "deregistered", "rotated", "revoke", "replayed", "throttle", "throttles", "keys", "drain"] }
+      },
+      "oneOf": [
+        { "$ref": "#/$defs/relay.s2c.challenge" },
+        { "$ref": "#/$defs/relay.s2c.welcome" },
+        { "$ref": "#/$defs/relay.s2c.registered" },
+        { "$ref": "#/$defs/relay.s2c.error" },
+        { "$ref": "#/$defs/relay.s2c.usage_ok" },
+        { "$ref": "#/$defs/relay.s2c.deregistered" },
+        { "$ref": "#/$defs/relay.s2c.rotated" },
+        { "$ref": "#/$defs/relay.s2c.revoke" },
+        { "$ref": "#/$defs/relay.s2c.replayed" },
+        { "$ref": "#/$defs/relay.s2c.throttle" },
+        { "$ref": "#/$defs/relay.s2c.throttles" },
+        { "$ref": "#/$defs/relay.s2c.keys" },
+        { "$ref": "#/$defs/relay.s2c.drain" }
+      ]
+    },
+    "relay.s2c.challenge": { "$ref": "#/$defs/hubChallenge" },
+    "relay.s2c.welcome": {
+      "type": "object",
+      "required": ["t", "id", "ticket_keys"],
+      "properties": { "t": { "const": "welcome" }, "id": { "$ref": "#/$defs/relayId" }, "ticket_keys": { "type": "array", "items": { "$ref": "#/$defs/ticketKey" } } }
+    },
+    "relay.s2c.registered": {
+      "type": "object",
+      "required": ["t", "id", "ticket_keys"],
+      "properties": { "t": { "const": "registered" }, "id": { "$ref": "#/$defs/relayId" }, "ticket_keys": { "type": "array", "items": { "$ref": "#/$defs/ticketKey" } } }
+    },
+    "relay.s2c.error": { "$ref": "#/$defs/hubError" },
+    "relay.s2c.usage_ok": {
+      "type": "object",
+      "required": ["t", "boot", "seq"],
+      "properties": { "t": { "const": "usage_ok" }, "boot": { "type": "string" }, "seq": { "$ref": "#/$defs/count" } }
+    },
+    "relay.s2c.deregistered": {
+      "type": "object",
+      "required": ["t", "id"],
+      "properties": { "t": { "const": "deregistered" }, "id": { "$ref": "#/$defs/relayId" } }
+    },
+    "relay.s2c.rotated": {
+      "type": "object",
+      "required": ["t", "id"],
+      "properties": { "t": { "const": "rotated" }, "id": { "$ref": "#/$defs/relayId" } }
+    },
+    "relay.s2c.revoke": {
+      "type": "object",
+      "required": ["t", "account", "id", "at_ms"],
+      "properties": {
+        "t": { "const": "revoke" },
+        "account": { "$ref": "#/$defs/id" },
+        "id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/id" }], "description": "a device or machine; null: every connection of the account" },
+        "at_ms": { "$ref": "#/$defs/ms" }
+      }
+    },
+    "relay.s2c.replayed": {
+      "type": "object",
+      "required": ["t", "revocations"],
+      "properties": { "t": { "const": "replayed" }, "revocations": { "$ref": "#/$defs/count" } }
+    },
+    "relay.s2c.throttle": {
+      "type": "object",
+      "required": ["t", "account", "bytes_per_sec"],
+      "properties": {
+        "t": { "const": "throttle" },
+        "account": { "$ref": "#/$defs/id" },
+        "bytes_per_sec": { "type": ["integer", "null"], "minimum": 1, "description": "null: the throttle is lifted" }
+      }
+    },
+    "relay.s2c.throttles": {
+      "type": "object",
+      "required": ["t", "accounts"],
+      "properties": {
+        "t": { "const": "throttles" },
+        "accounts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["account", "bytes_per_sec"],
+            "properties": { "account": { "$ref": "#/$defs/id" }, "bytes_per_sec": { "type": "integer", "minimum": 1 } }
+          }
+        }
+      }
+    },
+    "relay.s2c.keys": {
+      "type": "object",
+      "description": "Reserved: the relay replaces its ticket keys with these; the hub does not send it yet (keys come with welcome).",
+      "required": ["t", "ticket_keys"],
+      "properties": { "t": { "const": "keys" }, "ticket_keys": { "type": "array", "items": { "$ref": "#/$defs/ticketKey" } } }
+    },
+    "relay.s2c.drain": {
+      "type": "object",
+      "description": "Reserved: the relay sends goaway to everyone and takes no new sign-ins; the hub does not send it yet.",
+      "required": ["t"],
+      "properties": { "t": { "const": "drain" } }
+    },
+
+    "/v1/connect c2s": {
+      "type": "object",
+      "required": ["t"],
+      "properties": { "t": { "enum": ["login", "ticket"] } },
+      "oneOf": [{ "$ref": "#/$defs/connect.c2s.login" }, { "$ref": "#/$defs/connect.c2s.ticket" }]
+    },
+    "connect.c2s.login": {
+      "type": "object",
+      "required": ["t", "ticket", "time_ms", "sig"],
+      "properties": {
+        "t": { "const": "login" },
+        "ticket": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "time_ms": { "$ref": "#/$defs/ms" },
+        "sig": { "$ref": "#/$defs/hex64" }
+      }
+    },
+    "connect.c2s.ticket": {
+      "type": "object",
+      "required": ["t", "ticket"],
+      "properties": { "t": { "const": "ticket" }, "ticket": { "type": "string", "minLength": 1, "maxLength": 8192 } }
+    },
+
+    "/v1/connect s2c": {
+      "type": "object",
+      "required": ["t"],
+      "properties": { "t": { "enum": ["challenge", "welcome", "presence", "ticket_ok", "goaway", "error"] } },
+      "oneOf": [
+        { "$ref": "#/$defs/connect.s2c.challenge" },
+        { "$ref": "#/$defs/connect.s2c.welcome" },
+        { "$ref": "#/$defs/connect.s2c.presence" },
+        { "$ref": "#/$defs/connect.s2c.ticket_ok" },
+        { "$ref": "#/$defs/connect.s2c.goaway" },
+        { "$ref": "#/$defs/connect.s2c.error" }
+      ]
+    },
+    "connect.s2c.challenge": {
+      "type": "object",
+      "required": ["t", "nonce", "relay", "origin", "version"],
+      "properties": {
+        "t": { "const": "challenge" },
+        "nonce": { "$ref": "#/$defs/hex32" },
+        "relay": { "$ref": "#/$defs/relayId" },
+        "origin": { "type": "string" },
+        "version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "connect.s2c.welcome": {
+      "type": "object",
+      "required": ["t", "relay", "id", "expires_ms"],
+      "properties": {
+        "t": { "const": "welcome" },
+        "relay": { "$ref": "#/$defs/relayId" },
+        "id": { "$ref": "#/$defs/id" },
+        "expires_ms": { "$ref": "#/$defs/ms" }
+      }
+    },
+    "connect.s2c.presence": {
+      "type": "object",
+      "required": ["t", "machines"],
+      "properties": {
+        "t": { "const": "presence" },
+        "machines": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "state"],
+            "properties": { "id": { "$ref": "#/$defs/id" }, "state": { "enum": ["online", "offline"] }, "since_ms": { "$ref": "#/$defs/ms" } }
+          }
+        }
+      }
+    },
+    "connect.s2c.ticket_ok": {
+      "type": "object",
+      "required": ["t", "expires_ms"],
+      "properties": { "t": { "const": "ticket_ok" }, "expires_ms": { "$ref": "#/$defs/ms" } }
+    },
+    "connect.s2c.goaway": {
+      "type": "object",
+      "required": ["t", "retry_ms", "reason"],
+      "properties": { "t": { "const": "goaway" }, "retry_ms": { "$ref": "#/$defs/count" }, "reason": { "type": "string" } }
+    },
+    "connect.s2c.error": {
+      "type": "object",
+      "required": ["t", "code", "message"],
+      "properties": {
+        "t": { "const": "error" },
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string" },
+        "retry_ms": { "$ref": "#/$defs/count" }
+      }
+    },
+
+    "/turnstile c2s": {
+      "type": "object",
+      "required": ["t"],
+      "properties": { "t": { "enum": ["turnstile-reset"] } },
+      "oneOf": [{ "$ref": "#/$defs/turnstile.c2s.turnstile-reset" }]
+    },
+    "turnstile.c2s.turnstile-reset": {
+      "type": "object",
+      "required": ["t"],
+      "properties": { "t": { "const": "turnstile-reset" } }
+    },
+    "/turnstile s2c": {
+      "type": "object",
+      "required": ["t"],
+      "properties": { "t": { "enum": ["turnstile"] } },
+      "oneOf": [{ "$ref": "#/$defs/turnstile.s2c.turnstile" }]
+    },
+    "turnstile.s2c.turnstile": {
+      "type": "object",
+      "required": ["t", "action", "token"],
+      "properties": {
+        "t": { "const": "turnstile" },
+        "action": { "enum": ["signup", "login", "resend"] },
+        "token": { "type": ["string", "null"] },
+        "expired": { "const": true },
+        "error": { "const": true }
+      }
+    }
+  }
+}

@@ -1,0 +1,46 @@
+# The default rules, and four kinds of test fixture they flag that protect
+# nothing. Each allowance below takes one rule (`generic-api-key`, the only
+# one that flags them), in the files named (`paths`, anchored), and, but for
+# the generated vectors, one exact secret (`regexTarget = "secret"`,
+# anchored): `condition = "AND"` makes all three hold at once, so a real key
+# in the same file, or on the same line, is still a finding.
+[extend]
+useDefault = true
+
+# `server-rs/crates/rh-proto/vectors/*.json` are generated deterministically
+# from fixed seeds (`rh-proto/src/vectors.rs`, `web/test/e2e-ts-vectors.test.ts`)
+# so the Rust and WebCrypto sides can check each other byte for byte. The keys
+# in them are test fixtures, and the generic-api-key rule flags every one.
+[[allowlists]]
+description = "the cloud protocol's deterministic interop vectors"
+targetRules = ["generic-api-key"]
+paths = ['''^server-rs/crates/rh-proto/vectors/[^/]+\.json$''']
+
+# `dGhlIHNhbXBsZSBub25jZQ==` is the `Sec-WebSocket-Key` of RFC 6455 §1.3 ("the
+# sample nonce"), which the auth tests send to make a request a WebSocket
+# handshake: a published example, not a credential.
+[[allowlists]]
+description = "RFC 6455's sample WebSocket key in the auth tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''^server-rs/src/auth/routes\.rs$''']
+regexTarget = "secret"
+regexes = ['''^dGhlIHNhbXBsZSBub25jZQ==$''']
+
+# Made-up OpenAI API keys: the tests that hand a key to `codex login` check it
+# goes where it should and nowhere else.
+[[allowlists]]
+description = "a made-up OpenAI API key in the setup tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''^server-rs/src/setup/tasks\.rs$''']
+regexTarget = "secret"
+regexes = ['''^sk-proj-TESTKEY0123456789abcdefghijklmnop$''']
+
+[[allowlists]]
+description = "a made-up OpenAI API key in the setup guide's tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''^web/test/setup-tools-live\.test\.tsx$''']
+regexTarget = "secret"
+regexes = ['''^sk-test-0123456789abcdef$''']

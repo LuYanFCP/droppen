@@ -1,0 +1,12 @@
+# The Droppen desktop app: its own workspace, so `server-rs` builds (and the
+# CI that runs them) never compile Tauri, and this one never compiles the
+# server. The server reaches the app as a prebuilt sidecar binary placed by
+# `build.sh`.
+[workspace]
+resolver = "2"
+members = ["core", "src-tauri"]
+
+[workspace.package]
+edition = "2021"
+publish = false
+license = "AGPL-3.0-only"

@@ -1,0 +1,38 @@
+# cargo-about: the Rust half of THIRD_PARTY_NOTICES, which
+# scripts/release-public.sh generates for every public release
+# (`cargo about generate --fail`, cargo-about 0.9.2). Only licences that may be
+# shipped inside an AGPL-3.0-only binary: permissive ones, and MPL-2.0, which
+# is file-level. Keep `accepted` in step with ALLOWED in
+# scripts/notices/web-notices.mjs. Where a crate offers a choice, the first
+# accepted licence in this order is the one taken.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CDLA-Permissive-2.0",
+    "MIT-0",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "MPL-2.0",
+]
+# The release binaries' targets, macOS and Linux: what is compiled into them,
+# nothing else. One THIRD_PARTY_NOTICES covers all of them.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+# Build scripts and tests are not shipped.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# The workspace's own crates (publish = false) are Droppen, not third parties.
+private = { ignore = true }

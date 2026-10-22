@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- The Droppen mark (web/public/logo.svg) on the macOS app-icon grid:
+       an 824 px rounded square centred on a 1024 px canvas. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="#0a0a0a"/>
+  <g transform="translate(100 100) scale(8.24)">
+    <path d="M28.5 28.5H50A21.5 21.5 0 1 1 28.5 50Z" fill="#ffffff"/>
+  </g>
+</svg>

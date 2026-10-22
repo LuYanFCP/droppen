@@ -1,0 +1,220 @@
+# Droppen
+
+English | [简体中文](README.zh-CN.md)
+
+Droppen lets you browse and drive your Claude Code and Codex sessions from any
+device: a browser, a phone or another computer.
+
+It runs on the computer where the CLIs run. It reads their sessions where they
+are, starts and resumes them, and shows them in a web app: the transcript, a
+composer whose messages queue while the agent is busy, the agent's questions to
+answer, terminals, files and split-screen layouts. It also keeps several Claude
+and Codex accounts with their quotas, runs scheduled prompts and sends
+notifications.
+
+Droppen is local-first. On one computer it needs no Droppen account and talks to
+no Droppen service: the local program serves the web app on `127.0.0.1:8700`.
+To use it from your other devices, sign the computer in to Droppen
+(droppen.app). Your devices then reach it over channels that are end-to-end
+encrypted; the Hub and the relays in between only see ciphertext.
+
+A full manual, in Chinese, is in [README.zh-CN.md](README.zh-CN.md).
+
+## What is in this repository
+
+| Part | Where | What it is |
+|---|---|---|
+| Local program | `server-rs/` (root crate `remote-hand-server`; the command is `droppen`) | One binary with the web app built in. It runs the CLIs and serves the local API and web app. Once signed in, it is also the agent that connects this computer to your other devices, and the local gateway through which the local web app sees your other computers without holding keys itself. |
+| Web app | `web/` | Vite + React: the local UI, and the cloud mode droppen.app serves (`web/src/features/cloud`, `web/src/lib/hub`, `web/src/lib/e2e`). |
+| Desktop app | `desktop/` | Droppen for macOS (Tauri). It carries the local program and runs it for you. Its own Cargo workspace; see [desktop/README.md](desktop/README.md). |
+| Relay | `server-rs/crates/droppen-relay` (the program), `server-rs/crates/rh-relay` (the library) | `droppen-relay` pairs a device's channel with a computer's on tickets the Hub signs and copies the ciphertext between them. It stores nothing and holds no keys. |
+| Protocol | `server-rs/crates/rh-proto` | Hub frames, the Noise end-to-end channel, the device chain, encrypted log records and interoperability vectors. |
+| Client libraries | `server-rs/crates/rh-client`, `server-rs/crates/rh-devkit` | The device side of the Hub API in Rust; a headless device for tests. |
+| Plugin SDKs | `packages/plugin-sdk` (`@droppen/plugin-sdk`), `server-rs/crates/droppen-plugin-sdk` | For writing plugins. Which plugins a build includes is set by a distribution manifest; see [docs/plugins/distribution.md](docs/plugins/distribution.md). |
+| Hub API | [`docs/hub-api/`](docs/hub-api/README.md) | The contract between this code and the Hub. |
+
+### The Hub
+
+The Hub at droppen.app (accounts, sign-in, plans, storage of encrypted data,
+relay tickets) is a separate service and is not open source. It never holds a
+key that can decrypt your sessions, terminals or files: the design assumes a
+malicious Hub, and the guarantees that matter are checked by the open code in
+this repository. [`docs/hub-api/`](docs/hub-api/README.md) documents the whole
+API this code uses, and the code relies on nothing else of the Hub.
+droppen.app also serves the web app, built from `web/`; see
+[Security model](#security-model) for how to check it.
+
+## Install
+
+Releases are published at
+[github.com/getdroppen/releases](https://github.com/getdroppen/releases): the
+desktop app, the server for macOS and Linux, `SHA256SUMS`, `LICENSE` and
+`THIRD_PARTY_NOTICES`.
+
+**Desktop app (macOS 13 or later).** Download `Droppen-<version>.dmg` from the
+[latest release](https://github.com/getdroppen/releases/releases/latest) and
+install it. The app starts its own copy of the local program, logs in to it for
+you and keeps itself up to date.
+
+**Server (macOS and Linux).** For a computer you use in the background, or one
+with no screen:
+
+```sh
+curl -fsSL https://droppen.app/install.sh | sh
+```
+
+It downloads the latest release, checks it against the release's `SHA256SUMS`,
+creates the first local account, installs the program to
+`~/.local/share/remote-hand/bin/` (the command is `droppen`) and runs it on
+`127.0.0.1:8700` (or the next free port) as a launchd user agent
+(`app.droppen.server`) on macOS, or a systemd user service (`droppen.service`)
+on Linux (x86_64 and aarch64, glibc 2.28 or later). Run it again to upgrade;
+`curl -fsSL https://droppen.app/install.sh | sh -s -- --uninstall` removes it
+and keeps your data. `droppen.app/install.sh` redirects to the copy in
+getdroppen/releases; the source is [`scripts/install.sh`](scripts/install.sh),
+which lists every option in its header.
+
+To join the computer to your Droppen account in the same step, pass the
+one-time code droppen.app shows under
+*my devices → add a device that runs AI → show a one-time code*:
+
+```sh
+curl -fsSL https://droppen.app/install.sh | DROPPEN_CODE=<code> sh
+```
+
+The local program listens on loopback only. Reach it from other devices
+through Droppen, or through an SSH tunnel or Tailscale. Do not expose its port
+to the Internet: whoever reaches it can run commands as you.
+
+## Build from source
+
+You need Rust (stable), Node 22 (see `.nvmrc`) and pnpm 10.6.3 (the version in
+`package.json`; `corepack enable` picks it up).
+
+```sh
+pnpm install
+pnpm build:web                                               # first: the web app is embedded in the binary
+cargo build --release --manifest-path server-rs/Cargo.toml   # the same as pnpm build:server
+```
+
+The program is `server-rs/target/release/remote-hand-server`.
+`remote-hand-server serve` runs it in the foreground on
+`http://127.0.0.1:8700`; with no account yet, `remote-hand-server open` opens
+the page as this computer's owner, and `remote-hand-server user add <name>`
+creates an account. Without `web/dist` the build stops on purpose, rather than
+produce a binary that shows only a placeholder page; set
+`DROPPEN_ALLOW_MISSING_WEB_DIST=1` when you do not need the web app (the `pnpm`
+scripts below do).
+
+The desktop app (macOS only) is built with `desktop/build.sh`; see
+[desktop/README.md](desktop/README.md).
+
+## Development
+
+```sh
+pnpm install
+pnpm dev:server   # cargo run -- serve on http://127.0.0.1:8700; needs no web build
+pnpm dev:web      # Vite on http://localhost:5180, proxying /api and /embed to the server
+```
+
+Tests and checks:
+
+```sh
+pnpm test         # the web app's tests, then cargo test for server-rs
+pnpm typecheck
+pnpm gen:api      # after changing the server's routes or types:
+                  # regenerates openapi/openapi.json and web/src/api/schema.d.ts
+```
+
+`pnpm test` runs the server's tests on several threads, which is fine for a
+quick run on macOS. CI runs them on one thread
+(`cargo test -- --test-threads=1` in `server-rs/`), and that is what a pull
+request has to pass; [CONTRIBUTING.md](CONTRIBUTING.md#run-the-tests-before-you-open-a-pull-request)
+has the exact commands. The desktop app's tests run with
+`cargo test --workspace` in `desktop/`.
+
+## Security model
+
+- **Alone, the local program talks to no Droppen service.** It listens on
+  `127.0.0.1`, asks for a login (local accounts, per instance), and trusts no
+  request for coming from this computer. It runs the CLIs as you, with your
+  files, so treat access to its port as access to your account on that
+  computer.
+- **Every device has its own keys.** A Droppen install, a browser and a phone
+  each have their own key pair. A signed device chain, which every device and
+  computer checks for itself, decides which devices belong to your account.
+- **Content is end-to-end encrypted.** Devices control a computer over a Noise
+  channel that the Hub and the relays only forward. Session lists and
+  transcripts kept for reading while a computer is offline are encrypted
+  streams that the computer signs.
+- **What the Hub sees** is metadata. Everything that passes through it is
+  specified in [docs/hub-api/](docs/hub-api/README.md); summed up:
+  - your account: the email address and whether it is verified, a password
+    hash or your passkeys' public keys, the plan (and the invite it came with,
+    if any), and the usage it is counted on (bytes stored and transferred);
+  - the IP address of every request and connection (its rate limits are keyed
+    on it);
+  - the User-Agent of every request, of which it keeps only a short name for
+    each browser or phone — what the device is and which browser, such as
+    "iPhone · Safari" — so the devices page can tell them apart; never the
+    User-Agent itself;
+  - each device's and computer's random id and public keys, when it was
+    registered and last seen, when a computer went online or offline and on
+    which relays, and the version and protocol features the local program
+    declares;
+  - the device chain: which devices belong to the account, which of them run
+    AI, which device added which, and which computer is the account's main
+    device;
+  - for the encrypted data it stores (session streams and their snapshot
+    pages, sealed key mail, keyring blobs): how many, how large, when written,
+    which device wrote each, and which device each piece of mail is for;
+  - which device opens a channel to which computer, through which relay, and
+    the sizes and timing of that traffic.
+
+  It never sees keys, transcripts, terminal input or output, or file names and
+  contents.
+- **The web app at droppen.app is delivered by the Hub.** It is a reproducible
+  build of `web/` with a per-file hash manifest on every release, and
+  `node scripts/verify-web.mjs` checks what the site serves. That cannot rule
+  out a targeted one-off delivery; for high assurance use the local web app or
+  the desktop app.
+
+The design documents (in Chinese, apart from the Hub API):
+
+- [docs/local-aggregator.md](docs/local-aggregator.md): the three programs, the
+  open-source boundary, signing in from the local settings, the local gateway.
+- [docs/cross-machine-architecture.md](docs/cross-machine-architecture.md): the
+  key model, the protocol, what the Hub can see, and the threat model (§7).
+- [docs/passkeys.md](docs/passkeys.md): signing in to the Hub with a passkey,
+  and the optional passkey unlock for new devices.
+- [docs/web-integrity.md](docs/web-integrity.md): what the web app check proves
+  and what it does not.
+- [docs/hub-api/](docs/hub-api/README.md): every Hub route and message this
+  code uses.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Every commit needs a `Signed-off-by:`
+line (the Developer Certificate of Origin; `git commit -s`), and a required
+check on every pull request enforces it.
+
+Please report security issues privately, as described in
+[SECURITY.md](SECURITY.md), and not in public issues.
+
+## Licence
+
+Copyright (C) 2026 Kilerd.
+
+- **The applications** are licensed under the GNU Affero General Public License
+  v3.0 only ([LICENSE](LICENSE), `AGPL-3.0-only`): the local program (the root
+  crate in `server-rs/`), the desktop app (`desktop/`), the web app (`web/`) and
+  the relay program (`droppen-relay`).
+- **The protocol and library crates**, `rh-proto`, `rh-relay` (the library),
+  `rh-client` and `rh-devkit`, and the plugin SDKs (`packages/plugin-sdk`,
+  `server-rs/crates/droppen-plugin-sdk`) are licensed under `MIT OR
+  Apache-2.0`, at your option; each has `LICENSE-MIT` and `LICENSE-APACHE` in
+  its directory. These are the only parts of this repository the closed Hub
+  links.
+
+Releases carry `LICENSE` and `THIRD_PARTY_NOTICES`, which lists the licences of
+every dependency compiled in.

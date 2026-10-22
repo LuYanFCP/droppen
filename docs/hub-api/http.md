@@ -1,0 +1,781 @@
+# HTTP routes
+
+Every route the hub serves, and the four a relay serves. Conventions, the
+auth model, the error shape and the limits are in [README.md](README.md); the
+exact bodies are in [`schema/http.schema.json`](schema/http.schema.json)
+under `$defs["<METHOD> <path>"]`. "Errors" lists the codes a route itself
+returns; any route may also answer `429 rate`, `503 unavailable`, and the
+framework's non-JSON 400/413/415/422; a route that needs no sign-in also
+`408 slow_request` when its body takes longer than 10 s to arrive.
+
+Audience: **client** routes are what devices and agents use; **operator**
+routes need the admin token; **relay** and **tooling** routes are marked.
+
+## Public (no session)
+
+### `GET /healthz`
+Liveness: `200 ok` (text). Also served on the Turnstile host. Limits: the
+static routes' 600 per 10 s and 3,000 a minute per address (README).
+
+### `GET /install.sh` — tooling
+`302 Found` to
+`https://raw.githubusercontent.com/getdroppen/releases/main/install.sh`, with
+`Cache-Control: no-store` and no body (`HEAD` the same; other methods `405`).
+This is what `curl -fsSL https://droppen.app/install.sh | sh` fetches: the
+server installer for macOS and Linux, kept at the root of the public binaries
+repository
+`getdroppen/releases`. The installer downloads a release from that repository
+and checks it against the release's `SHA256SUMS` before installing anything.
+The hub never serves the script or a binary itself, only this address, so what
+a computer runs is what anyone can read there. Limited like `/healthz` (the
+static routes' share per address); a 404 on the Turnstile host, and a
+redirected host name gets its `308` to the origin first.
+
+### `GET /turnstile?action=signup|login|resend[&theme=dark]` — Turnstile host only
+An HTML page that renders Cloudflare's widget and hands its result to the app
+with `postMessage`, aimed at the app's origin only. The app frames it (its
+CSP gains `frame-src` for this origin and never loads Cloudflare's script
+itself). Messages (schema: ws.schema.json `/turnstile`):
+
+| direction | message |
+|---|---|
+| page → app | `{t: "turnstile", action, token}` on success; `{t: "turnstile", action, token: null, expired: true}` or `{…, error: true}` |
+| app → page | `{t: "turnstile-reset"}`: render a fresh challenge |
+
+The page, and the 404 for anything else on that host, count against the
+static routes' share per address, as does a redirected host's `308`.
+
+### `GET /.well-known/droppen-build` — only when the hub serves the web app
+→ `{commit: null | "<hex>", web: {digest: "sha256:<hex>", files}}`, with
+`Cache-Control: no-store` and `Access-Control-Allow-Origin: *`. Which build of
+the web app this hub serves: the commit its image was built from
+(`DROPPEN_HUB_BUILD_COMMIT`, else Railway's `RAILWAY_GIT_COMMIT_SHA`; `null` when
+neither is set) and the digest of the files as built — one
+`<sha256>  <path>\n` line per file, sorted by path bytewise, hashed; the shell
+before the hub adds its `rh-hub` marker. A release's `web-manifest.json` has
+the same `digest`; `scripts/verify-web.mjs` uses this to pick the manifest and
+then checks the served bytes themselves ([web-integrity](../web-integrity.md)).
+A claim like everything else here, not a proof. It, the web app's own files
+and any path nothing else serves share the static routes' limit per address.
+
+### `GET /v1/signup/config`
+→ `{signup: "invite"|"open"|"closed", invite_required, turnstile: null | {site_key, origin}, verification: "required"|"off", passkeys: null | {rp_id}}`.
+What the sign-up form must ask for. `passkeys`: the hub offers passkeys
+for this relying party id (`null`: it has them off — a hub on an IP
+address always does; absent from hubs before passkeys).
+
+### `POST /v1/signup`
+`{email, password, invite?, turnstile?, lang?}` → a login session
+`{account, token, expires_ms, email_verified, verification, known_client}`
+(`known_client`: see login).
+`invite` is required when sign-up is by invite (an invite may also give the
+account a plan); `turnstile` is required when the hub uses Turnstile; `lang`
+picks the verification mail's language. With verification `required` a
+verification mail is queued and the account has 14 days before
+`email_unverified` blocks registering devices, creating its chain and
+enrolling machines.
+With open sign-up and verification `required`, an account that holds the
+e-mail but nothing else — never verified; no device, machine or chain entry;
+no plan of any source, no override; created without an invite — and that
+has been quiet for an hour (no sign-up, no verification mail) is replaced
+by the new sign-up in the same transaction: it and its sessions are gone,
+and its verification link verifies nothing. Any other account keeps the
+e-mail (`409 email_taken`); sign-up by invite never replaces one. A new
+account's verification mail always goes out.
+Errors: `403 signup_closed | bad_invite | turnstile_required | turnstile_retry | turnstile_failed` (`turnstile_*` only with Turnstile),
+`400 bad_request | disposable_email`, `409 email_taken`, `503 turnstile_unavailable`.
+Limits: every attempt counts (per address, per network, across the hub),
+and accounts made 5/hour and 20/day per address; without Turnstile also
+per network and across the hub (`429 rate`, no account made); fields as in
+the README.
+
+### `POST /v1/login`
+`{email, password, turnstile?, known_client?}` → a login session (as sign-up,
+`known_client` included).
+Errors: `401 bad_login` (wrong e-mail or password, an unknown account, or a
+locked (e-mail, address) pair — indistinguishable on purpose; an IPv4
+address as a whole, an IPv6 one by its /64),
+`403 turnstile_required | turnstile_retry | turnstile_failed` (only with
+Turnstile), `429 rate` (also the backoff without Turnstile), `400 bad_request`.
+The failures, the lockout and the Turnstile threshold count the e-mail asked
+for, whether or not an account has it: an unknown e-mail gets the same
+answers in the same order as a wrong password for an existing account.
+Without Turnstile on the hub nothing asks for it; instead an e-mail that
+failed often, and a network that failed often at it, back off: `429 rate`
+with `retry_after_ms` (a few seconds, doubling, at most 5 or 15 minutes),
+the same for an unknown e-mail (README).
+**Known client.** Sign-up and every successful login answer `known_client`:
+the hub's word that this client signed in to the account (`kc1.…`, opaque,
+good until the end of the UTC day 30 days out, bound to the account — worth
+nothing once the account is replaced; every one minted for an account on one
+day is the same token). Keep it per e-mail (across logout too) and send it with the next
+login: a valid one for the e-mail's account skips both backoffs — until it
+has failed 3 times in the last hour, when it counts as no token for the rest
+of the hour (a stolen one gives no more guesses than none). It never skips
+the per-address lock or the per-address rate.
+Limits: 30 per 10 minutes per address; the lockout, the backoffs and the
+Turnstile thresholds in the README.
+
+### Passkeys (`docs/passkeys.md` §3, K1)
+
+Signing up and in with a passkey. WebAuthn's binary values here are
+**base64url without padding** (its own JSON encoding: the browser's
+`parseCreationOptionsFromJSON`, `parseRequestOptionsFromJSON` and
+`toJSON()`), not hex. A **challenge** is 42 bytes, stateless (asking for
+one stores nothing), good for 2 minutes and answered once; send it back
+exactly as given, with the credential that answers it.
+
+The relying party id is the hub's (`droppen.app`; `/v1/signup/config`
+names it) and the only origins taken are the app's own, compared exactly:
+an answer made on any other origin — a subdomain included — or in a
+cross-origin frame is refused. Passkeys are discoverable (`residentKey:
+required`), need user verification (`userVerification: required`), and
+take Ed25519 (-8), ES256 (-7) or RS256 (-257, 2048–4096 bits);
+`attestation: none` (a statement is not read).
+
+**A passkey gives a login session and nothing more**: the one a password
+gives (`known_client` included), with no device and for 15 minutes. The
+device session is still the device key's signature (README). **A passkey
+login is never held by the password login's lockout, backoffs or
+known-client budget**, never asks for Turnstile, and its failures count
+towards none of them: it has per-address and per-network rates of its own.
+
+Every refused credential is `401 bad_passkey` (a type, origin, RP id,
+flag, challenge, user handle, signature or counter that does not check
+out, a replayed challenge, a credential that is not WebAuthn's shape), or
+`401 unknown_passkey` for one this hub does not know: hide it from the
+person's passkey provider (`PublicKeyCredential.signalUnknownCredential`,
+where the browser has it). A hub without passkeys answers every route
+here `403 passkeys_off`.
+
+#### `POST /v1/passkeys/options`
+`{purpose: "signup", email, invite?, turnstile?, lang?}` →
+`{challenge, options}`, `options` a `PublicKeyCredentialCreationOptionsJSON`
+for `navigator.credentials.create()`: `rp {id, name}`, `user {id, name,
+displayName}` (a random 32-byte handle; the e-mail as the name the
+provider shows), the three algorithms, `timeout: 120000`, `residentKey`
+and `userVerification` required, `attestation: "none"`,
+`excludeCredentials: []`, and `extensions {credProps: true, prf: {eval:
+{first}}}` (a one-off PRF input: Windows Hello makes a PRF-capable
+credential only when asked at creation; the result is never sent back).
+**Every sign-up check runs here, before the browser makes a passkey**,
+exactly as `POST /v1/signup` makes them: the sign-up attempts (per
+address at once; per network and across the hub just before the e-mail is
+looked up, once the cheap checks passed: each answer says whether an
+e-mail is taken), whether the address has accounts left to make (only an account
+made spends one), `DROPPEN_HUB_SIGNUP` (closed, invite), Turnstile when the hub
+uses it (action `signup`), the e-mail's syntax and throwaway domains, the
+invite, without Turnstile the per-network and hub-wide caps — and whether
+the e-mail is taken (`409 email_taken`, unless open sign-up would replace
+the account that holds it, as `POST /v1/signup` does). A refusal here
+means: do not call `create()`.
+Errors: `400 bad_request | disposable_email`, `403 signup_closed |
+bad_invite | turnstile_* | passkeys_off`, `409 email_taken`, `429 rate`,
+`503 turnstile_unavailable`. (Adding a passkey to an account takes a
+device session: `POST /v1/passkeys/add/options`, below; any other `purpose`
+is `400`.)
+
+#### `POST /v1/signup/passkey`
+`{challenge, email, invite?, lang?, credential}` → a login session, as
+`POST /v1/signup` answers. `credential` is `create()`'s
+`RegistrationResponseJSON`; send only `credProps.rk` and `prf.enabled` of
+its client extension results. The challenge must be the options' for this
+very e-mail. The sign-up's rules are checked again (the invite may be
+spent meanwhile, the e-mail taken, the caps full) without charging the
+address's limit or Turnstile again; then the account is made with **no
+password**, this passkey and its user handle, and the verification mail is
+queued, as with `POST /v1/signup`. A password login for such an account is
+answered exactly like a wrong password (`401 bad_login`).
+Errors: `401 bad_passkey`, `400 bad_request | disposable_email`, `403
+signup_closed | bad_invite | passkeys_off`, `409 email_taken` (lost a
+race), `429 rate`. After any refusal the passkey belongs to no account:
+signal it unknown.
+
+#### `POST /v1/passkeys/login/options`
+`{}` → `{challenge, options}`, `options` a
+`PublicKeyCredentialRequestOptionsJSON`: `{challenge, rpId, timeout:
+120000, userVerification: "required", allowCredentials: []}` — any of the
+account's passkeys; nothing names an account. For the e-mail field's
+autofill (`mediation: "conditional"`) ask again before 2 minutes pass.
+Limits: 60 a minute per address.
+
+#### `POST /v1/login/passkey`
+`{challenge, credential}` → a login session plus `passkey: {id, label,
+unlock}` (`id` the hub's `pk-…`; `label` the provider's name by AAGUID, or
+`Passkey`; `unlock` `"on"` when a current passkey slot on the account's
+chain names this passkey — a new device can join with it,
+`docs/passkeys.md` §4.6 — else `"off"`: a hint for the next screen, which
+goes by the chain the device verifies itself; a hub from before slots said
+`"none"`). `credential` is
+`get()`'s `AuthenticationResponseJSON`, `userHandle` included. Checked: the
+challenge, type, origin, cross-origin, RP id hash, user presence and
+verification, the credential (registered → its account), the user handle
+(the account's), the signature over `authenticatorData ‖
+SHA-256(clientDataJSON)` under the stored key, the counter (on a
+device-bound passkey a counter that does not go up, unless both are 0, is
+refused as a possible clone; on a synced one — backup eligible — it is let
+in and logged, and the stored counter never goes down) and the
+credential's backup eligibility (which may not change). The client data
+and the credential must be JSON objects with no key given twice (taken as
+sent, never the last of two). An unverified account signs in like with a
+password: `email_verified: false`, the same limits.
+Errors: `401 bad_passkey | unknown_passkey`, `403 passkeys_off`,
+`429 rate`. Limits: 30 per 10 minutes per address, a bucket of its own; a
+network's (IPv4 /24, IPv6 /48) failed assertions 120 per 10 minutes, past
+which its failures are answered `429` — a valid assertion never is; and 30
+logins per 10 minutes per passkey, spent only by its own valid assertions
+(past them `429 rate`, which counts as no failure).
+
+### `POST /v1/email/verify`
+`{token}` (from the link's fragment) → `{account, verified: true}`. No
+session: the token is the proof, and it verifies only the account it was
+made for, at that address (`400 bad_token` once that account is gone or
+its e-mail changed).
+Errors: `400 bad_token`, `410 expired`. Limits: 30/minute per address.
+
+### `POST /v1/waitlist`
+`{email, plan: "free" | "pro", locale?}` → `{ok: true}` — the very same
+answer, after the same one write, whether the address is new or already on
+the list: it never says which. No confirmation mail is sent; submitting is
+joining. One entry per inbox (the address with its `+tag` folded off, and at
+Gmail its dots too, `googlemail.com` counting as `gmail.com`): asking again
+keeps the address first given and takes the latest `plan` and `locale`.
+`email` is trimmed and lower-cased, at most 254 bytes (64 before the `@`),
+one `@`, a domain of two or more host labels; `plan` is a public plan;
+`locale` (≤ 16 bytes) is kept as one of `en`, `zh-CN`, `zh-TW`, `ja`. No IP
+address or other request detail is stored; an entry not given again for 365
+days is deleted. Errors: `400 bad_request` (`message` names the field),
+`400 disposable_email`. Limits: README.md, "Rate limits and caps".
+
+### `POST /v1/session/challenge`
+`{account, device}` → `{nonce}` (32-byte hex). Stateless; any well-formed ids
+get one. Errors: `400 bad_request` (ids not 1–64 printable characters).
+
+### `POST /v1/session`
+`{account, device, time_ms, nonce, signature}` → a device session
+`{account, device, token, expires_ms}`. `signature` (64-byte hex) is the
+device key's signature of `HubLogin {role: DeviceSession, account, id:
+device, hub: <origin dialled>, nonce, time_ms}`; `time_ms` within 5 minutes.
+A host (chain v3: a device that runs AI) signs in here with the identity it
+enrolled with — `device` is its machine id — once the chain lists it as a
+current device; it then controls other hosts as a device. With
+`DROPPEN_HUB_CHAIN_V3=off` no host acts as a device at all — a kill switch: this
+sign-in (`403 host_devices_off`, even for a host that signed in as a
+device before), a host's device session from before on every route (`403
+host_devices_off`), its device WebSocket (`4403 host_devices_off`) and its
+relay tickets are all refused.
+Errors: `401 denied` (anything wrong: unknown device, bad signature, stale
+or reused nonce, clock), `403 device_removed`, `400 bad_request` (`nonce`
+not 32 bytes of hex), `429 rate` (with `retry_after_ms`). Limits: 30 a
+minute and 300 an hour per device, spent only by the device's own valid
+signature — the hub's table of answered nonces is shared, and no one device
+may fill it; a made-up signature naming the device, or another device of the
+account, spends none of it. A refused one leaves its nonce unanswered.
+
+### `GET /v1/client`, `GET /v1/agent` — WebSocket
+The device and agent sockets ([websocket.md](websocket.md)). 60 upgrades a
+minute per address. A `login` whose `account` or `id` is not 1–64
+printable characters, or whose `session` is longer than 128, is refused
+(`4401 denied`) before anything is looked up.
+
+### `GET /v1/relay` — WebSocket, relay
+A relay's control link ([websocket.md](websocket.md#v1relay-relay--hub)).
+
+### `GET /v1/probe/rooms/{room}?role=probe|page` — WebSocket, tooling
+Only when the hub runs the direct-path measurement probe; otherwise 404.
+`room` is 32 lower-case hex digits (else `400 bad_request`). No sign-in;
+60 upgrades a minute per address, like the other sockets. Text
+messages ≤ 8 KiB from a page go to the room's probe, the probe's to every
+page; on each join or leave every member gets `{"hub": "peers", "probes": n,
+"pages": m}`. The messages themselves are the probe's own (`rh-p2p-probe`),
+relayed unread; they are not part of this API.
+
+## Signed in: `session` (a login or a device session)
+
+### `POST /v1/devices`
+`{sign_key, dh_key, kind?, host?, replaces?}` (32-byte hex each: Ed25519, X25519;
+small-order keys are refused) → `{device}`. Registers this device's keys; it
+is outside the chain until a full device adds it (or it recovers with the
+recovery words). Every connected device of the account gets
+`device_registered`.
+
+`kind` (optional) says what the device is, as 1–32 lower-case letters,
+digits and dashes; `host` (optional) names the machine it runs on, as 1–64
+letters, digits, `.`, `_` and `-`. Both are **metadata only**: kept and shown
+in `GET /v1/me`, never checked against the chain and never a reason to allow
+anything (what a device may do is the chain's: its `host` and `admin` flags,
+chain v3). The open clients send neither since chain v3 (a computer controls
+other devices with its one identity; the earlier `"aggregator"` second device
+is gone); the hub itself writes `kind: "host"` for a host that signed in as a
+device — such a row is no registration: it counts neither towards the 10 a
+day nor as waiting.
+
+`replaces` (optional) names the device of this account the new one takes
+the place of: the browser lost that one's keys and registers as a new
+device. Metadata only, like `kind`: kept and shown in `GET /v1/me`
+(`devices[].replaces`) so the device that adds the new one can offer to
+remove the old one — the web app asks first and writes the ordinary
+removal only if the person confirms; the hub never removes anything for it.
+An id of no device of this account is kept as `null`.
+Errors: `400 bad_request` (also a malformed `kind`, `host` or `replaces`), `403 email_unverified`, `429 device_rate | too_many_pending_devices`.
+Limits: 10/hour per address, 10/day per account, 3 waiting at once (both
+counted with the registration itself, so requests at once cannot each slip
+under them). A device
+outside the chain counts as waiting only within its 30-minute pairing window
+(the time it may open a pairing at the hub); it is kept, sessions and all,
+for a day after it registered — a new browser showing its QR code may wait
+that long to be added, or join with the recovery words — and then deleted
+with its row, shown in `GET /v1/me` until then.
+
+### `GET /v1/me`
+`?touch=1` (optional): this page's `User-Agent` says "Macintosh" yet it has a
+touch screen (`navigator.maxTouchPoints > 1`), as iPadOS Safari asking for
+desktop sites — its default — does; no Mac has one. With a device session and
+a Mac `User-Agent`, the device is then named an iPad (`devices[].ua_label`,
+below); it changes nothing else, nor for any other `User-Agent`, nor with a
+login session. Any other value is no hint.
+
+→ `{account, email, plan, chain_seq, chain_v3, relay_prefs, devices, machines, credentials, sign_in_changes, known_client?}`:
+- `known_client` (with a device session only): a fresh known-client token for the account, as a sign-in gives one (`POST /v1/login`). A device in use keeps getting one, so it never ages out and needs no password login to get its first;
+- `email`: `{address, verified, verification, due_ms, delivery: "pending"|"sent"|"failed"|null, delivery_error}`
+  (`due_ms`: when an unverified account starts being refused; `delivery_error`, for a failed mail only, is generic — `the mail service refused to deliver to this address` or `the mail could not be sent in time` — the mail service's own words stay in the hub's log);
+- `plan`: the plan view (`{id, source, status, period_start_ms, period_end_ms, grace_plan, grace_until_ms, entitlements: {<key>: n|null}, usage: {storage_bytes, devices, hosts, machines, relays, transfer: {period_start_ms, period_end_ms, bytes, included, overage_bytes, throttled}}}`), or `null` if it cannot be read. `usage.devices` counts every current device of the chain, hosts included (`devices.max`); `usage.hosts` the ones that run AI (`hosts.max`); `usage.machines` and `entitlements["machines.max"]` are the old names, kept one version;
+- `chain_seq`: the newest chain entry the hub holds, `null` before genesis;
+- `relay_prefs`: `{standby}`, the account's relay preference (`PATCH /v1/relays/prefs`); a hub from before it leaves it out;
+- `chain_v3`: `{mode: "off"|"read"|"write", writable, waiting: [machine], in_use}` — whether the account may take its first v3 entries, or (once `in_use`) add a host, now (`docs/local-aggregator.md` §3.5): the hub must write them (`DROPPEN_HUB_CHAIN_V3=write`) and, before the first, every current host's agent must have declared `chain/3` and `policy/1` (`waiting` lists those that have not; once `in_use` they no longer hold the account back and are listed so the owner can update them); `in_use`: the chain already holds a v3 entry, so nothing that reads only v2 can follow it, and everything but a new host is taken in every mode. Before genesis (`chain_seq: null`) there is no host to wait for, and `writable` says whether the account can be created at all: the web app makes every new account on v3 (`Genesis3` and user key epoch 0 as v3, one batch) and makes none while it is `false`;
+- `devices[]`: `{id, sign_key, dh_key, created_ms, last_seen_ms, in_chain, kind, host, ua_label, replaces, online}` (`kind`, `host`, `replaces`: as registered, `null` when not given; a hub from before local sign-in leaves them out, and one from before `replaces` and `online` leaves those out; `ua_label`: below; `online`: whether the device is signed in on `/v1/client` now — `last_seen_ms` is when it last signed in, which a device connected for hours does not move);
+- `devices[].ua_label`: the device's browser by a short name, for a page to tell browsers and phones apart: what the device is and which browser, `"<device> · <browser>"` (a space, `·` U+00B7, a space), or either alone. `<device>` is one of `iPhone`, `iPad`, `Mac`, `Windows`, `Android`, `Linux`, `ChromeOS`, `<browser>` one of `Safari`, `Chrome`, `Firefox`, `Edge`, `Opera`, `Samsung Internet` — nothing else, ever: no version, no model, never the `User-Agent` itself, which the hub does not keep. A webview that names no browser (the desktop app's, a home-screen web app) is the device alone (`"Mac"`, `"iPhone"`); an iPad asking for desktop sites reads as `"Mac"` unless its page says `?touch=1` (above), then `"iPad"`. It comes from the `User-Agent` of the device's own requests only: its sign-in on `/v1/client` and its `GET /v1/me` with its device session — never a request body, a login session or another device's request. Replaced when it changes; a request whose `User-Agent` names nothing known (curl, an HTTP library, the agent) leaves it as it is, and so does one that says `Mac` where the device is known as an `iPad` with the same browser (a request without the hint cannot tell the two apart, and a device never turns from one into the other). `null` until one named something; metadata only, like `kind`; a hub from before it leaves it out;
+- `machines[]`: `{id, sign_key, dh_key, created_ms, last_seen_ms, in_chain, presence, copy: {streams, bytes, last_write_ms}, reads_v3}` (`presence` as in websocket.md; `copy`: the machine's encrypted offline copy on the hub; `in_chain`: a current host; `reads_v3`: its agent declared `chain/3` and `policy/1`).
+- A host that signed in as a device (`POST /v1/session`) is listed in `devices[]` too, with `kind: "host"`.
+- `credentials`: `{password, passkeys}` — whether the account has a password (an account made with a passkey, or one whose password was removed, has none) and how many passkeys; a hub from before passkeys leaves it out.
+- `sign_in_changes`: `[{id, kind, device, label, at_ms}]` — how the account's sign-in changed in the last 30 days (below, "The account's ways to sign in"), oldest first, at most the newest 50, each exactly as `sign_in_changed` told the account's devices at the time (websocket.md): `kind` `passkey_added | passkey_renamed | passkey_removed | password_set | password_changed | password_removed`; `device` the device session that made it; `label` the passkey's (the new one, for a rename), `null` for the password. A hub from before it leaves it out.
+
+### `GET /v1/chain?from=N`
+→ `{entries: [hex], seq}`: the account's chain entries from index `N`
+(default 0), each an encoded `rh_proto::chain::Entry`; `seq` is the head,
+`null` before genesis. Verify them yourself.
+
+### `POST /v1/email/resend`
+`{turnstile?}` → `{queued}`. Errors: `409 verification_off | already_verified`,
+`403 turnstile_*` (only with Turnstile). Limits: 10/hour per address, 1/minute and 5/day per account,
+5/hour and 10/day per e-mail address across the accounts that held it
+(`429 rate`; a refusal by one of these spends nothing of the others).
+
+### `POST /v1/logout`
+Ends this session. `204`.
+
+## Signed in: `device` (a device session)
+
+### `POST /v1/chain`
+`{entries: [hex]}` (1–64 encoded entries) → `{seq}`. The hub verifies each
+against the chain it holds (the same rules every client applies) and appends
+atomically. A device may also append over `/v1/client` (`CHAIN` frame).
+Errors: `400 bad_request`, `409 chain_conflict` (the chain moved: fetch and
+retry), `422 invalid_entry`, `409 limit` (`devices.max` — every current
+device, hosts included, on any added device; `hosts.max` — on an added host
+or `SetHost true`; an approval may go one past; recovery joins and
+self-activations are never limited), `409 chain_v3_not_ready`
+(`{error, mode, hosts, message}`): the
+account's **first** v3 entries need the hub's v3 mode to be `write` (`/v1/me`
+`chain_v3.mode`) and every host
+current *after* the batch to have declared `chain/3` and `policy/1` (`hosts`
+names those that have not; a host the batch removes or stops no longer
+counts). On a chain **already v3**, only a batch that adds a host or runs AI
+again on one is gated: it needs `write`, and that host must have declared
+them itself. Everything else — removal, demotion, key rotation, recovery,
+pairing a device, a policy — is taken in every mode, whatever other hosts
+lag: a rollback to `read` or `off` stops new v3 accounts and new hosts, and
+never freezes an account that is already v3. `403 email_unverified`
+(a v2 or a v3 genesis, here and as a `CHAIN` frame over `/v1/client`). Body ≤ 256 KiB.
+
+Besides the chain's own rules the hub checks: a device the batch adds (or
+that joins with the recovery words, or founds the chain) is registered to the
+account with the same keys and was not revoked (its pairing closed by an
+admin device); a host it adds (or makes a
+host again) is an *enrolled machine* with the same keys; a batch never ends
+with a new or restarted host still owed its machine key epoch (`422`). An
+agent that has not declared `chain/3` is never sent a v3 entry (it gets the
+v2 prefix only).
+
+### `POST /v1/enrollments` — requires a current full device
+`{device, token}` (`device`: the session's own; `token`: the enrollment
+code's 16-byte token, hex) → `{expires_ms}` (10 minutes). Announces a code
+an agent will claim on `/v1/agent` (`enroll`).
+Errors: `400 bad_request`, `403 not_a_full_device | email_unverified`,
+`409 limit` (`hosts.max`, waiting enrollments included), `409 exists`,
+`429 too_many_enrollments`. Limits: 10/hour per device, 5 waiting per account.
+
+### `GET /v1/enrollments/{token}`
+→ `{state: "waiting"|"expired", expires_ms}`, or once the agent proved
+`{state: "proved", machine, device, sign_key, dh_key, proof}`. The device
+checks `proof` against the code before it signs `AddMachine`.
+Errors: `400 bad_request`, `404 not_found` (another account's, or none).
+
+### `POST /v1/mailbox` — requires a current admin device (but see purpose 4)
+`{recipient, sender, purpose, epoch, sealed}` → `{id}`. A sealed key for a
+machine or a device of the account; `sender` is the session's device;
+`sealed` ≤ 8 KiB. Purposes: `1` a user key epoch — **only to an active
+admin device** (not a pending one, not one demoted); `2` a host's own
+machine key, for its agent; `3` a pairing's delivery; `4` a request for keys
+(no secret: from an admin, for user key epochs; from **any other current
+device, to an active admin device only**, for machine keys — answered with
+purpose 5, never with a user key); `5` another host's machine key epoch
+(`str16 host | sealed`, `rh_proto::wrap::encode_host_key_mail`) for a
+current device that is **not an admin and that the named host's accept
+policy admits** (machine keys follow the accept policy); the hub stores any
+purpose 0–255. Who may send what to whom is judged under the account's
+chain lock, against the chain as it stands. Key deliveries (1–3 and 5) never count against
+`storage.bytes`; anything else does. The recipient hears it at once
+(`mail`) if connected; a host's agent hears only purpose 2.
+A host's mailbox holds mail for two roles: its agent reads and acknowledges
+only purpose 2 (over `/v1/agent`), its device role everything else
+(`GET`/`DELETE /v1/mailbox`) — neither sees nor deletes the other's, and
+the caps (README, "Rate limits and caps") count each role on its own, so mail
+piling up for a device role that stopped reading never blocks the host's own
+machine key.
+When the chain demotes an admin (`SetAdmin false`), any user key (purpose 1)
+still waiting for it is deleted with the entry; removing a device or a host
+deletes the mail from and to it, and nothing else.
+Errors: `400 bad_request` (also: no such recipient, or one no role of it
+would read: purpose 2 to anything but a machine of the account, any other
+purpose to anything but a registered device — a host only once it signed in
+as a device; that refusal's message is exactly "this mail goes only to a
+device of this account (a computer gets it once it signs in as a device)",
+which clients tell apart by "gets it once it
+signs in as a device"), `403 not_a_full_device
+| not_an_admin | not_in_chain` (purpose 5 to an admin, a pending device or
+no device of the account) `| not_accepted` (purpose 5 to a device the named
+host does not admit) `| bad_host_key` (purpose 5 that does not name its
+host), `409 limit` (`storage.bytes`), `429 mail_rate`, `507 mailbox_full`.
+Body ≤ 20 KiB.
+
+### `GET /v1/mailbox?after=N&limit=M`
+→ `{mail: [{id, sender, purpose, epoch, sealed}]}`: the session device's own
+mail with `id > after`, oldest first, `limit` 1–64 (default 64), never a
+host's own machine key (purpose 2: its agent's). Page with the last `id`.
+
+### `DELETE /v1/mailbox/{id}`
+Acknowledges (deletes) one of the session device's own mails. `204`, also
+for an id that is not its own or is purpose 2 (nothing happens).
+
+### `GET /v1/keys`
+→ `{keys: [{name, blob, updated_ms, writer}]}`: the account's keyring,
+opaque wrapped-key blobs (AEAD-bound to their account, machine and epochs).
+Every copy is listed — current admins' first, then those of a writer no
+longer current (removed, or demoted) and names from before writers. The hub
+cannot tell a good copy of a wrap from a bad one, so it never hides one
+because another writer holds the same wrap: readers try each against the
+chain's commitment and keep the one that verifies (a recovery package
+likewise, whoever sealed it). Of a writer no longer current the hub keeps one
+copy per machine-key epoch (under the newest user key) and one recovery
+package per user-key epoch for the current recovery key; packages for any
+other recovery key, and what names epochs or machines the chain never
+committed, are deleted.
+
+### `PUT /v1/keys/{name}` — requires a current full device
+`{blob}` (≤ 4 KiB, hex) → `{name, stored}` (`stored: false`: the same bytes
+were already there). `name` (`[a-z0-9._/-]{1,128}`, no `..`; it contains `/`)
+is written once. It must end with the writer — `mk/<machine>/<mk epoch>/<uk epoch>/<writer>[.<suffix>]`
+(a machine key under a user key) or `rk/<uk epoch>/<writer>/<tag>…` (a user
+key for the recovery key whose `RSK` starts with `tag`) — and name epochs the
+chain has committed.
+Errors: `400 bad_request`, `403 not_a_full_device | bad_key_name`,
+`409 exists` (another blob holds the name), `409 no_chain`, `507 keyring_full`.
+Body ≤ 16 KiB.
+
+### `POST /v1/pairings`
+`{device?}` (if given, the session's own) → `{id}`. Opens a numeric-code
+pairing for this device (`docs/cross-machine-architecture.md` §1); a device
+outside the chain holds one at a time, within 30 minutes of registering.
+Errors: `400 bad_request`, `403 pairing_window_closed`, `429 too_many_pairings`.
+
+### `GET /v1/pairings` — requires a current full device
+→ `{pairings: [{id, device, created_ms}]}`: the account's open pairings.
+
+### `POST /v1/pairings/{id}/messages`
+`{from: "initiator"|"responder", body}` (hex, ≤ 4 KiB) → `{n}`. Relays one
+CPace message. The initiator is a current full device; the responder is the
+device that opened the pairing.
+Errors: `400 bad_request`, `403 not_a_full_device | not_the_creator`,
+`404 not_found`, `429 pairing_full`.
+
+### `GET /v1/pairings/{id}/messages?after=N`
+→ `{messages: [{n, from, body}]}` after `n = N`. The opener, or a current full device.
+Errors: `404 not_found`, `403 not_a_full_device`.
+
+### `DELETE /v1/pairings/{id}`
+Closes (burns) it: its opener, or any current full device — which also
+revokes the opener if it is still outside the chain. `204`, also when there
+is nothing to close.
+
+### `GET /v1/streams/{stream}/pages/{hash}` — requires a current device
+A sealed snapshot page of one of the account's streams
+(`application/octet-stream`, `Cache-Control: private, max-age=31536000,
+immutable`), streamed from the page store; one `Range: bytes=…` is honoured
+(`206`, or `416` with `Content-Range: bytes */<size>`). `stream` and `hash`
+are 32-byte hex; verify the page against `hash` yourself.
+Errors: `400 bad_request`, `403 not_in_chain`, `404 not_found`. Not counted
+against the per-device session limit.
+
+### `GET /v1/relays`
+→ `{relays, limit, account_set, emergency, agents, throttled}`:
+- `relays[]`: `{id, city, region, origin, state: "up"|"draining", load}`, the relays this account may use now;
+- `limit`: `relay.max` (i64::MAX: no limit);
+- `account_set[]`: `{id, last_used_ms}`, the relays the account uses at once;
+  `last_used_ms` is when a device last got a ticket for it — `0` for one the
+  hub put there itself for the account's agents (it keeps one working public
+  relay in the set, two with `relay_prefs.standby`, `relay.max` allowing, and
+  replaces one that fails or drains at once), which no device has used: like
+  a member idle for a week, it may be replaced;
+- `emergency[]`: relay ids granted outside the set while none of the set works;
+- `agents`: `{<machine>: {<relay>: rtt_ms}}`, each machine's last reported round trips;
+- `throttled`: the account's relayed transfer is throttled.
+
+### `PATCH /v1/relays/prefs` — requires a current device
+`{standby?: bool}` → `{standby}`: the account's relay preference, for all its
+devices. With `standby` the hub keeps two working public relays in the
+account's set (`relay.max` allowing) instead of one: each device that runs AI
+then holds a second, idle relay connection (not counted as transfer), so a
+relay that fails or drains is replaced without its agent having to sign in
+anywhere first. Off by default. A change fills or trims the set at once and
+the account's agents get `relay_set`. Errors: `403 not_in_chain`.
+
+### `POST /v1/relays/tickets` — requires a current device
+`{relays: [id]}` (1–8) → `{tickets: [{relay, origin, ticket, expires_ms, emergency?, throttled?}], errors: [{relay, error, key?, limit?, account_set?}]}`.
+A ticket (`rh_proto::ticket::RelayTicket`, signed by the hub, 15 minutes)
+signs this device in on that relay (websocket.md `/v1/connect`). Asking for a
+relay outside the account's set adds it, replaces a member idle for a week
+(or one the hub added that no device used, `last_used_ms` 0), or is refused
+(`error: "limit"`, with the set); when every member is
+unusable, up to 2 emergency tickets. `error` is `unknown` (not listed for
+this account), `unavailable` (not `up`), `limit` or `forbidden`. The
+ticket's `peers` are the hosts that accept control from this device (chain
+v3 "who may control me": an admin device reaches every current host; any
+other device — a host included — only the hosts an admin's `SetAccept`
+lets it reach; never itself) — and, for a device that is not an admin, only
+the hosts whose agent last declared `policy/1` (the `policy/1` gate, S1-4:
+an agent from before would let such a device reach every route,
+self-upgrade included). A host asks here as a
+device, with its own device session. The hub routes a device's `OPEN` by the
+same rules (`4403` otherwise).
+Errors: `400 bad_request`, `403 forbidden` (no chain, or not current).
+Limits: 120 an hour per device (`429 rate`; tickets last 15 minutes, so a
+device needs about one per relay every ten).
+
+### `GET /v1/main-device`
+→ `{machine, set_ms}`: the account's **main device**
+(`docs/local-aggregator.md` §6.5 「主设备」) — the host whose agent keeps the
+account's screens and layouts, and the one the web app's plain addresses
+mean; one per account, so every browser and phone of it shows the same
+screens. `machine` is a current host of the account's chain (an active
+device that runs AI), or `null`: none chosen yet, or the one chosen left
+the account (removed, or no longer running AI — a stored value that is not
+a current host is never returned). `set_ms`: when it was last set or
+cleared (`null`: never). The same value comes over `/v1/client` as
+`main_device`, after `welcome` and on every change (websocket.md).
+
+A preference, not authority: a client uses it only if it names a host of the
+chain it verified itself, and otherwise keeps its own choice. A hub from
+before this route answers `404` (and sends no `main_device`): the client keeps
+the main device per browser, as before.
+
+### `PUT /v1/main-device` — requires a current device
+`{machine, if_unset?}` → `{machine, set_ms}`, the account's main device
+after the request. Any current device of the account's chain may set it
+(the web app's 「设为主设备」), only to a current host of that chain; every
+device of the account hears the change (`main_device`). Checked and written
+under the account's chain lock, so a removal lands either before the write
+(refused) or after it (cleared).
+
+`if_unset: true` writes only while the account has none (never set, or the
+one it had left), and otherwise changes nothing and answers the one that
+stands — so the first page to seed it after the upgrade, or to repoint it
+after its main device left, wins, and the others take the answer. Setting
+the value the account already has changes nothing (`set_ms` stays, nothing
+is pushed).
+
+When the main device leaves the account (removed, or `SetHost false`), the
+hub clears it (`main_device {machine: null}` to every device of the account)
+and picks no successor: the web app picks one — the device in view, else the
+chain's first that runs AI — and claims it with `if_unset`.
+Errors: `400 bad_request` (`machine` is not an id), `403 not_in_chain` (the
+session's device is not a current device of the account's chain),
+`409 not_a_host` (`machine` is not a current host of this account's chain:
+unknown, another account's, removed, no longer running AI, or a device that
+runs none).
+
+### The account's ways to sign in (`docs/passkeys.md` §3.4 B, §3.6, K2)
+
+Passkeys and the password, as the account's settings page shows and changes
+them. **Changing them takes a current full device** (`403
+not_a_full_device` otherwise; `401 device_session_required` for a login
+session): someone with a stolen password, or a stolen login link, must not
+give themselves a lasting way in, while a full device already decides who
+is in the account. Changing them also needs the account's e-mail verified
+once its due date passed (`403 email_unverified`, as registering a device).
+**The account always keeps one way to sign in**: a password or a passkey
+(`409 last_credential`). Bodies up to 16 KiB (a credential).
+
+**Proving it is still the person.** Adding or removing a passkey, and
+setting, changing or removing the password, also take a proof besides the
+device session — a browser left signed in must not let anyone give the
+account a passkey or a password of theirs (either would then vouch for the
+other), nor take the owner's away: `passkey: {challenge, credential}`, one
+of the account's own passkeys answering a challenge `POST
+/v1/passkeys/reauth/options` gave this very device (`credential` is
+`get()`'s `AuthenticationResponseJSON`, checked as at sign-in; a login's
+challenge is no answer, nor is this one a login); or, only where the
+account has a password, `current_password`. An account made with a passkey
+therefore sets its first password with a passkey, and one made with a
+password adds its first passkey with the password. Every failed proof is
+`403 reauth_failed` (never a 401, which a page reads as its session gone);
+none given, `403 reauth_required`. The current password is checked at most
+3 times per 10 minutes and 10 a day per device, and 6 times per 10 minutes
+and 20 a day per account (`429 rate`; the device's share first, both before
+the hash), with argon2 as a login's: one browser left signed in never spends
+the account's whole share.
+
+**Every change is recorded and pushed.** A passkey added, renamed or
+removed, and the password set, changed or removed, is written with the
+change itself — its kind, the device session that made it, the passkey's
+label — and once made every device of the account signed in on
+`/v1/client` hears `sign_in_changed` (websocket.md); `GET /v1/me` lists the
+last 30 days' (`sign_in_changes`). A change nobody on the account's devices
+made is then seen, wherever it came from. A refused change records nothing.
+
+#### `GET /v1/passkeys` — requires a current device that runs no AI
+→ `{passkeys: [passkey], password, max}`: the account's passkeys, oldest
+first; whether it has a password; how many passkeys it may have (10). Each
+`passkey` is `{id, label, provider, credential_id, cred_hash,
+backup_eligible, backup_state, prf, transports, created_ms, created_by,
+last_used_ms, unlock}`:
+- `label`: what the person called it (the provider's name until renamed);
+  `provider`: its provider's name by AAGUID, else `Passkey`;
+- `credential_id` (base64url) and `cred_hash` (hex `SHA-256(credential
+  id)`, what a passkey slot on the chain names): nothing secret — every
+  assertion carries the id, and the page needs it to ask this very passkey
+  for its PRF (`allowCredentials`, `docs/passkeys.md` §4.5);
+- `backup_eligible` / `backup_state`: BE (it may sync: a passkey manager's)
+  and BS (it does, as of its last use); `prf`: whether the browser said it
+  can do PRF when it was made (`yes` / `no` / `unknown`, a hint only);
+- `created_by`: the device that added it (`null`: made at sign-up);
+  `last_used_ms`: its last sign-in (`null`: never);
+- `unlock`: `on` when a current passkey slot on the account's chain names
+  it (a new device can join with it), else `off`.
+Errors: `403 not_in_chain` (pending, removed, outside the chain, or a
+device that runs AI).
+
+#### `POST /v1/passkeys/add/options` — requires a current full device
+`{current_password? | passkey?}` → `{challenge, options}`, once the proof
+above holds: a challenge bound to the account and this device, and
+`PublicKeyCredentialCreationOptionsJSON` as for a sign-up
+(`POST /v1/passkeys/options`) but under the **account's user handle** (made
+now, 32 random bytes, for an account that had no passkey), with the e-mail
+as the name the provider shows, and the account's passkeys as
+`excludeCredentials` (a provider that holds one already makes none twice).
+The PRF input in `extensions` is a throwaway: a page that wants the PRF
+result at creation puts its own there (`docs/passkeys.md` §4.5); it is never
+sent back. Nothing is stored but the user handle, the first time.
+Errors: `403 passkeys_off | not_a_full_device | email_unverified |
+reauth_required | reauth_failed`, `409 too_many_passkeys`, `429 rate`.
+
+#### `POST /v1/passkeys` — requires a current full device
+`{challenge, label?, credential}` → the new `passkey` (as listed above).
+`credential` is `create()`'s `RegistrationResponseJSON`, checked as at
+sign-up against a challenge this very device was given for this account;
+`label` is 1–64 characters once trimmed, no control characters (absent: the
+provider's name). Then the account's daily share of additions (`429 rate`),
+its cap, and the passkey stored; it signs in at once.
+Errors: `400 bad_passkey` (a refused credential, a challenge another device
+or account was given, a replay — a 400, not the 401 of signing in: this
+request has a session, which a 401 would say is gone), `400 bad_request`,
+`403 passkeys_off |
+not_a_full_device | email_unverified`, `409 too_many_passkeys |
+passkey_exists` (the credential is registered already), `429 rate`.
+Limits: 10 added a day per account, spent only by a passkey that checked
+out; at most 10 at once.
+
+#### `PATCH /v1/passkeys/{id}` — requires a current full device
+`{label}` → the `passkey`, renamed (1–64 characters once trimmed, no control
+characters). Errors: `400 bad_request`, `403 not_a_full_device |
+email_unverified`, `404 not_found`.
+
+#### `DELETE /v1/passkeys/{id}` — requires a current full device
+`{current_password? | passkey? | grant?}` → `{id, removed: true}`, once the
+proof above holds (or the `grant` below); it signs in no more (a client then
+has the provider hide it: `signalUnknownCredential`, where the browser has
+it). **The proof is checked first**: a wrong one, or none, is `403
+reauth_failed | reauth_required` whatever the passkey's state. Then, refused
+for a passkey a current passkey slot on the chain names (`409 unlock_on`):
+take the slot off first (`PasskeySlotRemove`), so no slot is left naming a
+passkey nobody can sign in with — a chain the hub cannot read now is no
+answer (`503 unavailable`); and for the account's last way to sign in (`409
+last_credential`: no password and no other passkey). After a password or a
+passkey (not a grant), that `409 unlock_on` carries `grant`: the page signs
+`PasskeySlotRemove` and sends `{grant}` back instead of a second proof. A
+grant is bound to the account, this device and this passkey, good for 2
+minutes and taken once, by the removal it finishes (another device's, or one
+for another passkey, is `403 reauth_failed`; a grant sent back while the slot
+is still on is `409 unlock_on` again, with no new grant). The slot check and
+the removal hold the account's chain, so no `PasskeySlotSet` naming the
+passkey lands between them. Errors: `403 not_a_full_device |
+email_unverified | reauth_required | reauth_failed`, `404 not_found`, `409
+last_credential | unlock_on`, `429 rate`.
+
+```json
+{"error": "unlock_on", "message": "new devices can join with that passkey: turn that off first", "grant": "AQV…"}
+```
+
+#### `POST /v1/passkeys/reauth/options` — requires a current full device
+`{}` → `{challenge, options}`: a challenge bound to the account and this
+device, for proving it is still the person, and
+`PublicKeyCredentialRequestOptionsJSON` naming the account's own passkeys
+in `allowCredentials` (with their transports), `userVerification:
+"required"`. Nothing is stored. Errors: `403 passkeys_off |
+not_a_full_device | email_unverified`, `409 no_passkey` (give the current
+password instead).
+
+#### `PUT /v1/password` — requires a current full device
+`{password, current_password? | passkey?}` → `{password: true}`: the
+account's password set (an account made with a passkey has none) or
+changed, 10–1024 bytes, after the proof above. Hashed like a sign-up's
+(argon2id, the same per-address and per-network slots, which wait rather
+than refuse). From then on the e-mail and this password sign in, under the
+login's lockout, backoffs and Turnstile rules as any password does.
+Errors: `400 bad_request`, `403 not_a_full_device | email_unverified |
+reauth_required | reauth_failed`, `429 rate`.
+
+#### `DELETE /v1/password` — requires a current full device
+`{current_password? | passkey?}` → `{password: false}`: the account signs
+in with its passkeys only (a password login then answers exactly like a
+wrong password), after the proof above. Refused without a passkey (`409
+last_credential`). Errors: `403 not_a_full_device | email_unverified |
+reauth_required | reauth_failed`, `409 last_credential`, `429 rate`.
+
+## Operator: `admin`
+
+The `/v1/admin/*` routes are the hub operator's own tools: invites, plans
+and overrides, relay tokens, the waitlist. No open client uses them, so they
+are documented with the hub, not here. `index.json` still lists their paths
+and auth (`admin`, a bearer token; `404 not_found` without a configured one),
+so every route the hub serves is in the index.
+
+The entitlement keys, as `/v1/me`'s `plan.entitlements` and `409 limit` name
+them:
+`storage.retention_days`, `storage.bytes`, `relay.max`, `devices.max`,
+`hosts.max` (`machines.max` is its old name), `transfer.included_bytes`, `transfer.overage`,
+`transfer.hard_cap_bytes`, `conn.bytes_per_sec`, `streams.records_per_sec`,
+`relay.beta`.
+
+## Served by a relay (`droppen-relay`)
+
+Open source, listed because devices, agents and the hub rely on them.
+Errors are `{error, message?}`; the 429 is `{error: "rate", retry_after_ms}`
+with `Retry-After`.
+
+| route | |
+|---|---|
+| `GET /healthz` | `200 ok` |
+| `GET /v1/ping` | `204`, `Access-Control-Allow-Origin: *`, `Timing-Allow-Origin: *`, `Cache-Control: no-store`: what clients time to choose a relay (four requests, the first dropped). 120/minute per address |
+| `GET /v1/relay-id?nonce=<64 hex>` | `{relay_id, sign_key, origin, sig}`: `sig` signs the relay's origin and the nonce (`rh_proto::ticket::sign_origin_proof`); the hub asks it at registration and when a relay moves. `400 bad_request` for a bad nonce. 120/minute per address |
+| `GET /v1/connect` | the WebSocket devices and agents sign in on ([websocket.md](websocket.md#v1connect-device-or-agent--relay)). 60/minute and 20 per 20 s per address |

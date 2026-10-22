@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<style>
+body{font-family:-apple-system,"PingFang SC",sans-serif;background:#fff;margin:0;padding:24px;color:#1f2328}
+section{margin:0 0 48px;padding:16px 20px;border:1px solid #d0d7de;border-radius:10px;width:1100px}
+h2{font-size:20px;margin:0 0 12px}
+p.note{color:#57606a;font-size:13px;margin:8px 0 0}
+</style>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({ startOnLoad: true, theme: "default", flowchart: { curve: "basis" }, sequence: { mirrorActors: false, wrap: true } });
+const only=new URLSearchParams(location.search).get("only");
+if(only){for(const s of document.querySelectorAll("section")) if(s.id!==only) s.remove();}
+await mermaid.run();
+document.body.dataset.ready = "1";
+</script></head><body>
+
+<section id="d1"><h2>① 整体架构：所有流量都经 hub 中转，hub 只转发密文</h2>
+<pre class="mermaid">
+flowchart LR
+  subgraph U["你的设备（持有密钥）"]
+    B["💻 浏览器<br/>设备钥 DK"]
+    P["📱 手机<br/>设备钥 DK"]
+  end
+  subgraph C["云端 hub（Rust）—— 没有任何解密密钥"]
+    H["中继 / 盲路由<br/>账号 · 计费 · 机器注册<br/>按 (设备, 机器, 通道号) 转发密文帧"]
+    PG[("Postgres<br/>账号、设备链、机器、流头<br/>布局/待办（UK 加密）")]
+    BK[("对象存储<br/>加密日志快照页、加密大文件")]
+    H --- PG
+    H --- BK
+  end
+  subgraph M["你的电脑（受控端 = 今天的 remote-hand server）"]
+    A["agent<br/>机器钥 MK"]
+    CLI["Claude / Codex 进程"]
+    T["终端 PTY"]
+    TR[("会话记录 transcript<br/>账号凭据（永不离机）")]
+    A --- CLI
+    A --- T
+    A --- TR
+  end
+  B == "WSS 出站 · 载荷 🔒 Noise 密文" ==> H
+  P == "WSS 出站 · 载荷 🔒 Noise 密文" ==> H
+  A == "WSS 出站（不开任何入站端口）· 载荷 🔒 Noise 密文 / 🔒 加密日志" ==> H
+</pre>
+<p class="note">浏览器、手机、电脑三方都只「往外」连 hub，彼此之间不直接连（NAT、公司网络、手机网络都能用）。端到端加密是在 hub 转发的帧<b>里面</b>再套一层 Noise：浏览器和 agent 两端加解密，hub 只看到不透明的密文帧、帧大小和时间。</p>
+</section>
+
+<section id="d2"><h2>② 注册账号、绑定第一台电脑</h2>
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor U as 你
+  participant B as 浏览器
+  participant H as 云端 hub
+  participant A as 电脑上的 agent
+  U->>B: 注册（邮箱 + 密码 / passkey）
+  B->>B: 本地生成 账户钥 AK、用户钥 UK、设备钥 DK
+  B->>H: 上传 设备公钥 + 签名的设备链第一条
+  Note over B,H: 可选：生成恢复密钥 RK（只给你看，云端只存被 RK 包裹的密文）
+  U->>B: 点「添加电脑」
+  B->>H: 申请一次性注册码
+  H-->>B: 一次性注册码（10 分钟有效，带 AK 指纹）
+  U->>A: 在电脑上运行 remote-hand-server agent enroll 注册码
+  A->>A: 生成机器身份钥，钉住 AK 指纹
+  A->>H: 出站连接，签名挑战
+  H-->>B: 有新电脑请求加入
+  B-->>U: 显示短码 482-913
+  A-->>U: 终端里也显示短码 482-913
+  U->>B: 确认两边一致
+  B->>B: 生成机器钥 MK，签「加入机器」条目
+  B->>H: 投递 MK（已加密给 agent 公钥）
+  H->>A: 转发（hub 解不开）
+  A->>A: 解出 MK，开始同步
+</pre>
+</section>
+
+<section id="d3"><h2>③ 打开会话、发消息、用终端（电脑在线，每一帧都经 hub 中转）</h2>
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant B as 浏览器
+  participant H as 云端 hub（中继）
+  participant A as agent（你的电脑）
+  participant C as Claude 进程
+  Note over B,A: 三方事先都已「出站」连上 hub，彼此不直连
+  B->>H: OPEN ch=7（目标：这台电脑）
+  H->>A: OPEN ch=7（转发）
+  B->>H: 🔒 Noise 握手 + 首个请求
+  H->>A: 🔒 原样转发
+  A->>H: 🔒 握手应答 + 会话快照/增量
+  H->>B: 🔒 原样转发
+  B->>H: 🔒 发消息（clientMessageId 幂等）
+  H->>A: 🔒 原样转发
+  A->>C: 写入 stdin
+  C-->>A: 每写完一段就输出
+  A->>H: 🔒 草稿帧 / 正式内容 / 回执
+  H->>B: 🔒 原样转发
+  A->>H: 🔒 追加加密日志（CAS：expect_seq）
+  H-->>A: ACK（写库成功后才回）
+  B->>H: 🔒 终端按键（最高优先级子流）
+  H->>A: 🔒 原样转发
+  A->>H: 🔒 终端输出（16 ms 合帧）
+  H->>B: 🔒 原样转发
+  Note over H: hub 只看到：ch 号、哪台设备连哪台电脑、帧大小与时间
+</pre>
+</section>
+
+<section id="d4"><h2>④ 电脑离线时看历史 / 新手机扫码加入</h2>
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant P as 新手机
+  participant B as 已登录的浏览器
+  participant H as 云端 hub
+  participant S as 对象存储
+  P->>P: 生成设备钥，显示二维码（公钥 + 一次性秘密 s）
+  B->>P: 扫码（光学通道，hub 冒充不了）
+  B->>B: 签「加入设备链」，把 AK / UK 加密给手机公钥（用 s 做 MAC）
+  B->>H: 投递到手机信箱
+  H->>P: 转发
+  P->>P: 解出 UK → 解出各电脑的 MK
+  Note over P,S: 此时电脑已合盖离线
+  P->>H: 订阅会话列表流、会话流
+  H->>S: 取快照页 manifest
+  S-->>P: 加密快照页 + 尾部记录
+  P->>P: 本地解密、校验哈希链和机器签名，显示历史（标出年龄）
+  P-->>P: 发消息 / 终端 → 提示「电脑离线」
+</pre>
+</section>
+</body></html>

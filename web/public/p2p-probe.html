@@ -1,0 +1,262 @@
+<!doctype html>
+<!--
+  直连探测页：浏览器 ↔ 电脑能否直连（WebRTC / ICE 打洞，不用 TURN），比 hub 中转快多少。
+  只是测量工具，不是产品功能：不登录、不碰任何会话数据。配合电脑上运行的
+  `rh-p2p-probe`（server-rs/crates/rh-devkit）使用，它会打印本页的链接（# 后是房间号）。
+  脚本在 p2p-probe.js（hub 的 CSP 只允许同源脚本，不允许内联脚本）。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex" />
+    <title>直连探测 · Droppen</title>
+    <link rel="icon" href="/favicon.png" type="image/png" sizes="32x32" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <style>
+      :root {
+        --ink: #111;
+        --faint: #6b6b6b;
+        --rule: #111;
+        --soft: #d6d6d6;
+        color-scheme: light;
+      }
+      * {
+        box-sizing: border-box;
+        border-radius: 0;
+      }
+      html,
+      body {
+        margin: 0;
+        background: #fff;
+        color: var(--ink);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "PingFang SC", "Noto Sans CJK SC",
+          "Microsoft YaHei", sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+        -webkit-text-size-adjust: 100%;
+      }
+      main {
+        max-width: 640px;
+        margin: 0 auto;
+        padding: 20px 16px 48px;
+      }
+      h1 .title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      h1 {
+        font-size: 18px;
+        font-weight: 600;
+        margin: 0;
+        padding-bottom: 8px;
+        border-bottom: 1px solid var(--rule);
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+      }
+      h1 small {
+        font-size: 11px;
+        font-weight: 400;
+        color: var(--faint);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      p.note {
+        color: var(--faint);
+        font-size: 12px;
+        margin: 8px 0 16px;
+      }
+      fieldset {
+        border: 1px solid var(--rule);
+        margin: 0 0 12px;
+        padding: 8px 10px 10px;
+      }
+      legend {
+        padding: 0 4px;
+        font-size: 12px;
+        color: var(--faint);
+      }
+      .labels {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .labels label {
+        border: 1px solid var(--rule);
+        padding: 6px 10px;
+        cursor: pointer;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      .labels input {
+        position: absolute;
+        opacity: 0;
+        pointer-events: none;
+      }
+      .labels label:has(input:checked),
+      .labels label.on {
+        background: var(--ink);
+        color: #fff;
+      }
+      button {
+        font: inherit;
+        color: #fff;
+        background: var(--ink);
+        border: 1px solid var(--ink);
+        padding: 8px 18px;
+        cursor: pointer;
+        -webkit-appearance: none;
+        appearance: none;
+      }
+      button:disabled {
+        background: #fff;
+        color: var(--faint);
+        border-color: var(--soft);
+        cursor: default;
+      }
+      button.ghost {
+        background: #fff;
+        color: var(--ink);
+      }
+      .actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 16px;
+      }
+      #status {
+        color: var(--faint);
+        font-size: 12px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-bottom: 16px;
+        font-variant-numeric: tabular-nums;
+      }
+      caption {
+        text-align: left;
+        font-size: 12px;
+        color: var(--faint);
+        padding-bottom: 4px;
+      }
+      th,
+      td {
+        border-top: 1px solid var(--soft);
+        padding: 5px 0;
+        vertical-align: top;
+        text-align: left;
+      }
+      tr:first-child th,
+      tr:first-child td {
+        border-top: 1px solid var(--rule);
+      }
+      tr:last-child th,
+      tr:last-child td {
+        border-bottom: 1px solid var(--rule);
+      }
+      th {
+        font-weight: 400;
+        color: var(--faint);
+        width: 34%;
+        padding-right: 8px;
+      }
+      td {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12.5px;
+        word-break: break-word;
+      }
+      table.pings th,
+      table.pings td {
+        width: auto;
+        text-align: right;
+        padding-right: 0;
+      }
+      table.pings th:first-child,
+      table.pings td:first-child {
+        text-align: left;
+        font-family: inherit;
+      }
+      .summary {
+        border: 1px solid var(--rule);
+        padding: 10px 12px;
+        font-size: 13px;
+        min-height: 44px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .summary.empty {
+        color: var(--faint);
+        border-style: dashed;
+      }
+      .ok {
+        font-weight: 600;
+      }
+      .bad {
+        font-weight: 600;
+        text-decoration: underline;
+        text-decoration-thickness: 1px;
+        text-underline-offset: 3px;
+      }
+      footer {
+        margin-top: 24px;
+        padding-top: 8px;
+        border-top: 1px solid var(--soft);
+        font-size: 11px;
+        color: var(--faint);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>
+        <!-- The Droppen mark (web/src/components/brand-mark.tsx): a solid drop that is also a D. -->
+        <span class="title"
+          ><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 2H12A10 10 0 1 1 2 12Z" fill="currentColor" /></svg
+          >直连探测</span
+        >
+        <small id="room-tag">P2P probe</small>
+      </h1>
+      <p class="note">
+        测这台设备能不能直接连到你的电脑（WebRTC 打洞，不经 hub），以及比 hub 中转快多少。只是测量工具：不登录，不碰任何会话。
+      </p>
+
+      <fieldset>
+        <legend>现在用的网络</legend>
+        <div class="labels" id="labels"></div>
+      </fieldset>
+
+      <div class="actions">
+        <button id="start" disabled>开始测试</button>
+        <button id="again" class="ghost" hidden>再测一次</button>
+        <span id="status">先选网络</span>
+      </div>
+
+      <table id="conn">
+        <caption>连接</caption>
+        <tr><th>hub 房间</th><td id="v-room">—</td></tr>
+        <tr><th>电脑上的探针</th><td id="v-probe">—</td></tr>
+        <tr><th>直连</th><td id="v-direct">—</td></tr>
+        <tr><th>选中的候选对</th><td id="v-pair">—</td></tr>
+        <tr><th>本机候选</th><td id="v-cands">—</td></tr>
+        <tr><th>NAT 提示</th><td id="v-nat">—</td></tr>
+      </table>
+
+      <table class="pings">
+        <caption>往返时延（ms，每条路径 200 次，交替进行）</caption>
+        <tr><th>路径</th><th>完成</th><th>p50</th><th>p95</th><th>最大</th><th>丢失</th></tr>
+        <tr><td>直连</td><td id="dc-n">—</td><td id="dc-p50">—</td><td id="dc-p95">—</td><td id="dc-max">—</td><td id="dc-lost">—</td></tr>
+        <tr><td>经 hub</td><td id="hub-n">—</td><td id="hub-p50">—</td><td id="hub-p95">—</td><td id="hub-max">—</td><td id="hub-lost">—</td></tr>
+      </table>
+
+      <div class="summary empty" id="summary">测完后这里会出现一行结论，可以直接截图。</div>
+
+      <footer>
+        结果会发回电脑上的探针，写进 ~/.local/share/rh-p2p-probe/results.jsonl。STUN：Cloudflare、Google；不用 TURN。
+        hub 只转发信令（SDP 和候选地址里含双方 IP）和 ping，不保存。
+      </footer>
+    </main>
+    <script src="/p2p-probe.js"></script>
+  </body>
+</html>

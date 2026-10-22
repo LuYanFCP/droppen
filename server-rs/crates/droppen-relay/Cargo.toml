@@ -1,0 +1,36 @@
+[package]
+name = "droppen-relay"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+description = "droppen-relay, Droppen's relay server: the command line and process around the rh-relay library"
+
+# Its own package rather than a `[[bin]]` of rh-relay because a package has one
+# licence: this binary is AGPL-3.0-only, while the library it runs, which the
+# Hub links too, is permissively licensed. Everything the relay does lives in
+# rh-relay; this crate reads the command line, sets up logging and starts it.
+[[bin]]
+name = "droppen-relay"
+path = "src/main.rs"
+
+[dependencies]
+rh-relay = { path = "../rh-relay" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# `keygen` and `rotate-key` make a new relay key.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+
+[dev-dependencies]
+# `tests/relay.rs` drives `droppen-relay` as a child process and the library
+# in-process against a fake Hub; the outage test and the fake Hub need tokio's
+# process and io helpers. `tests/env_names.rs` runs the binary only.
+rh-proto = { path = "../rh-proto" }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["sync", "time", "process", "io-util", "test-util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
+serde_json = "1"

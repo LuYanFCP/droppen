@@ -1,0 +1,358 @@
+@import "tailwindcss";
+
+/* Pane width, not viewport width: three desktop panes need the same compact
+   preview navigation as a phone. No second file-browser implementation. */
+.files-browser { container-type: inline-size; }
+.files-list { container-type: inline-size; }
+.files-modified { display: none; }
+@container (min-width: 560px) { .files-modified { display: inline; } }
+@container (min-width: 760px) {
+  .has-preview > .files-list { flex: 0 0 38%; border-right: 1px solid var(--color-border); }
+}
+@container (max-width: 759px) { .has-preview > .files-list { display: none; } }
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* "Drafting sheet" (docs/ui-spec.md, design/DESIGN.md): one ink on white
+   paper, 1px hairlines, and colour kept for state signals only. Token names are
+   unchanged — tests and ~1500 class names use them — only their values moved.
+   `panel` equals `bg` (regions are separated by lines, not tinted panels) and
+   `accent` equals `fg` (there is no blue: focus and primary actions are ink). */
+@theme {
+  --color-bg: #ffffff;
+  --color-panel: #ffffff;
+  --color-raised: #f6f6f6;
+  --color-hover: #f0f0f0;
+  --color-border: #e5e5e5;
+  --color-border-strong: #a3a3a3;
+  --color-fg: #0a0a0a;
+  --color-muted: #666666;
+  --color-faint: #8f8f8f;
+  --color-mark: #0a0a0a;
+  --color-accent: #0a0a0a;
+  --color-ok: #128a3c;
+  /* "Asking you": the one coloured fill. Ink text on it in both themes. */
+  --color-warn: #f2a20c;
+  --color-warn-fg: #8f5600;
+  --color-danger: #d42a1f;
+  /* Text on a signal fill (the amber "asking you" chip): ink in both themes. */
+  --color-on-signal: #0a0a0a;
+  /* Unread is ink — a solid square, the second loudest thing after asking —
+     so a count never reads as working (ok) or asking (warn). */
+  --color-unread: #0a0a0a;
+  /* Sources are told apart by their words, not by a tint. */
+  --color-claude: #666666;
+  --color-codex: #666666;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --tracking-label: 0.12em;
+
+  /* Square corners and no elevation, at the scale itself: every `rounded*` and
+     `shadow-*` utility resolves to nothing. Floating layers are separated by a
+     `border-strong` line instead. `rounded-full` is left for status dots. */
+  --radius: 0;
+  --radius-xs: 0;
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+  --radius-2xl: 0;
+  --radius-3xl: 0;
+  --radius-4xl: 0;
+  --shadow-2xs: 0 0 #0000;
+  --shadow-xs: 0 0 #0000;
+  --shadow-sm: 0 0 #0000;
+  --shadow-md: 0 0 #0000;
+  --shadow-lg: 0 0 #0000;
+  --shadow-xl: 0 0 #0000;
+  --shadow-2xl: 0 0 #0000;
+}
+
+:root {
+  color-scheme: light;
+}
+
+.dark {
+  color-scheme: dark;
+
+  --color-bg: #0a0a0a;
+  --color-panel: #0a0a0a;
+  --color-raised: #131313;
+  --color-hover: #1a1a1a;
+  --color-border: #262626;
+  --color-border-strong: #5e5e5e;
+  --color-fg: #f5f5f5;
+  --color-muted: #a3a3a3;
+  --color-faint: #6f6f6f;
+  --color-mark: #f5f5f5;
+  --color-accent: #f5f5f5;
+  --color-ok: #3fd170;
+  --color-warn: #f5b031;
+  --color-warn-fg: #f5b031;
+  --color-danger: #ff5c50;
+  --color-unread: #f5f5f5;
+  --color-claude: #a3a3a3;
+  --color-codex: #a3a3a3;
+}
+
+/* Keyboard focus is ink, never blue, and always visible: a 2px outline from
+   the base layer, so a component that draws its own focus (the composer box,
+   a field's border) can still opt out with an `outline-*` utility. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--color-fg);
+    outline-offset: 1px;
+  }
+}
+
+/* lucide draws at stroke 2 by default; the drafting sheet uses 1.5. Only the
+   default is overridden, so an icon given its own strokeWidth keeps it. */
+svg.lucide[stroke-width="2"] {
+  stroke-width: 1.5;
+}
+
+/* Registration marks on a framed document page (components/sheet.tsx): only
+   once the column is narrower than its container, so there is a seam to mark.
+   Unlayered on purpose — it overrides RegMark's own `md:block`. */
+.sheet-mark {
+  display: none;
+}
+@media (min-width: 768px) {
+  @container sheet (min-width: 1002px) {
+    .sheet-mark-1000 {
+      display: block;
+    }
+  }
+  @container sheet (min-width: 1762px) {
+    .sheet-mark-1760 {
+      display: block;
+    }
+  }
+}
+
+/* The first-run guide's frame (features/setup/frame.tsx): the marks where the
+   top bar's line meets the frame's sides only while the 1120px column is
+   narrower than the window, and the rail's only while the rail is a column
+   (not under 960px). Unlayered, like .sheet-mark, over RegMark's `md:block`. */
+.guide-mark-side,
+.guide-mark-rail {
+  display: none;
+}
+@media (min-width: 1122px) {
+  .guide-mark-side {
+    display: block;
+  }
+}
+@media (min-width: 961px) {
+  .guide-mark-rail {
+    display: block;
+  }
+}
+
+/* Small uppercase machine labels: section titles, table heads, message roles. */
+@utility label-caps {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* App-shell scrolling: every view owns its own scroll container, so the
+   document must never scroll. overscroll-behavior only stops scroll chaining —
+   WebKit (macOS/iOS) still rubber-bands the root scroller even when there is
+   nothing to scroll, and ignores the property on the root. Pinning body to the
+   viewport takes it out of flow so there is no root scroller left to bounce. */
+html,
+body {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+body {
+  @apply bg-bg text-fg antialiased;
+  position: fixed;
+  inset: 0;
+  font-size: 13px;
+  /* viewport-fit=cover paints under the notch; in landscape that would put the
+     nav rail beneath it. The body background is the same colour either way, so
+     insetting the whole shell costs nothing and keeps content clear. */
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+/* The soft keyboard on iOS: WebKit draws it over a layout viewport it never
+   shrinks, so `inset: 0` would leave the bottom of the shell — the composer —
+   under it. By default WebKit's own pan to the focused field brings the
+   composer above it (lib/kb-native.ts). Under ?kb=legacy, while it is up,
+   lib/kb-inset.ts pins the shell to the visual viewport instead (the part of
+   the page above the keyboard), and only then is the class set. Android shrinks
+   the layout viewport itself (interactive-widget=resizes-content) and desktop
+   has no keyboard to cover anything: neither ever gets the class. */
+html.kb-open body {
+  top: var(--app-top, 0px);
+  bottom: auto;
+  height: var(--app-height, 100%);
+}
+
+/* The bottom-most chrome (mobile nav bar, session composer) pads itself out of
+   the home-indicator strip that viewport-fit=cover let it slide under. While
+   the soft keyboard is up that strip is covered by the keyboard, so the padding
+   is dead space — under ?kb=legacy, lib/kb-inset.ts sets html.kb-open and it
+   collapses. By default it stays: WebKit's pan ends at the shell's foot, so the
+   strip sits between the composer and the keyboard. */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+html.kb-open .pb-safe {
+  padding-bottom: 0;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+
+/* A scroll box with no scrollbar at all (the 44px nav rail on a short
+   window). Unlayered like the rule above, which a utility class cannot beat. */
+.scrollbar-hidden {
+  scrollbar-width: none;
+}
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+}
+
+/* Keep overscroll inside the pane being scrolled — but only on the panes.
+   This used to sit on `*`, and that broke the wheel: `truncate` (overflow:
+   hidden) and one-axis boxes are scroll containers too, so any hovered tool
+   row became the wheel's target, could not take a vertical delta, and
+   `contain` then forbade handing it to the transcript behind it. The page sat
+   still under the cursor. Tailwind emits these class names literally, so the
+   selectors reach exactly the elements that opted into scrolling. */
+.overflow-auto,
+.overflow-y-auto {
+  overscroll-behavior: contain;
+}
+
+/* Horizontal-only scrollers (wide code blocks): pin the x axis so a trackpad
+   swipe past the edge does not become the browser's back gesture, and leave y
+   alone so the wheel keeps scrolling the pane behind them. */
+.overflow-x-auto {
+  overscroll-behavior-x: contain;
+}
+
+/* Exactly one thing may move the transcript under the reader, and it is the
+   prepend anchor in `session-detail.tsx`.
+
+   The browser's own scroll anchoring is the other candidate, and it is not
+   additive with ours: loading earlier history grows the content above the
+   viewport, the browser silently raises `scrollTop` by that much to hold the
+   reader's place, and the anchor in the layout effect — which measured the
+   height *before* the page arrived — then adds the same delta a second time.
+   The view lands a whole page below where the reader was. Turning it off on
+   this scroller alone leaves the rest of the app (settings, files, the diff
+   view) with the browser's behaviour, which is right for them.
+
+   `overflow-anchor: none` on the children as well as the box: the selection
+   algorithm walks down from the scroller and skips a subtree the moment it
+   sees the opt-out, so the marker has to be on what it walks into.
+
+   No `content-visibility: auto` here, deliberately — it shipped in 0.2.13 and
+   was taken out again. Skipping layout for off-screen rows means guessing their
+   height, and `contain-intrinsic-size` guesses 64px for a row that has never
+   been on screen — a markdown answer or a tool output is many times that. Every
+   upward scroll then laid out a band of rows above the viewport, each one
+   growing from the guess to its real height, and the content under the reader's
+   eyes jumped by the difference; on a phone, where the rows are taller and the
+   fling runs on the compositor, it jumped by more and more often. The window
+   the server sends is 200 items (`SESSION_PAGE_SIZE`) and a pane left open on a
+   live session trims itself back to 800 (`LIVE_WINDOW_CAP`, which exists
+   because none of this is virtualized), the rows are memoized, and off-screen
+   content is not painted anyway — so what it bought was a fraction of one
+   initial layout, and what it cost was the scroll. */
+.transcript-scroll,
+.transcript-scroll > * {
+  overflow-anchor: none;
+}
+
+/* Selected text is inverted ink, as on paper proofs. */
+::selection {
+  background: var(--color-fg);
+  color: var(--color-bg);
+}
+
+/* In-session search (`session-search-view.tsx`). The hits are painted with
+   the CSS Custom Highlight API rather than wrapped in <mark>: the text nodes
+   belong to React and the Markdown renderer, and splitting them from outside
+   breaks the next render of any row that changes. The active match is drawn
+   over the others, and its row wears a bar in the gutter. */
+::highlight(rh-search-hit) {
+  background-color: color-mix(in srgb, var(--color-warn) 28%, transparent);
+}
+::highlight(rh-search-active) {
+  background-color: color-mix(in srgb, var(--color-warn) 80%, transparent);
+  color: var(--color-bg);
+}
+[data-search-active] {
+  box-shadow: inset 2px 0 0 var(--color-warn);
+}
+@keyframes rh-search-flash {
+  0%,
+  35% {
+    background-color: color-mix(in srgb, var(--color-warn) 20%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+.rh-search-flash {
+  animation: rh-search-flash 1.4s ease-out;
+}
+
+/* Touch chrome. The grey flash mobile WebKit/Blink paint over every tapped
+   element is the loudest "this is a web page" tell; it is inherited, so one
+   declaration on the root covers the app. */
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* `manipulation` drops the double-tap-zoom wait on things that are tapped to
+   act, which is the ~300ms lag between a tap and its effect. Only on controls:
+   double-tap-zoom stays available over content. */
+button,
+[role="button"],
+a {
+  touch-action: manipulation;
+}
+
+/* A long press on chrome must not raise iOS's callout sheet or start a text
+   selection — both read as "the user grabbed a web page". Scoped to controls
+   and the nav on purpose: transcripts, messages, code and inputs are content
+   and MUST stay selectable, so this may never be widened to a container. */
+button,
+[role="button"],
+nav a {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* iOS Safari auto-zooms when a focused field's font is < 16px. Force 16px on
+   phones so typing never triggers a zoom (visual only — pinch-zoom still works).
+   !important beats Tailwind's text-* utilities on the same element. */
+@media (max-width: 767px) {
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}

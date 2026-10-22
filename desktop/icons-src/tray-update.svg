@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="1 1 30 30">
+  <!-- tray.svg with a dot at the top right: an update is ready (src/updater.rs).
+       The mark is cut back around the dot so the two read apart in the
+       template image the system tints. -->
+  <mask id="gap">
+    <rect x="0" y="0" width="32" height="32" fill="#ffffff"/>
+    <circle cx="26.5" cy="5.5" r="6" fill="#000000"/>
+  </mask>
+  <path d="M3 3H16A13 13 0 1 1 3 16Z" fill="#000000" mask="url(#gap)"/>
+  <circle cx="26.5" cy="5.5" r="3.5" fill="#000000"/>
+</svg>

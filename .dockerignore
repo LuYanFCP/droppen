@@ -1,0 +1,10 @@
+# The Rust workspace and the web app's sources; never build output.
+**/target
+**/node_modules
+web/dist
+docs
+prototypes
+experiments
+examples
+openapi
+.git

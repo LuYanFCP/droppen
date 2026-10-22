@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# agent worktrees
+.claude/worktrees/
+
+# local build artifacts
+*.dmg

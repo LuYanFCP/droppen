@@ -1,0 +1,226 @@
+name: release
+
+on:
+  push:
+    # Tag caches cannot be read by later tags. Build on the default branch
+    # as well so every release can restore its compiled dependencies from main.
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - server-rs/**
+      - web/**
+      - packages/**
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - distribution.json
+      - .nvmrc
+      - scripts/web-manifest.mjs
+      - .github/workflows/release.yml
+      - .github/scripts/**
+  workflow_dispatch:
+
+# Nothing by default: each job asks for what it needs.
+permissions: {}
+
+jobs:
+  # The public web build — what droppen.app serves — as `web-manifest.json`:
+  # every file's sha256, the digest the hub reports at
+  # `/.well-known/droppen-build`, and what it was built from
+  # (docs/web-integrity.md). This job runs dependency code (install, vite), so
+  # it gets no signing rights: it only hands the manifest on as an artifact.
+  web:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      # The same install and build as the hub's Docker stage; CI's
+      # `web-reproducible` job keeps the two byte-identical.
+      - run: pnpm install --frozen-lockfile --filter "@remote-hand/web..."
+      - name: Build the public distribution and its manifest
+        run: |
+          unset DROPPEN_DISTRIBUTION
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"; export SOURCE_DATE_EPOCH
+          pnpm --filter @remote-hand/web build
+          mkdir -p dist
+          node scripts/web-manifest.mjs web/dist --commit "$GITHUB_SHA" --ref "$GITHUB_REF" --out dist/web-manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-manifest
+          path: dist/web-manifest.json
+
+  # Signing, apart from building. This job checks nothing out and installs
+  # nothing: it downloads the manifest, attests it with GitHub's own action and
+  # attaches both to the release with the runner's `gh`. So no build-time
+  # dependency ever holds the OIDC token that could sign provenance. It also
+  # creates the release, before `macos` adds its tarballs (no race).
+  web-release:
+    needs: web
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Signing the attestation (Sigstore, through GitHub's OIDC token).
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-manifest
+          path: dist
+      # Attestations need a public repository (or Enterprise Cloud); until the
+      # repository is public the manifest ships unattested.
+      - id: attest
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/web-manifest.json
+      # The bundle lets anyone verify without a GitHub login:
+      # `gh attestation verify web-manifest.json --bundle web-manifest.sigstore.json --repo …`.
+      - if: steps.attest.outcome == 'success'
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: cp "$BUNDLE" dist/web-manifest.sigstore.json
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" > /dev/null 2>&1 || gh release create "$TAG" --verify-tag --generate-notes
+          files=(dist/web-manifest.json)
+          if [ -f dist/web-manifest.sigstore.json ]; then files+=(dist/web-manifest.sigstore.json); fi
+          gh release upload "$TAG" "${files[@]}" --clobber
+
+  macos:
+    # After `web` (the manifest to check the embedded web app against) and, on
+    # a tag, after `web-release` (which creates the release). `web-release` is
+    # skipped on main pushes; this job still runs then.
+    needs: [web, web-release]
+    if: ${{ !cancelled() && needs.web.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.web-release.result) }}
+    permissions:
+      # The release step creates/updates a GitHub Release and uploads assets to it.
+      contents: write
+    # `macos-latest` is arm64, which is the only macOS architecture we ship.
+    # Keeping the release native avoids spending most of the job cross-compiling
+    # an Intel slice that has no deployment target.
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # The tag names the artifacts; the short sha names the *binary*, via
+      # `RH_BUILD_REV`. They are not the same thing and both matter: a release
+      # rebuilt from the same tag must still be distinguishable to self-update,
+      # which compares `0.1.0+g<commit>` strings.
+      - id: meta
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="$(git rev-parse --short HEAD)"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "rev=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # The SPA is embedded into the binary at compile time, so it has to exist
+      # before cargo runs: `server-rs/build.rs` fails the build outright when
+      # `web/dist` is missing rather than quietly shipping a placeholder page.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" pnpm --filter @remote-hand/web build
+      # The binary embeds the same bytes the release's manifest lists: the
+      # public build is reproducible across Linux and macOS too.
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-manifest
+          path: web-manifest
+      - run: node scripts/web-manifest.mjs web/dist --check web-manifest/web-manifest.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server-rs -> target
+          # Keep this job/key/target identical for main and tags. Never include
+          # the tag or revision in the key: rust-cache already keys by compiler,
+          # platform, Cargo manifests and lockfile, with dependency fallbacks.
+          cache-on-failure: true
+          # Tags consume main's cache instead of filling storage with isolated
+          # copies that no subsequent release can use.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build macOS aarch64
+        env:
+          # `.git` is right here, but pass the revision explicitly anyway: the
+          # build script's git fallback would mark a shallow or detached
+          # checkout however it finds it, and the release should say exactly
+          # which commit it came from.
+          RH_BUILD_REV: ${{ steps.meta.outputs.rev }}
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin --manifest-path server-rs/Cargo.toml
+
+      # Before packaging, not after: an artifact that cannot boot is worse than
+      # a failed build, because self-update will happily install it.
+      - name: Smoke-test the native binary
+        run: ./.github/scripts/smoke-macos.sh server-rs/target/aarch64-apple-darwin/release/remote-hand-server
+
+      - name: Package
+        # Main builds only warm the cache and smoke-test; they do not publish.
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        # Explicit, because the packaging step uses a bash array.
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/aarch64
+
+          # `server-rs` is its own workspace, so its target dir is under it —
+          # not at the repository root.
+          cp server-rs/target/aarch64-apple-darwin/release/remote-hand-server dist/aarch64/
+          chmod +x dist/aarch64/remote-hand-server
+          sed -e "s/@ARCH@/aarch64/" \
+            -e 's/@CONTENTS@/`remote-hand-server` in this archive is the same program as `droppen`./' \
+            .github/scripts/INSTALL.txt.in > dist/aarch64/INSTALL.txt
+          members=(remote-hand-server INSTALL.txt)
+          if [ -f LICENSE ]; then cp LICENSE dist/aarch64/; members+=(LICENSE); fi
+          # Members listed by name rather than `.`, so the archive holds
+          # `remote-hand-server` and not `./remote-hand-server` — the README
+          # tells people to extract that one member by name, and a `./`
+          # prefix would make the pattern miss.
+          # COPYFILE_DISABLE keeps bsdtar from smuggling `._*` AppleDouble
+          # companions for the binary's extended attributes into the archive.
+          COPYFILE_DISABLE=1 tar -czf "dist/remote-hand-${VERSION}-macos-aarch64.tar.gz" \
+            -C dist/aarch64 "${members[@]}"
+
+          cd dist && shasum -a 256 ./*.tar.gz > SHA256SUMS && cat SHA256SUMS
+
+      # A dispatch run has no tag to release against, so it just leaves the
+      # tarballs on the workflow run — useful for testing this pipeline itself.
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/')
+        with:
+          name: remote-hand-macos-${{ steps.meta.outputs.version }}
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS

@@ -1,0 +1,19 @@
+[package]
+name = "droppen-plugin-sdk"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Droppen's plugin contract on the Rust side: the manifest, plugin ids, engine ranges and the document-store wire format"
+# Not published yet; the name is reserved for when the core is open-sourced.
+publish = false
+
+# Deliberately tiny. This crate is the open contract between Droppen and its
+# plugins, so it may not depend on the host (gotcha, axum, tokio) or on anything
+# that belongs to the hosted service (rh-hub, rh-proto). CI checks the
+# dependency tree: see `scripts/check-sdk-crate-deps.sh`.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+semver = { version = "1", features = ["serde"] }
+
+[dev-dependencies]

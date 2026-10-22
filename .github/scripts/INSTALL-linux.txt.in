@@ -1,0 +1,60 @@
+Droppen server — Linux (@ARCH@, glibc 2.28 or newer)
+====================================================
+
+This is the Droppen server, for a Linux device you use from elsewhere: a
+server, a VM, a desktop that stays on. The one-line installer does everything
+below, runs it as a systemd user service, and adds the device to your Droppen
+account with a one-time code (on droppen.app: my devices → add a device that
+runs AI → show a one-time code):
+
+    curl -fsSL https://droppen.app/install.sh | DROPPEN_CODE=<code> sh
+
+Droppen was called remote-hand. The server is now `droppen`; the binary its
+supervisor runs, `<data>/bin/remote-hand-server`, and its data directory keep
+the old name, so an existing install carries on unchanged.
+
+Droppen is licensed under AGPL-3.0-only (see LICENSE); THIRD_PARTY_NOTICES lists
+the third-party software in the server and its licences.
+Copyright (C) 2026 Kilerd
+
+By hand, as the user Droppen should run as (not root: it runs AI agents and
+shells as that user).
+@CONTENTS@
+Install it as `remote-hand-server` — the supervisor looks for exactly
+`<data>/bin/remote-hand-server` — with `droppen` beside it, the command you
+type:
+
+    mkdir -p ~/.local/share/remote-hand/bin
+    mv remote-hand-server ~/.local/share/remote-hand/bin/
+    chmod +x ~/.local/share/remote-hand/bin/remote-hand-server
+    ln -sf remote-hand-server ~/.local/share/remote-hand/bin/droppen
+
+Create the local login before the first start. Until it has an account the
+server shows every browser a setup page: on this device
+`~/.local/share/remote-hand/bin/droppen open` opens it signed in, and elsewhere
+the first account takes the one-time code the server keeps
+(`droppen setup-code`). Enrolling below needs an account anyway:
+
+    ~/.local/share/remote-hand/bin/droppen user add "$(id -un)" --instance default
+
+Add the device to your account. The code goes on standard input, never on the
+command line, which other users of this device can read; typed at the prompt
+it is not echoed. Keep the droppen.app page that showed the code open while
+this waits: it adds the device by itself.
+
+    ~/.local/share/remote-hand/bin/droppen agent enroll - --hub wss://droppen.app --instance default
+
+It exits 0 once the device is added. 76 means the hub took the code but the
+page has not added the device yet: the server finishes joining once it does.
+
+Run it under its supervisor, which is what makes self-update and
+restart-survival work:
+
+    APP_INSTANCE=default ~/.local/share/remote-hand/bin/remote-hand-server up -- serve
+
+It listens on 127.0.0.1:8700 only (APP_SERVER__PORT changes the port). Use it
+from droppen.app, or through an SSH tunnel to that port. Under systemd, set
+KillMode=process: terminals and agent runs outlive a server restart.
+
+Everything else, including how to uninstall:
+https://github.com/getdroppen/releases#readme

@@ -1,0 +1,48 @@
+[package]
+name = "rh-proto"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "remote-hand's cloud wire protocol: hub frames, the Noise end-to-end channel, the device chain and encrypted log records"
+
+[dependencies]
+# Noise. `default-features = false` because snow's `std` feature switches on its
+# `ring` and BLAKE2 back ends, neither of which this suite uses. ChaChaPoly is
+# listed only because snow 0.10's AES-GCM resolver imports `KeyInit` from the
+# ChaCha module and does not compile without it.
+snow = { version = "0.10", default-features = false, features = ["use-aes-gcm", "use-chacha20poly1305", "use-sha2", "use-curve25519", "use-getrandom"] }
+# The same RustCrypto crates the server already links for Web Push and sessions.
+aes-gcm = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = "1"
+# Per-record raw deflate, which a browser inflates natively with
+# `DecompressionStream("deflate-raw")`. The backend the server already uses.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+thiserror = "1"
+# Elligator 2 for the pairing PAKE (CPace over X25519): field arithmetic
+# modulo 2^255 - 19, on public, password-derived values only.
+num-bigint = "0.4"
+# Only for `driver` (feature `runtime`): the async glue both the agent and a
+# headless device use to run a channel. The protocol itself stays sans-IO.
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"], optional = true }
+# Only for `rtc` and `direct` (feature `rtc`): the direct path's WebRTC peer —
+# sans-IO ICE, DTLS and SCTP on pure-Rust crypto, driven over tokio's UDP.
+str0m = { version = "0.24", default-features = false, features = ["rust-crypto"], optional = true }
+tracing = { version = "0.1", optional = true }
+
+[features]
+runtime = ["dep:tokio", "dep:tracing"]
+rtc = ["runtime", "dep:str0m", "dep:tracing", "tokio/net"]
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "rt", "macros", "rt-multi-thread", "time"] }
+# The canonical encodings of the eight small-order Edwards points, exported to
+# the TypeScript half so both sides refuse the same weak keys.
+curve25519-dalek = "4"

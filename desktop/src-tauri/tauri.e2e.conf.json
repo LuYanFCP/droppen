@@ -1,0 +1,9 @@
+{
+  "identifier": "app.droppen.desktop.e2e",
+  "productName": "Droppen E2E",
+  "plugins": {
+    "updater": {
+      "dangerousInsecureTransportProtocol": true
+    }
+  }
+}

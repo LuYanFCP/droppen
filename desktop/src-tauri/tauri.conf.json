@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Droppen",
+  "mainBinaryName": "Droppen",
+  "identifier": "app.droppen.desktop",
+  "build": {
+    "frontendDist": "../splash"
+  },
+  "app": {
+    "windows": [],
+    "withGlobalTauri": false,
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "category": "DeveloperTool",
+    "shortDescription": "Run AI on this device and use it from anywhere",
+    "longDescription": "Droppen runs Claude Code and Codex sessions on this device and is where you use them.",
+    "copyright": "Copyright (C) 2026 Kilerd",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.png"],
+    "externalBin": ["binaries/remote-hand-server"],
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "dmg": {
+        "windowSize": { "width": 540, "height": 380 },
+        "appPosition": { "x": 140, "y": 180 },
+        "applicationFolderPosition": { "x": 400, "y": 180 }
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFDQjc5MDcwOTg4NjA0QkYKUldTL0JJYVljSkMzSE01T3NEMnB1bkVDMzBTSHhpc1pBdFRxOXZoNmtPWjhscUdDaWJJQjk1OXYK",
+      "endpoints": ["https://github.com/getdroppen/releases/releases/latest/download/latest.json"],
+      "requireSignedVersion": true
+    }
+  }
+}
