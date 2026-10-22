@@ -376,22 +376,45 @@ pub fn start(
     })
 }
 
+/// How long [`renew_push`] waits before each try again: then every last one.
+const PUSH_RENEW_AGAIN: [Duration; 4] = [
+    Duration::from_secs(1),
+    Duration::from_secs(5),
+    Duration::from_secs(30),
+    Duration::from_secs(300),
+];
+
 /// R6 review: once a renewed identity key was promoted, a new VAPID
 /// keypair and every stored push subscription forgotten
 /// ([`crate::push::store::renew_vapid`]) — whoever copied the old VAPID key
 /// and endpoints reaches no device that subscribes again. Noted done only
 /// once it is (and by this link only while it runs: else the next start
-/// does it again, which is harmless).
+/// does it again, which is harmless). Until then the push key is refused
+/// (503 `push_renewing`, [`bridge::push_key_route`]), so a try that fails is
+/// tried again while the link runs ([`PUSH_RENEW_AGAIN`]), not only at the
+/// next start (review of the renewal fixes).
 async fn renew_push(shared: Arc<Shared>) {
-    match crate::push::store::renew_vapid(&shared.paths).await {
-        Ok(forgotten) => {
-            tracing::warn!(forgotten, "renewed the push keys with the identity key: every device subscribes again");
-            if !shared.cancel.is_cancelled() {
-                shared.state.lock().expect("agent state").rotation.push_renew = false;
-                shared.save();
+    let mut tries = 0usize;
+    loop {
+        match crate::push::store::renew_vapid(&shared.paths).await {
+            Ok(forgotten) => {
+                tracing::warn!(forgotten, "renewed the push keys with the identity key: every device subscribes again");
+                if !shared.cancel.is_cancelled() {
+                    shared.state.lock().expect("agent state").rotation.push_renew = false;
+                    shared.save();
+                }
+                return;
+            }
+            Err(error) => {
+                let wait = PUSH_RENEW_AGAIN[tries.min(PUSH_RENEW_AGAIN.len() - 1)];
+                tries += 1;
+                tracing::error!(%error, tries, ?wait, "cannot renew the push keys with the identity key; trying again");
+                tokio::select! {
+                    () = tokio::time::sleep(wait) => {}
+                    () = shared.cancel.cancelled() => return,
+                }
             }
         }
-        Err(error) => tracing::error!(%error, "cannot renew the push keys with the identity key; trying again at the next start"),
     }
 }
 
@@ -542,10 +565,16 @@ pub(super) async fn run(shared: Arc<Shared>) {
 
 impl Shared {
     pub(super) fn save(&self) {
-        let st = self.state.lock().expect("agent state");
-        if let Err(error) = st.save(&self.paths) {
+        if let Err(error) = self.try_save() {
             tracing::error!(%error, "cannot save the agent state");
         }
+    }
+
+    /// [`Shared::save`], its failure returned: for a step that must not go
+    /// on unless the state it relies on is on disk.
+    pub(super) fn try_save(&self) -> Result<(), String> {
+        let st = self.state.lock().expect("agent state");
+        st.save(&self.paths)
     }
 
     fn set_health(&self, connected: bool, error: Option<String>) {
@@ -1815,6 +1844,12 @@ impl bridge::Local for AgentLocal {
             self.route(device, method, path, body)
         })
     }
+
+    fn push_renewing(&self) -> bool {
+        // Set before a renewed identity key is taken, cleared once
+        // [`renew_push`] made the new push keys.
+        self.shared.state.lock().expect("agent state").rotation.push_renew
+    }
 }
 
 impl AgentLocal {
@@ -2562,6 +2597,11 @@ mod tests {
 
     /// [`account`], its streams' writer events going to `sync`.
     fn account_with(sync: super::super::streams::Handle) -> Account {
+        account_at(sync, "127.0.0.1:9".parse().unwrap())
+    }
+
+    /// [`account_with`], its loopback server at `loopback`.
+    fn account_at(sync: super::super::streams::Handle, loopback: std::net::SocketAddr) -> Account {
         let ak = MachineIdentity::from_seed(&[1; 32]);
         let d1 = MachineIdentity::from_seed(&[2; 32]);
         let d2 = MachineIdentity::from_seed(&[3; 32]);
@@ -2591,7 +2631,7 @@ mod tests {
             paths,
             deferred_mail: Mutex::new(Vec::new()),
             identity: Arc::new(machine),
-            loopback: Arc::new(Loopback::new("127.0.0.1:9".parse().unwrap(), "test".into())),
+            loopback: Arc::new(Loopback::new(loopback, "test".into())),
             sync,
             state: Arc::new(Mutex::new(st)),
             guard: Mutex::new(guard),
@@ -2929,6 +2969,98 @@ mod tests {
         let (status, body) = rpc(&admin, "POST", "/rh/display-name", name).await.expect("an answer");
         assert_eq!((status, body["displayName"].as_str()), (200, Some("study")), "a fresh admin");
         assert_eq!(a.shared.state.lock().unwrap().display_name.as_deref(), Some("study"));
+    }
+
+    /// Final review of the renewal (#24, #25): while this computer renews
+    /// its push keys with its identity key (`rotation.push_renew`, until
+    /// [`renew_push`] is done), a device asking over a channel for the push
+    /// key, or subscribing against it, is answered 503 `push_renewing` — not
+    /// handed the key about to be replaced, which its page would keep as
+    /// current — and nothing reaches the server; once they are renewed, the
+    /// request reaches it again.
+    #[tokio::test]
+    async fn the_push_key_is_not_handed_out_while_it_is_renewed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // The local server: hands out the push key it holds, and counts the requests.
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        let reached = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = reached.clone();
+        tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = server.accept().await {
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match tcp.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let line = String::from_utf8_lossy(&request).lines().next().unwrap_or_default().to_string();
+                    seen.lock().unwrap().push(line);
+                    let body = r#"{"publicKey":"KEY-IN-USE"}"#;
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = tcp.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        let a = account_at(super::super::streams::Handle::detached(), addr);
+        attest(&a, "d-2", &d2(), 0);
+        let mut routes = Routes::new();
+        let admin = connect(&a, &a.d1, "d-1", 1, &mut routes).await.expect("an admin");
+        // A renewed identity key was taken: the push keys follow it.
+        a.shared.state.lock().unwrap().rotation.push_renew = true;
+        let (status, body) = rpc(&admin, "GET", "/api/push/vapid", b"").await.expect("an answer");
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (503, Some("push_renewing")),
+            "the key about to be replaced is not handed out: {body}"
+        );
+        let subscription = br#"{"endpoint":"https://push.example/x","keys":{"p256dh":"p","auth":"a"}}"#;
+        let (status, body) = rpc(&admin, "POST", "/api/push/subscriptions", subscription).await.expect("an answer");
+        assert_eq!((status, body["error"].as_str()), (503, Some("push_renewing")), "{body}");
+        assert!(reached.lock().unwrap().is_empty(), "nothing reached the server: {:?}", reached.lock().unwrap());
+        // Renewed: the page gets the key.
+        a.shared.state.lock().unwrap().rotation.push_renew = false;
+        let (status, body) = rpc(&admin, "GET", "/api/push/vapid", b"").await.expect("an answer");
+        assert_eq!((status, body["publicKey"].as_str()), (200, Some("KEY-IN-USE")));
+        assert_eq!(*reached.lock().unwrap(), vec!["GET /api/push/vapid HTTP/1.1".to_string()]);
+    }
+
+    /// Review of the renewal fixes: a renewal of the push keys that fails
+    /// ([`renew_push`]; the state database refusing the write, here) is tried
+    /// again while the link runs, after a back-off — not only at the next
+    /// start, the push key refused until then — and `push_renew` clears once
+    /// it is done.
+    #[tokio::test(start_paused = true)]
+    async fn the_push_keys_are_renewed_again_after_a_failure_without_a_restart() {
+        let a = account();
+        let paths = a.shared.paths.clone();
+        let old = crate::push::store::vapid_public(&paths).await.unwrap();
+        let db = crate::db::at(paths.instance_db());
+        db.write(|tx| tx.execute_batch("CREATE TRIGGER refuse_push BEFORE UPDATE ON kv WHEN NEW.scope = 'push' BEGIN SELECT RAISE(ABORT, 'refused (test)'); END;"))
+            .unwrap();
+        a.shared.state.lock().unwrap().rotation.push_renew = true;
+        let task = tokio::spawn(renew_push(a.shared.clone()));
+        // The first try fails.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(a.shared.state.lock().unwrap().rotation.push_renew);
+        assert_eq!(crate::push::store::vapid_public(&paths).await.unwrap(), old);
+        db.write(|tx| tx.execute_batch("DROP TRIGGER refuse_push")).unwrap();
+        // Without a restart: tried again, renewed, noted done.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert!(
+            !a.shared.state.lock().unwrap().rotation.push_renew,
+            "not tried again: the push key stays refused until the next start"
+        );
+        assert_ne!(crate::push::store::vapid_public(&paths).await.unwrap(), old, "a new push key");
+        assert!(!AgentState::load(&paths).unwrap().unwrap().rotation.push_renew, "saved");
+        tokio::time::timeout(Duration::from_secs(1), task).await.expect("done").unwrap();
     }
 
     /// Review D3: a device whose handshake this agent accepts is recorded
