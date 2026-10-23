@@ -154,6 +154,27 @@ export const pricingZhCN: Bundle = {
   "The names of your devices, your files and their names": "设备名、你的文件以及文件名",
   "Contact": "联系我们",
   "Questions, or a request about your data:": "有疑问，或想处理你的数据，请写信到：",
+  // Deleting an account (privacy notice)
+  "Deleting your account":
+    "删除账号",
+  "If you delete your account":
+    "如果你删除了账号",
+  "What is deleted":
+    "删除什么",
+  "You can delete your account yourself, in its settings. It is gone at once and for good: nobody, us included, can bring it back.":
+    "你可以在账号设置里自己删除账号。删除立即生效、无法撤销：谁都无法恢复，包括我们。",
+  "Deleted with it: your devices, the devices that run AI you added, the encrypted copies of your sessions and terminals, your keys, your plan, your password and passkeys, and the records of verification mail sent to your address.":
+    "一并删除的有：你的设备、你添加的可运行 AI 的设备、会话和终端的加密副本、你的钥匙、你的方案、密码和通行密钥，以及发往你邮箱的验证邮件记录。",
+  "Your address also leaves the waitlist, if it was on it.":
+    "如果你的邮箱在等候名单上，也会一并移出。",
+  "What we keep, and for how long":
+    "我们保留什么、保留多久",
+  "A keyed hash of your e-mail address, never the address itself, for {{days}} days, so the same inbox cannot sign up again straight away. How long is a setting of Droppen Hub: {{days}} days on droppen.app.":
+    "你邮箱地址的带密钥哈希（不是地址本身），保留 {{days}} 天，防止同一个邮箱马上重新注册。保留多久由 Droppen Hub 的设置决定：droppen.app 上是 {{days}} 天。",
+  "For the same {{days}} days, your account's and your devices' random ids and your devices' public keys, which open nothing: our servers use them to turn the account's connections away, and to tell a device that comes back that the account is gone, so it forgets its keys.":
+    "同样保留 {{days}} 天：你账号和各个设备的随机 ID，以及设备的公钥（打不开任何东西）。我们的服务器用它们拒绝这个账号的连接，并告诉再次连上的设备账号已删除，让它忘掉自己的钥匙。",
+  "Deleting removes all this from our live systems at once. Copies in our backups and logs expire after {{period}}.":
+    "删除会立即把这些从我们的在线系统中移除。备份和日志中的副本会在 {{period}} 后过期。",
 };
 
 export const pricingZhTW: Bundle = {
@@ -285,6 +306,27 @@ export const pricingZhTW: Bundle = {
   "The names of your devices, your files and their names": "裝置名稱、你的檔案以及檔名",
   "Contact": "聯絡我們",
   "Questions, or a request about your data:": "有疑問，或想處理你的資料，請寫信到：",
+  // Deleting an account (privacy notice)
+  "Deleting your account":
+    "刪除帳號",
+  "If you delete your account":
+    "如果你刪除了帳號",
+  "What is deleted":
+    "刪除什麼",
+  "You can delete your account yourself, in its settings. It is gone at once and for good: nobody, us included, can bring it back.":
+    "你可以在帳號設定裡自己刪除帳號。刪除立即生效、無法撤銷：誰都無法復原，包括我們。",
+  "Deleted with it: your devices, the devices that run AI you added, the encrypted copies of your sessions and terminals, your keys, your plan, your password and passkeys, and the records of verification mail sent to your address.":
+    "一併刪除的有：你的裝置、你新增的可執行 AI 的裝置、工作階段和終端機的加密副本、你的金鑰、你的方案、密碼和通行金鑰，以及寄往你信箱的驗證郵件紀錄。",
+  "Your address also leaves the waitlist, if it was on it.":
+    "如果你的信箱在等候名單上，也會一併移除。",
+  "What we keep, and for how long":
+    "我們保留什麼、保留多久",
+  "A keyed hash of your e-mail address, never the address itself, for {{days}} days, so the same inbox cannot sign up again straight away. How long is a setting of Droppen Hub: {{days}} days on droppen.app.":
+    "你電子郵件地址的帶金鑰雜湊（不是地址本身），保留 {{days}} 天，防止同一個信箱馬上重新註冊。保留多久由 Droppen Hub 的設定決定：droppen.app 上是 {{days}} 天。",
+  "For the same {{days}} days, your account's and your devices' random ids and your devices' public keys, which open nothing: our servers use them to turn the account's connections away, and to tell a device that comes back that the account is gone, so it forgets its keys.":
+    "同樣保留 {{days}} 天：你帳號和各個裝置的隨機 ID，以及裝置的公鑰（打不開任何東西）。我們的伺服器用它們拒絕這個帳號的連線，並告訴再次連上的裝置帳號已刪除，讓它忘掉自己的金鑰。",
+  "Deleting removes all this from our live systems at once. Copies in our backups and logs expire after {{period}}.":
+    "刪除會立即把這些從我們的線上系統中移除。備份和日誌中的副本會在 {{period}} 後過期。",
 };
 
 export const pricingJa: Bundle = {
@@ -416,4 +458,25 @@ export const pricingJa: Bundle = {
   "The names of your devices, your files and their names": "デバイス名、ファイルとファイル名",
   "Contact": "お問い合わせ",
   "Questions, or a request about your data:": "ご質問やデータに関するご依頼は：",
+  // Deleting an account (privacy notice)
+  "Deleting your account":
+    "アカウントの削除",
+  "If you delete your account":
+    "アカウントを削除した場合",
+  "What is deleted":
+    "削除されるもの",
+  "You can delete your account yourself, in its settings. It is gone at once and for good: nobody, us included, can bring it back.":
+    "アカウントは設定からご自身で削除できます。削除はすぐに行われ、元に戻せません。私たちを含め、誰にも復元できません。",
+  "Deleted with it: your devices, the devices that run AI you added, the encrypted copies of your sessions and terminals, your keys, your plan, your password and passkeys, and the records of verification mail sent to your address.":
+    "あわせて削除されるもの：デバイス、追加した AI を実行できるデバイス、セッションとターミナルの暗号化コピー、鍵、プラン、パスワードとパスキー、そしてあなたのアドレスに送った確認メールの記録。",
+  "Your address also leaves the waitlist, if it was on it.":
+    "ウェイトリストに登録していた場合は、そのアドレスも削除されます。",
+  "What we keep, and for how long":
+    "残すものと、その期間",
+  "A keyed hash of your e-mail address, never the address itself, for {{days}} days, so the same inbox cannot sign up again straight away. How long is a setting of Droppen Hub: {{days}} days on droppen.app.":
+    "メールアドレスの鍵付きハッシュ（アドレスそのものではありません）を {{days}} 日間。同じ受信箱ですぐに再登録できないようにするためです。期間は Droppen Hub の設定で、droppen.app では {{days}} 日です。",
+  "For the same {{days}} days, your account's and your devices' random ids and your devices' public keys, which open nothing: our servers use them to turn the account's connections away, and to tell a device that comes back that the account is gone, so it forgets its keys.":
+    "同じ {{days}} 日間、アカウントと各デバイスのランダムな ID、そしてデバイスの公開鍵（何も開けません）。私たちのサーバーはこれを使ってこのアカウントの接続を断り、戻ってきたデバイスにアカウントが削除されたことを伝えて、その鍵を消させます。",
+  "Deleting removes all this from our live systems at once. Copies in our backups and logs expire after {{period}}.":
+    "削除すると、これらは稼働中のシステムからすぐに消えます。バックアップとログに残る写しは {{period}} で期限切れになります。",
 };
