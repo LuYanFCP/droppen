@@ -17,6 +17,11 @@
 // The hub reports the same digest at `/.well-known/droppen-build`
 // (docs/hub-api/http.md), which is how a verifier picks the manifest to compare
 // droppen.app against.
+//
+// The build's service worker (`sw.js`) carries the sha256 of every file under
+// `assets/` and of `index.html`, which it checks the browser's cache against
+// (web/build/service-worker.ts). No manifest is written for a build whose table
+// disagrees with its files, and `--check` reports it.
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
@@ -52,6 +57,78 @@ export function digestOf(files) {
   return `sha256:${sha256(lines.join(""))}`;
 }
 
+/**
+ * The service worker's integrity table: `{assets: {"/assets/…": sha256},
+ * shell, scripts}` as the build wrote it into `sw.js` — `scripts`, the CSP
+ * sources of the shell's inline scripts it serves the offline shell's policy
+ * with — or `null` when the text has none.
+ */
+export function workerTable(text) {
+  const assets = /^const INTEGRITY = (\{.*\});$/m.exec(text);
+  const shell = /^const SHELL_SHA256 = "([0-9a-f]*)";$/m.exec(text);
+  const scripts = /^const SHELL_SCRIPTS = (\[.*\]);$/m.exec(text);
+  if (!assets || !shell || !scripts) return null;
+  let table, sources;
+  try {
+    table = JSON.parse(assets[1]);
+    sources = JSON.parse(scripts[1]);
+  } catch {
+    return null;
+  }
+  if (!table || typeof table !== "object" || Array.isArray(table) || Object.values(table).some((v) => typeof v !== "string")) return null;
+  if (!Array.isArray(sources) || sources.some((v) => typeof v !== "string")) return null;
+  return { assets: table, shell: shell[1], scripts: sources };
+}
+
+/** The CSP sources of `html`'s inline scripts, found as a hub finds them (web/build/service-worker.ts). */
+export function inlineScriptSources(html) {
+  const out = [];
+  let rest = html.toString("utf8");
+  for (;;) {
+    const start = rest.indexOf("<script");
+    if (start < 0) break;
+    const openEnd = rest.indexOf(">", start);
+    if (openEnd < 0) break;
+    const close = rest.indexOf("</script>", openEnd + 1);
+    if (close < 0) break;
+    if (!rest.slice(start, openEnd).includes("src=")) out.push(`'sha256-${createHash("sha256").update(rest.slice(openEnd + 1, close)).digest("base64")}'`);
+    rest = rest.slice(close + "</script>".length);
+  }
+  return out;
+}
+
+/**
+ * What the service worker's table (`text`, the build's `sw.js`) gets wrong
+ * about `files`: every file under `assets/` must be listed with its sha256,
+ * nothing else, the shell must be `index.html`'s, and (given the shell's
+ * bytes, `shellHtml`) its inline scripts' sources the shell's. `[]` when it is
+ * right.
+ */
+export function workerProblems(files, text, shellHtml) {
+  const table = workerTable(text);
+  if (!table) return ["sw.js has no integrity table (`const INTEGRITY = {…};`, `const SHELL_SHA256 = \"…\";` and `const SHELL_SCRIPTS = […];`, written by the build)"];
+  const out = [];
+  const assets = new Map(files.filter((f) => f.path.startsWith("assets/")).map((f) => [`/${f.path}`, f.sha256]));
+  for (const [path, sha] of assets) {
+    if (!Object.hasOwn(table.assets, path)) out.push(`sw.js does not list ${path}`);
+    else if (table.assets[path] !== sha) out.push(`sw.js lists ${path} as ${table.assets[path]}, the file is ${sha}`);
+  }
+  for (const path of Object.keys(table.assets)) if (!assets.has(path)) out.push(`sw.js lists ${path}, which is not in the build`);
+  const shell = files.find((f) => f.path === "index.html")?.sha256 ?? null;
+  if (table.shell !== shell) out.push(`sw.js has the shell as ${table.shell || "(none)"}, index.html is ${shell ?? "missing"}`);
+  if (shellHtml !== undefined) {
+    const want = inlineScriptSources(shellHtml);
+    if (JSON.stringify(table.scripts) !== JSON.stringify(want)) out.push(`sw.js allows the shell's inline scripts ${table.scripts.join(" ") || "(none)"}, index.html has ${want.join(" ") || "none"}`);
+  }
+  return out;
+}
+
+/** {@link workerProblems} of the build in `dist` (none without a `sw.js`). */
+function distWorkerProblems(dist, files) {
+  if (!files.some((f) => f.path === "sw.js")) return [];
+  return workerProblems(files, readFileSync(join(dist, "sw.js"), "utf8"), readFileSync(join(dist, "index.html")));
+}
+
 function inputHash(name) {
   const file = join(repo, name);
   return existsSync(file) ? sha256(readFileSync(file)) : null;
@@ -65,6 +142,8 @@ export function manifestOf(dist, { commit = null, ref = null } = {}) {
   if (plugins.distribution !== "public" || plugins.plugins.length)
     throw new Error(`${dist} is the "${plugins.distribution}" distribution with ${plugins.plugins.length} plugin(s), not the public build`);
   const files = filesOf(dist);
+  const worker = distWorkerProblems(dist, files);
+  if (worker.length) throw new Error(`${dist}: the service worker's integrity table does not match the build:\n  ${worker.join("\n  ")}`);
   const rootPackage = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
   return {
     format: FORMAT,
@@ -122,6 +201,7 @@ function main(argv) {
     if (manifest.format !== FORMAT) throw new Error(`${opts.check}: not a ${FORMAT} manifest`);
     const files = filesOf(dist);
     const diffs = compare(files, manifest);
+    diffs.push(...distWorkerProblems(dist, files).map((p) => `worker    ${p}`));
     if (digestOf(manifest.files) !== manifest.digest) diffs.push(`the manifest's digest does not match its own file list`);
     if (diffs.length) {
       console.error(`FAIL: ${dist} is not the build in ${opts.check} (${manifest.digest}):`);
