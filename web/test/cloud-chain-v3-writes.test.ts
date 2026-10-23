@@ -49,10 +49,11 @@ import {
   userKeyStale,
 } from "../src/lib/hub/account.js";
 import { ChainFollower, type FollowLink } from "../src/lib/hub/follow.js";
+import { legacyMachineKeyName } from "../src/lib/hub/keyring.js";
 import { HubApiError, MAIL_HOST_KEY, MAIL_KEY_REQUEST, MAIL_USER_KEY } from "../src/lib/hub/api.js";
 import type { ControllersRecord } from "../src/lib/hub/streams.js";
 import { candidateFromOffer, PairingResponder } from "../src/lib/hub/pairing.js";
-import { addPasskeySlot, browserStorage, createV2Genesis, FakeCourier, FakeKeysHub, passkeyActivateEarly, passkeyJoin, postAsPasskey, RecordingKeyStore } from "./fake-keys-hub.js";
+import { addPasskeySlot, browserStorage, containsBytes, createV2Genesis, FakeCourier, FakeKeysHub, passkeyActivateEarly, passkeyJoin, postAsPasskey, RecordingKeyStore } from "./fake-keys-hub.js";
 import { cloudDevicesZhCN } from "../src/i18n/cloud-devices.js";
 
 const keys = (id: string) => ({ id, signKey: new Uint8Array(32).fill(1), dhKey: new Uint8Array(32).fill(2) });
@@ -246,6 +247,73 @@ test("pairing a device that does not manage the account (a v3 chain): addDevice3
   const mk = (await a.machineKeyBytes("m-1", latest))!;
   const { containsBytes } = await import("./fake-keys-hub.js");
   assert.ok(!(b.store as RecordingKeyStore).puts.some((p) => containsBytes(p.value, mk)), "no raw machine key in the key store");
+});
+
+test("a device that does not manage the account moves raw machine keys from before the keyring into its sealed vault — every one the chain committed, past a gap too; one it did not commit is left", async () => {
+  const { hub, a } = await account();
+  await hub.enroll(a, "m-2", { writable: true });
+  const b = await pairAs(hub, a, { admin: false });
+  await admit(a, "m-1", b.deviceId);
+  await a.rotate(new FakeCourier());
+  // What an admin mailed it is not what this is about: as if it never came.
+  hub.mail = hub.mail.filter((m) => m.recipient !== b.deviceId);
+  await b.sync();
+  assert.equal(b.isAdmin, false);
+  assert.deepEqual(await b.hostKeys.epochs("m-1"), []);
+  const n1 = a.chain!.machineKeyEpochs("m-1");
+  assert.ok(n1 >= 2, String(n1));
+  // As M1/M2a left them, as hex — but m-1's epoch 0 already went in a run cut short; and m-2's first, a host that does not let it in now.
+  const store = b.store as RecordingKeyStore;
+  const m1 = new Map<number, Uint8Array>();
+  for (let e = 1; e < n1; e++) m1.set(e, (await a.machineKeyBytes("m-1", e))!);
+  const m2 = (await a.machineKeyBytes("m-2", 0))!;
+  for (const [e, key] of m1) await store.put(legacyMachineKeyName("m-1", e), hex(key));
+  const uncommitted = hex(crypto.getRandomValues(new Uint8Array(32)));
+  await store.put(legacyMachineKeyName("m-1", n1), uncommitted);
+  await store.put(legacyMachineKeyName("m-2", 0), hex(m2));
+  const before = store.puts.length;
+
+  await b.settle();
+  for (const e of m1.keys()) assert.equal(await store.get(legacyMachineKeyName("m-1", e)), undefined, `m-1 epoch ${e} is not left raw`);
+  assert.equal(await store.get(legacyMachineKeyName("m-2", 0)), undefined, "nor m-2's");
+  assert.equal(await store.get(legacyMachineKeyName("m-1", n1)), uncommitted, "a key the chain did not commit is left as it was");
+  assert.deepEqual(await b.hostKeys.epochs("m-1"), [...m1.keys()], "m-1's, sealed in its vault");
+  assert.deepEqual([...(await b.machineKeys("m-1")).keys()].sort((x, y) => x - y), [...m1.keys()], "and it reads m-1 with them");
+  assert.deepEqual(await b.hostKeys.epochs("m-2"), [0], "m-2's too, though m-2 does not let it in now: no raw copy goes without a sealed one");
+  assert.deepEqual(b.missingHostKeys, []);
+  for (const { name, value } of store.puts.slice(before)) {
+    for (const key of [...m1.values(), m2]) assert.ok(!containsBytes(value, key), `no raw machine key written under ${name}`);
+  }
+});
+
+test("a raw machine key from before the keyring stays while another page is moving them, or while its sealed copy does not open to it", async () => {
+  const { hub, a } = await account();
+  const b = await pairAs(hub, a, { admin: false });
+  await admit(a, "m-1", b.deviceId);
+  hub.mail = hub.mail.filter((m) => m.recipient !== b.deviceId);
+  await b.sync();
+  const store = b.store as RecordingKeyStore;
+  const mk = (await a.machineKeyBytes("m-1", 0))!;
+  await store.put(legacyMachineKeyName("m-1", 0), hex(mk));
+  type Locks = { request<T>(name: string, options: { mode: "exclusive"; ifAvailable?: boolean }, callback: (lock?: unknown) => T | Promise<T>): Promise<T> };
+  const page = b as unknown as { locks: Locks | null };
+  // Another page holds the migration's lock: this one skips it (no waiting on that page), and leaves it to the next settle.
+  const asked: { name: string; ifAvailable?: boolean }[] = [];
+  page.locks = {
+    request: async (name, options, callback) => {
+      asked.push({ name, ifAvailable: options.ifAvailable });
+      return callback(options.ifAvailable ? null : {});
+    },
+  };
+  assert.equal(await b.migrate(), 0);
+  assert.deepEqual(asked, [{ name: "rh-legacy-machine-keys", ifAvailable: true }]);
+  assert.equal(await store.get(legacyMachineKeyName("m-1", 0)), hex(mk), "left for the next settle");
+  // The lock is free, but another page replaced the device-local key this page sealed under: the sealed copy would not open — the raw one stays.
+  page.locks = { request: async (_name, _options, callback) => callback({}) };
+  await b.hostKeys.key("m-1", 99).catch(() => undefined);
+  await store.put("local-wrap/v1", await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt", "unwrapKey"]));
+  assert.equal(await b.migrate(), 0);
+  assert.equal(await store.get(legacyMachineKeyName("m-1", 0)), hex(mk), "kept: its sealed copy does not open to it");
 });
 
 test("enrollment on a v3 chain: [addDevice3{host}, keyEpochs] in one append — only while the hub takes v3 entries; a host never manages the account (D1)", async () => {
