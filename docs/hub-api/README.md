@@ -76,7 +76,7 @@ subdomain of it.
 
 | auth (index.json) | how | what it is good for |
 |---|---|---|
-| `none` | — | sign-up, login (password or passkey, and the passkey routes' options), the device-session exchange, e-mail verification, `GET /v1/signup/config`, the waitlist, the WebSocket upgrades (which sign in on the socket) |
+| `none` | — | sign-up, login (password or passkey, and the passkey routes' options), the device-session exchange, e-mail verification, `GET /v1/signup/config`, `GET /v1/releases/latest`, the waitlist, the WebSocket upgrades (which sign in on the socket) |
 | `session` | `Authorization: Bearer <token>`, a **login** or a **device** session | `POST /v1/devices`, `GET /v1/me`, `GET /v1/chain`, `POST /v1/email/resend`, `POST /v1/logout` |
 | `device` | `Authorization: Bearer <token>` of a **device** session | everything else under `/v1/` — managing the account's passkeys and password included (a current full device: a login session never changes how the account signs in) |
 | `admin` | `Authorization: Bearer <the operator's admin token>` | `/v1/admin/*`, the operator routes (documented with the Hub) |
@@ -153,7 +153,7 @@ The codes, by status (http.md lists them per route):
 | 422 | `invalid_entry` (a chain entry the hub's verification refused), `invalid_dispute` |
 | 429 | `rate` (with `retry_after_ms`), `mail_rate`, `device_rate`, `too_many_pending_devices`, `too_many_enrollments`, `too_many_pairings`, `pairing_full` |
 | 500 | `internal` |
-| 503 | `unavailable` (database, page store), `turnstile_unavailable` |
+| 503 | `unavailable` (database, page store), `turnstile_unavailable`, `release_unavailable` (`GET /v1/releases/latest` before the hub has read a release) |
 | 507 | `mailbox_full`, `keyring_full` |
 
 Treat an unknown code by its status. **Not every error body is JSON**: the
@@ -193,7 +193,7 @@ A refused request costs nothing and leaves nothing behind.
 | what | limit |
 |---|---|
 | every unauthenticated route (incl. the WebSocket upgrades and the operator routes), but the static ones below | 300 a minute per address, bursts of 60; a body (if any) read whole within 10 s before anything else, else `408 slow_request` and the connection closed |
-| the static and stateless routes: `/healthz`, `/install.sh`, `/.well-known/droppen-build`, the web app's files and any path nothing else serves, the Turnstile host's page and its 404s, a redirected host's `308` | 600 per 10 s and 3,000 a minute per address (a browser loads some 40 files) |
+| the static and stateless routes: `/healthz`, `/install.sh`, `/.well-known/droppen-build`, `GET /v1/releases/latest`, the web app's files and any path nothing else serves, the Turnstile host's page and its 404s, a redirected host's `308` | 600 per 10 s and 3,000 a minute per address (a browser loads some 40 files) |
 | argon2 (`POST /v1/login`, `POST /v1/signup`) | one hash at a time per address, two at a time per network (IPv4 /24, IPv6 /48), four across the hub: one source never holds every slot; the rest wait their turn |
 | sign-up attempts: `POST /v1/signup`, `POST /v1/passkeys/options {signup}` | every attempt, account made or not (each can say whether an e-mail is taken): 10 an hour and 30 a day per address, spent first (counted twice while Turnstile is unreachable and the hub fails open); and, only once the attempt passed every cheap check (mode, the e-mail's syntax and domain, the invite, Turnstile) — just before the e-mail is looked up — 20 an hour and 50 a day per network (IPv4 /24, IPv6 /48) and 200 an hour and 1,000 a day across the hub. Junk spends only its own address's share |
 | accounts made: `POST /v1/signup`, `POST /v1/signup/passkey` | 5 an hour and 20 a day per address, counted only when an account is made (by either route: a cancelled passkey prompt or a refused sign-up spends none). Without Turnstile also 20 an hour and 50 a day per network and 200 an hour and 1,000 a day across the hub, and none while the hub's verification mail is spent (below) |
