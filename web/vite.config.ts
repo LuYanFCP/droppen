@@ -2,6 +2,7 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
+import { devTools } from "./build/dev-tools";
 import { droppenPlugins, isPluginModule } from "./build/droppen-plugins";
 import { fillServiceWorker } from "./build/service-worker";
 import { thirdPartyNotices } from "./build/third-party-notices.mjs";
@@ -15,6 +16,12 @@ import { thirdPartyNotices } from "./build/third-party-notices.mjs";
  * tried against real transcripts without going near a live instance.
  */
 const proxyTarget = process.env.RH_DEV_PROXY ?? "http://127.0.0.1:8700";
+
+/**
+ * The hub the dev server's probe page (`build/dev-tools.ts`) signals through:
+ * its `/v1/probe/rooms/…` is proxied there. Unset, the page has no room.
+ */
+const probeHub = process.env.RH_DEV_HUB;
 
 /**
  * Third-party code in a chunk of its own.
@@ -104,6 +111,8 @@ export default defineConfig({
     precacheBootSet(),
     // `THIRD_PARTY_NOTICES.txt`: the licences of the npm packages in this build.
     thirdPartyNotices(),
+    // Developer pages for `vite dev` only (the direct-path probe): never in a build.
+    devTools(fileURLToPath(new URL("./dev", import.meta.url))),
   ],
   resolve: {
     alias: {
@@ -115,6 +124,7 @@ export default defineConfig({
     proxy: {
       "/api": { target: proxyTarget, ws: true },
       "/embed": { target: proxyTarget, ws: true },
+      ...(probeHub ? { "/v1/probe": { target: probeHub, ws: true, changeOrigin: true } } : {}),
     },
   },
 });

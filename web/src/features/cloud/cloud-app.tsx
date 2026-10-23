@@ -32,7 +32,8 @@ import { isAccountPath } from "./devices-route";
 import { MyDevicesScreen } from "./my-devices";
 import { NoKeysScreen, PairingScreen, PasskeyPendingScreen } from "./pairing-screen";
 import { PendingScreen, RecoveryWords } from "./recovery";
-import { clearDeviceCopies, type HeldSession, pairingResume, signInAgainToPair, signOut, takeSignOutFailures } from "./sign-out";
+import { clearDeviceCopies, type HeldSession, pairingResume, signInAgainToPair, signOut, takeSignOutFailures, takeStillListed } from "./sign-out";
+import { SignOutChoice, SignOutDialog, StillListedNote } from "./sign-out-dialog";
 import { authErrorText, Centered, CloudPage, danger, ErrorLine, errorText, Field, field, Note, Panel, primary, quiet, Tabs } from "./ui";
 import { CheckEmailScreen, VerifyEmailPage } from "./email-verify";
 import { UnsupportedBrowserScreen } from "./browser-support";
@@ -144,6 +145,14 @@ export function CloudApp({ children, store: givenStore, keyReadRetryMs }: { chil
   const api = useMemo(() => new HubApi(), []);
   const store = useMemo<KeyStore>(() => givenStore ?? indexedDbKeyStore(), [givenStore]);
   const [phase, setPhase] = useState<Phase>({ kind: "boot" });
+  // The sign-out question a screen before the shell asked (pairing, waiting, no keys): for its account.
+  const [askSignOut, setAskSignOut] = useState<CloudAccount | null>(null);
+  const withSignOut = (screen: ReactNode) => (
+    <>
+      {screen}
+      {askSignOut && <SignOutDialog account={askSignOut} onOpenChange={(open) => void (open || setAskSignOut(null))} />}
+    </>
+  );
   // Whether this browser can run the end-to-end encryption: checked once, as
   // the page starts, before any key is read or made (`lib/e2e/support.ts`).
   const supportCheck = useRef<Promise<E2eSupport> | null>(null);
@@ -195,8 +204,8 @@ export function CloudApp({ children, store: givenStore, keyReadRetryMs }: { chil
     link?.stop();
     hubShell()?.stop();
     setHubShell(null);
-    setPhase({ kind: "fork", message, held: { api: account.api, token: account.session.token } });
-  }, []);
+    setPhase({ kind: "fork", message, held: { api: account.api, token: account.session.token, account: account.account, store } });
+  }, [store]);
 
   /** Where a signed-in session (a kept device session, or a password sign-in) goes next. */
   const proceed = useCallback(
@@ -207,7 +216,7 @@ export function CloudApp({ children, store: givenStore, keyReadRetryMs }: { chil
         // mode), instead of failing at its keys as if its storage had.
         const ready = await e2eReadiness(await checkSupport());
         if (ready.kind === "unsupported") {
-          return setPhase({ kind: "unsupported", missing: ready.missing, compat: ready.compat, session, held: { api, token: session.token } });
+          return setPhase({ kind: "unsupported", missing: ready.missing, compat: ready.compat, session, held: { api, token: session.token, account: session.account, store } });
         }
         const account = await CloudAccount.open(api, session, store, { origin, onSession: saveSession, replaceUnreadableKeys, keyReadRetryMs });
         // The page's account from before (a screen moving on) renews nothing any more: this one does.
@@ -304,7 +313,7 @@ export function CloudApp({ children, store: givenStore, keyReadRetryMs }: { chil
           return setPhase({ kind: "auth", error: undefined });
         }
         // The session the page was using (renewed, if the account opened), for these screens' sign-out to end.
-        const held: HeldSession = { api, token: (opened.current?.account === session.account && opened.current.session.token) || session.token };
+        const held: HeldSession = { api, token: (opened.current?.account === session.account && opened.current.session.token) || session.token, account: session.account, store };
         if (error instanceof AccountError && error.kind === "fork") return setPhase({ kind: "fork", message: error.message, held });
         // An algorithm the browser turned out not to know, past the check: the same screen, never "storage did not answer".
         if (error instanceof E2eUnsupportedError) {
@@ -427,35 +436,35 @@ export function CloudApp({ children, store: givenStore, keyReadRetryMs }: { chil
     case "recovery":
       return <RecoveryWords words={phase.words} onDone={() => void proceed(phase.account.session)} />;
     case "pairing":
-      return (
+      return withSignOut(
         <PairingScreen
           account={phase.account}
           onPaired={() => void proceed(phase.account.session)}
           onPending={() => setPhase({ kind: "pending", account: phase.account })}
-          onSignOut={() => void signOut(phase.account)}
+          onSignOut={() => setAskSignOut(phase.account)}
           onSignInAgain={(mode) => void signInAgainToPair(phase.account, mode)}
-        />
+        />,
       );
     case "pending": {
       // Joined with a passkey: the pairing offer another device approves it by; with the recovery words: their own waiting screen.
       const Waiting = phase.account.chain?.deviceRecord(phase.account.deviceId)?.viaPasskey ? PasskeyPendingScreen : PendingScreen;
-      return (
+      return withSignOut(
         <Waiting
           account={phase.account}
           onActive={() => void proceed(phase.account.session)}
           onRemoved={() => void wipeRemoved(phase.account, null, store).then((failures) => setPhase({ kind: "removed", failures }))}
-          onSignOut={() => void signOut(phase.account)}
-        />
+          onSignOut={() => setAskSignOut(phase.account)}
+        />,
       );
     }
     case "noKeys":
-      return (
+      return withSignOut(
         <NoKeysScreen
           account={phase.account}
           onKeys={() => void proceed(phase.account.session)}
           onRemoved={() => void wipeRemoved(phase.account, null, store).then((failures) => setPhase({ kind: "removed", failures }))}
-          onSignOut={() => void signOut(phase.account)}
-        />
+          onSignOut={() => setAskSignOut(phase.account)}
+        />,
       );
     case "removed":
       return <RemovedScreen failures={phase.failures} />;
@@ -496,7 +505,7 @@ export function CloudApp({ children, store: givenStore, keyReadRetryMs }: { chil
         <KeysUnreadableScreen
           reason={phase.reason}
           message={phase.message}
-          held={{ api, token: session.token }}
+          held={{ api, token: session.token, account: session.account, store }}
           // A kept device session outlives a reload, which reads the store on a fresh page; a sign-in's login token does not.
           onRetry={() => (session.device ? location.reload() : (setPhase({ kind: "boot" }), void proceed(session)))}
           onNewDevice={() => {
@@ -533,9 +542,13 @@ export function ForkScreen({ message, held }: { message: string; held?: HeldSess
           <button type="button" data-variant="primary" className={primary} onClick={() => location.reload()}>
             {t("check again")}
           </button>
-          <button type="button" className={quiet} onClick={() => void signOut(undefined, held)}>
-            {t("sign out")}
-          </button>
+          <SignOutChoice held={held}>
+            {(ask) => (
+              <button type="button" className={quiet} onClick={ask}>
+                {t("sign out")}
+              </button>
+            )}
+          </SignOutChoice>
         </div>
       </Panel>
     </Centered>
@@ -617,9 +630,13 @@ export function KeysUnreadableScreen({
         <div className="flex flex-wrap gap-2">
           {gone ? ask : retry}
           {gone ? retry : ask}
-          <button type="button" className={quiet} onClick={() => void signOut(undefined, held)}>
-            {t("sign out")}
-          </button>
+          <SignOutChoice held={held}>
+            {(ask) => (
+              <button type="button" className={quiet} onClick={ask}>
+                {t("sign out")}
+              </button>
+            )}
+          </SignOutChoice>
         </div>
         {confirming && (
           <div
@@ -675,9 +692,13 @@ export function ErrorScreen({ message, held }: { message: string; held?: HeldSes
           <button type="button" data-variant="primary" className={primary} onClick={() => location.reload()}>
             {t("retry")}
           </button>
-          <button type="button" className={quiet} onClick={() => void signOut(undefined, held)}>
-            {t("sign out")}
-          </button>
+          <SignOutChoice held={held}>
+            {(ask) => (
+              <button type="button" className={quiet} onClick={ask}>
+                {t("sign out")}
+              </button>
+            )}
+          </SignOutChoice>
         </div>
       </Panel>
     </Centered>
@@ -842,6 +863,8 @@ export function AuthScreen({
   const [busy, setBusy] = useState(false);
   // What the last sign-out in this tab could not clear (read once).
   const [failures] = useState(() => takeSignOutFailures());
+  // A browser just signed out and removed that the account still lists (read once).
+  const [stillListed] = useState(() => takeStillListed());
   // Signed out by the pairing screen's "sign in again": it comes back once signed in.
   const [resumesPairing] = useState(() => pairingResume() !== null);
   // How sign-up works here (`failed`: the hub did not say; its answers will).
@@ -1064,6 +1087,11 @@ export function AuthScreen({
           {failures && (
             <div className="mb-6">
               <ClearFailures failures={failures} />
+            </div>
+          )}
+          {stillListed && (
+            <div className="mb-6">
+              <StillListedNote why={stillListed} />
             </div>
           )}
           {resumesPairing && (

@@ -437,6 +437,70 @@ function forgetDeviceIdIn(storage: AccountStorage, account: string, id: string):
   }
 }
 
+/** What a wipe could not forget, each step on its own (`CloudAccount.wipe`, `CloudAccount.wipeLocal`). */
+export class WipeError extends Error {
+  constructor(readonly failures: string[]) {
+    super(failures.join("; "));
+    this.name = "WipeError";
+  }
+}
+
+/** The failures a wipe's error names: each of a {@link WipeError}'s, or the error itself. */
+export function wipeFailures(error: unknown): string[] {
+  if (error instanceof WipeError) return error.failures;
+  return [error instanceof Error ? error.message : String(error)];
+}
+
+/**
+ * Everything a browser keeps for `account` (as device `deviceId`, when it
+ * noted one), forgotten one step at a time: every step is tried whatever an
+ * earlier one did, and what failed is thrown at the end ({@link WipeError}).
+ */
+async function forgetBrowser(input: {
+  store: KeyStore;
+  storage: AccountStorage;
+  account: string;
+  deviceId: string | null;
+  vaults: [UserKeyVault, HostKeyVault, RenewalStash, { wipe(): Promise<void> }];
+  legacyHosts: string[];
+  forgetSeen: () => Promise<void>;
+}): Promise<void> {
+  const { store, storage, account, deviceId } = input;
+  const [vault, hostKeys, renewalStash, keyring] = input.vaults;
+  const failures: string[] = [];
+  const step = async (what: string, work: () => Promise<unknown> | unknown) => {
+    try {
+      await work();
+    } catch (error) {
+      failures.push(`${what}: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200));
+    }
+  };
+  // The keys that sign as this device and open what it was sealed, first.
+  await step("device keys", () => forgetDeviceKeys(store));
+  await step("local wrap key", () => forgetLocalWrapKey(store));
+  await step("user keys", () => vault.wipe());
+  await step("host keys", () => hostKeys.wipe());
+  await step("renewals", () => renewalStash.wipe());
+  await step("keyring copy", () => keyring.wipe());
+  await step("machine keys", async () => {
+    for (const host of input.legacyHosts) {
+      for (let epoch = 0; epoch < 64; epoch++) {
+        const name = legacyMachineKeyName(host, epoch);
+        if ((await store.get(name)) === undefined) break;
+        await store.delete(name);
+      }
+    }
+  });
+  await step("pending re-encryptions", () => forgetPendingReencrypts(account));
+  // The browser's notes (forgetting one never throws).
+  const notes = [deviceKey(account), deviceSignKey(account), lostDeviceKey(account), lostWhyKey(account), afreshKey(account)];
+  if (deviceId) notes.push(hostKeyRequestKey(account, deviceId), keyRequestKey(account, deviceId), joinedKey(account, deviceId), ackKey(account, deviceId));
+  notes.push(reEnrollDismissedKey(account), reEnrollConnectedKey(account), keptDisputesKey(account), localAssuredKey(account));
+  for (const key of notes) forgetIn(storage, key);
+  await step("seen record", () => input.forgetSeen());
+  if (failures.length) throw new WipeError(failures);
+}
+
 export type AccountErrorKind =
   | "notInChain"
   | "fork"
@@ -776,6 +840,9 @@ export function limitedDevice(input: {
 
 /** Where this device stands in the account's chain. */
 export type Standing = "active" | "pending" | "removed" | "absent";
+
+/** Whether this device may take itself out of the account as it signs out for good, and if not, why (`CloudAccount.selfRemoval`). */
+export type SelfRemoval = "removable" | "notActive" | "notAdmin" | "lastAdmin" | "keepsSignIn" | "heldBack";
 
 /** Why the hub will not give this device a session: it says the device was `removed`, or it `denied` it. */
 export type Refusal = "removed" | "denied";
@@ -3931,6 +3998,55 @@ export class CloudAccount {
     );
   }
 
+  /**
+   * Whether this device may take itself out of the account's chain as it
+   * signs out for good ({@link removeSelf}), and if not, why:
+   * - `notActive`: it is no active device of the account (no chain, pending,
+   *   removed, or another view latched): there is nothing it may sign;
+   * - `notAdmin`: only a device that manages the account signs entries;
+   * - `lastAdmin`: the chain keeps one admin device at least;
+   * - `keepsSignIn`: removing it would void the recovery words or the passkey
+   *   slots it set (or came back with) — a sign-out must not take those from
+   *   the account; another admin device removes it, knowing that;
+   * - `heldBack`: an activation is held back here (only its veto is signed).
+   */
+  selfRemoval(): SelfRemoval {
+    const chain = this.state;
+    if (!chain || this.standing !== "active" || this.forked !== null) return "notActive";
+    if (!this.isAdmin) return "notAdmin";
+    if (!this.pinned) return "notActive";
+    if (!chain.admins().some((d) => d.info.id !== this.deviceId)) return "lastAdmin";
+    const me = this.deviceId;
+    const slots = chain.allSlots().some((s) => !s.removed && (s.setBy === me || chain.deviceRecord(me)?.viaPasskey === s.slot.slot));
+    if (chain.voidsRecoveryWords(me, "removal") || slots) return "keepsSignIn";
+    if (this.held) return "heldBack";
+    return "removable";
+  }
+
+  /**
+   * Take this device out of the account's chain — signed by itself, as its
+   * last entry: `removeDevice3` (chain v3), v2's `removeDevice`. Only what
+   * {@link selfRemoval} calls `removable` (checked again on the chain the
+   * entry is built on). Nothing is rotated: a device that removes itself is
+   * the one that would make the new keys, so it is no reason to retire them
+   * — it forgets its own right after ({@link wipe}); the user key it held
+   * goes stale for the other admin devices all the same ({@link userKeyStale})
+   * and is replaced with the next batch that issues keys. The hub ends its
+   * sessions as it takes the removal.
+   */
+  async removeSelf(): Promise<void> {
+    const why = this.selfRemoval();
+    if (why !== "removable") {
+      const kind = ({ notActive: "notInChain", notAdmin: "notAdmin", lastAdmin: "lastAdmin", keepsSignIn: "self", heldBack: "heldBack" } as const)[why];
+      throw new AccountError(kind, `this device cannot remove itself (${why}): remove it from another full device`);
+    }
+    const me = this.deviceId;
+    await this.appendBatch(async (chain) => {
+      if (!chain.admins().some((d) => d.info.id !== me)) throw new AccountError("lastAdmin", "the account's last full device stays one");
+      return [chain.isV3 ? { type: "removeDevice3", id: me } : { type: "removeDevice", id: me }];
+    });
+  }
+
   /** Whether device `id` (not an admin) may control some current host now: removing it rotates the machine keys whatever was asked (review D2). */
   controlsAHost(id: string): boolean {
     const chain = this.state;
@@ -5769,41 +5885,55 @@ export class CloudAccount {
   }
 
   /**
-   * This device was removed from the account: forget everything it holds for
-   * it — `UK` epochs, the cached keyring, M1's raw machine keys, its device
-   * keys and the local wrap key, its id at the hub, and what it noted about
-   * the chain. (The page clears its offline copies too.)
+   * This device was removed from the account (or signs out for good): forget
+   * everything it holds for it — `UK` epochs, the cached keyring, M1's raw
+   * machine keys, its device keys and the local wrap key, its id at the hub,
+   * and what it noted about the chain. (The page clears its offline copies
+   * too.) Every step is tried, whatever an earlier one did; what failed is
+   * thrown at the end, each step on its own ({@link WipeError}).
    */
   async wipe(): Promise<void> {
     this.stopSession();
-    await this.vault.wipe();
-    await this.hostKeys.wipe();
-    await this.renewalStash.wipe();
-    await this.keyring.wipe();
-    for (const m of this.state?.hosts() ?? []) {
-      for (let epoch = 0; epoch < 64; epoch++) {
-        const name = legacyMachineKeyName(m.info.id, epoch);
-        if ((await this.store.get(name)) === undefined) break;
-        await this.store.delete(name);
-      }
-    }
-    await forgetDeviceKeys(this.store);
-    await forgetLocalWrapKey(this.store);
-    forgetPendingReencrypts(this.account);
-    this.forget(hostKeyRequestKey(this.account, this.deviceId));
-    this.forget(keyRequestKey(this.account, this.deviceId));
-    this.forget(deviceKey(this.account));
-    this.forget(deviceSignKey(this.account));
-    this.forget(lostDeviceKey(this.account));
-    this.forget(lostWhyKey(this.account));
-    this.forget(afreshKey(this.account));
-    this.forget(joinedKey(this.account, this.deviceId));
-    this.forget(ackKey(this.account, this.deviceId));
-    await this.forgetSeen();
-    this.forget(reEnrollDismissedKey(this.account));
-    this.forget(reEnrollConnectedKey(this.account));
-    this.forget(keptDisputesKey(this.account));
-    this.forget(localAssuredKey(this.account));
+    const hosts = (this.state?.hosts() ?? []).map((m) => m.info.id);
+    await forgetBrowser({
+      store: this.store,
+      storage: this.storage,
+      account: this.account,
+      deviceId: this.deviceId,
+      vaults: [this.vault, this.hostKeys, this.renewalStash, this.keyring],
+      legacyHosts: hosts,
+      forgetSeen: () => this.forgetSeen(),
+    });
+  }
+
+  /**
+   * {@link wipe} for a page that could not open the account (its chain
+   * forked, its keys would not open, an error): what this browser keeps for
+   * `account`, under the device id it noted, forgotten from `store` and the
+   * browser's storage, step by step. Its device keys go with it: the next
+   * sign-in here is a new device. (No chain: raw machine keys from before the
+   * keyring, named by host, stay.)
+   */
+  static async wipeLocal(store: KeyStore, account: string, opts: { storage?: AccountStorage; seen?: SeenStore } = {}): Promise<void> {
+    const storage = opts.storage ?? defaultStorage();
+    const deviceId = readFrom(storage, deviceKey(account));
+    const seen = opts.seen ?? pageSeenStore(storage);
+    const keyring = new Keyring({ list: async () => [], put: async () => undefined }, store, account, deviceId ?? "");
+    await forgetBrowser({
+      store,
+      storage,
+      account,
+      deviceId,
+      vaults: [new UserKeyVault(store, account), new HostKeyVault(store, account), new RenewalStash(store, account), keyring],
+      legacyHosts: [],
+      forgetSeen: async () => {
+        await seen.update(account, (raw) => {
+          const stored = parseStored(raw);
+          return stored.seen === null ? undefined : { ...stored, seen: null };
+        });
+        forgetIn(storage, seenKey(account));
+      },
+    });
   }
 
   /** This device's signed statement of the chain head it sees now. */
