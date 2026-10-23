@@ -3795,6 +3795,10 @@ export class CloudAccount {
    * ({@link approvePasskeyJoin}).
    */
   async pairDevice(candidate: Candidate, opts: { admin: boolean }): Promise<"delivered" | "redelivered"> {
+    // The hub's chain as it stands first: a self-activation this page has not
+    // seen yet is held back here (and so refuses the pairing) before any key goes.
+    await this.sync();
+    this.refuseWhileHeld();
     const chain = this.requireAdmin();
     const listed = chain.deviceRecord(candidate.device);
     if (!opts.admin && !listed) this.requireUpgraded(chain);
@@ -3804,10 +3808,11 @@ export class CloudAccount {
     if (joining) await this.approvePasskeyJoin(candidate);
     const done = await completePairing(
       {
-        // The delivery (every user key epoch, sealed) leaves only while this view has not forked.
+        // The delivery (every user key epoch, sealed) leaves only while this view has not forked, nor holds an activation back.
         api: {
           mail: (token, mail) => {
             this.assertNotForked();
+            this.refuseWhileHeld();
             return this.api.mail(token, mail);
           },
         },
@@ -3831,6 +3836,26 @@ export class CloudAccount {
       }
     }
     return joining ? "delivered" : done;
+  }
+
+  /**
+   * While this device holds back a self-activation ({@link heldBack}), it
+   * hands no device its keys by pairing — not even one already listed, which
+   * needs no new entry, and so would not meet the refusal every entry but
+   * the veto meets (`appendBatch`): that device, opening the account afresh,
+   * may take the held activation as history. It waits, as they do, until the
+   * person approves or removes the held device.
+   */
+  private refuseWhileHeld(): void {
+    const held = this.held;
+    if (!held) return;
+    throw new AccountError(
+      "heldBack",
+      "{{id}} activated itself sooner than this device allows: approve it or remove it first. Until then this device adds no device and pairs none again.",
+      held.readyMs,
+      undefined,
+      { id: held.device ?? "?" },
+    );
   }
 
   /**
