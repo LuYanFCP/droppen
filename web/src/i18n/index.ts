@@ -12,21 +12,61 @@ import { signOutJa, signOutZhCN, signOutZhTW } from "./sign-out";
 import { welcomeJa, welcomeZhCN, welcomeZhTW } from "./welcome";
 import { zhCN } from "./zh-CN";
 import { zhTW } from "./zh-TW";
+import { pickLanguage, type Language } from "./match";
+
+export { matchLanguage, pickLanguage, type Language } from "./match";
 
 /**
  * Translation keys ARE the English source strings, so English needs no
  * resource file and a missing translation falls back to readable English.
  */
-export type LanguagePref = "auto" | "en" | "zh-CN" | "zh-TW" | "ja";
+export type LanguagePref = "auto" | Language;
+
+/** The four, each named in its own script, as the language menus list them. */
+export const LANGUAGE_NAMES: readonly { id: Language; label: string }[] = [
+  { id: "zh-CN", label: "简体中文" },
+  { id: "zh-TW", label: "繁體中文" },
+  { id: "ja", label: "日本語" },
+  { id: "en", label: "English" },
+];
 
 const CACHE_KEY = "rh.lang";
 
-export function resolveLanguage(pref: LanguagePref): string {
-  if (pref !== "auto") return pref;
-  const nav = navigator.language || "en";
-  if (/^zh/i.test(nav)) return /tw|hk|mo|hant/i.test(nav) ? "zh-TW" : "zh-CN";
-  if (/^ja/i.test(nav)) return "ja";
-  return "en";
+function isLanguage(value: unknown): value is Language {
+  return value === "en" || value === "zh-CN" || value === "zh-TW" || value === "ja";
+}
+
+/**
+ * The browser's languages in its order of preference: `navigator.languages`,
+ * then `navigator.language`. WebKit lists only the first of the system's
+ * languages; the desktop app hands its window the whole list
+ * (`desktop/src-tauri/src/init.js`).
+ */
+export function browserLanguages(): string[] {
+  if (typeof navigator === "undefined") return [];
+  const list: string[] = Array.isArray(navigator.languages) ? [...navigator.languages] : [];
+  if (navigator.language) list.push(navigator.language);
+  return list;
+}
+
+/** The language a pref shows: an explicit choice as it is; `auto` the first of the browser's languages the app speaks, else English. */
+export function resolveLanguage(pref: LanguagePref, languages: readonly string[] = browserLanguages()): Language {
+  return pref !== "auto" && isLanguage(pref) ? pref : pickLanguage(languages);
+}
+
+/** The pref this browser last applied (`applyLanguage`): an explicit choice, else `auto`. */
+export function storedLanguagePref(): LanguagePref {
+  try {
+    const cached = localStorage.getItem(CACHE_KEY);
+    if (isLanguage(cached)) return cached;
+  } catch {
+    // storage unavailable: auto
+  }
+  return "auto";
+}
+
+function setDocumentLanguage(lang: string): void {
+  if (typeof document !== "undefined" && document.documentElement) document.documentElement.lang = lang;
 }
 
 /** The server pref is the source of truth; localStorage caches it for boot. */
@@ -38,19 +78,10 @@ export function applyLanguage(pref: LanguagePref): void {
   }
   const lang = resolveLanguage(pref);
   if (i18n.language !== lang) void i18n.changeLanguage(lang);
-  document.documentElement.lang = lang;
+  setDocumentLanguage(lang);
 }
 
-function initialLanguage(): string {
-  let pref: LanguagePref = "auto";
-  try {
-    const cached = localStorage.getItem(CACHE_KEY);
-    if (cached === "en" || cached === "zh-CN" || cached === "zh-TW" || cached === "ja") pref = cached;
-  } catch {
-    // fall through to auto
-  }
-  return resolveLanguage(pref);
-}
+const initial = resolveLanguage(storedLanguagePref());
 
 void i18n.use(initReactI18next).init({
   resources: {
@@ -58,11 +89,23 @@ void i18n.use(initReactI18next).init({
     "zh-TW": { translation: { ...onboardingZhTW, ...crossDeviceZhTW, ...linkZhTW, ...cloudDevicesZhTW, ...signOutZhTW, ...hostsZhTW, ...moveZhTW, ...setupZhTW, ...welcomeZhTW, ...zhTW } },
     ja: { translation: { ...onboardingJa, ...crossDeviceJa, ...linkJa, ...cloudDevicesJa, ...signOutJa, ...hostsJa, ...moveJa, ...setupJa, ...welcomeJa, ...ja } },
   },
-  lng: initialLanguage(),
+  lng: initial,
   fallbackLng: false,
   keySeparator: false,
   nsSeparator: false,
   interpolation: { escapeValue: false },
 });
+
+// `<html lang>` says the page's language from the first paint on (the shell
+// is `en` until a script runs), and follows every change after.
+setDocumentLanguage(initial);
+i18n.on("languageChanged", setDocumentLanguage);
+
+// `auto` follows the browser when its languages change while the page is open.
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  window.addEventListener("languagechange", () => {
+    if (storedLanguagePref() === "auto") applyLanguage("auto");
+  });
+}
 
 export default i18n;
