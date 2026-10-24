@@ -2,14 +2,16 @@
 # NOTES.md, the text of a release (its page on GitHub, the install command
 # included): what the files are, then what changed for people
 # (docs/releases/<version>.md). scripts/release-public.sh stages it;
-# .github/workflows/release.yml's verify job writes it again from the source
+# .github/workflows/release.yml's release job writes it again from the source
 # and refuses a staged NOTES.md that differs by a byte (the stage job runs
 # npm install scripts).
 #
 #   scripts/release-notes.sh <version> <commit> <rev> <server version> <linux: 0|1> [<release notes file>]
 #
 # Prints it. On GitHub Actions (GITHUB_ACTIONS=true) the files' table names
-# the attestation bundles too.
+# the attestation bundles too. DROPPEN_RELEASE_INSTALL_SH: the install.sh the
+# release publishes, whose release key decides whether the table names the
+# signed checksums (default: the one beside this script).
 set -euo pipefail
 
 VERSION=${1:?usage: release-notes.sh <version> <commit> <rev> <server version> <linux: 0|1> [<notes>]}
@@ -39,6 +41,17 @@ if [ "$LINUX" = 1 ]; then
 fi
 ROWS="$ROWS
 | $OLD_ROWS | the same server under its old name only, for older copies of the installer (on every release until at least $OLD_ASSETS_UNTIL) |"
+# The installer's signed checksums: publish-release.sh publishes them exactly
+# when the release's install.sh pins a release key (SUMS_KEY).
+# release-public.sh names the install.sh it staged; release.yml's release job
+# reads this source's, which it checks is the staged one byte for byte.
+INSTALL_SH=${DROPPEN_RELEASE_INSTALL_SH:-$HERE/install.sh}
+KEY=$("$HERE/install-key.sh" "$INSTALL_SH") || { echo "release-notes: cannot read the release key $INSTALL_SH pins" >&2; exit 2; }
+SIGNED=""
+if [ -n "$KEY" ]; then
+  SIGNED="| \`SHA256SUMS-server\`, \`SHA256SUMS-server.sig\` | the tarballs' checksums and their signature by the release key \`install.sh\` pins, which it checks before it installs anything |
+"
+fi
 # Built by .github/workflows/release.yml, every file gets an attestation.
 ATTESTED=""
 if [ "${GITHUB_ACTIONS:-}" = true ]; then
@@ -65,7 +78,7 @@ same program under its old name, which the installed service keeps.
 |---|---|
 ${ROWS}
 | \`install.sh\` | the installer above (https://droppen.app/install.sh serves this file once Droppen Hub is built from this release) |
-| \`INSTALL-macos.txt\`, \`INSTALL-linux.txt\` | installing by hand (each tarball has its own \`INSTALL.txt\`) |
+${SIGNED}| \`INSTALL-macos.txt\`, \`INSTALL-linux.txt\` | installing by hand (each tarball has its own \`INSTALL.txt\`) |
 | \`LICENSE\` | Droppen's licence: AGPL-3.0-only |
 | \`THIRD_PARTY_NOTICES\` | the third-party software in the server, with its licences |
 | \`web-manifest.json\` | the embedded web app's files and digest |
