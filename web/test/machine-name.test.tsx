@@ -236,7 +236,7 @@ test("the list shows the name with the id under it, and offers a rename only whi
   const online = draw(panel("m-7", "online", named));
   assert.match(online, /data-testid="open-m-7"/, "the button the acceptance harness clicks");
   assert.match(online, /data-testid="name-m-7"[^>]*>studio mac</);
-  assert.match(online, /<span class="min-w-0 truncate">m-7<\/span>/, "the id, as the row's quiet last line");
+  assert.match(online, /<details[^>]*>[\s\S]*>m-7</, "the id, in the row's disclosure");
   const t = i18n.getFixedT("en");
   const rename = (presence: PresenceState) => rowMenuItems(view("m-7", presence, named), { viewerAdmin: true, upgraded: true, writable: true, t, onRename: () => {} }).find((i) => i.id === "rename-m-7");
   assert.equal(rename("online")?.blocked, null);

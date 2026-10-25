@@ -70,9 +70,9 @@ export function AddDeviceHint({ variant, onAdd, className }: { variant: "row" | 
   const add = onAdd ?? openAddDevice;
   if (variant === "row") {
     return (
-      <div data-testid="add-device-hint" className={cn("flex items-center gap-3 border-b border-border px-6 py-3 max-md:px-4", className)}>
+      <div data-testid="add-device-hint" className={cn("flex items-center gap-3 px-6 py-3 max-md:px-4", className)}>
         <Columns2 aria-hidden="true" className="size-4 shrink-0 text-fg" />
-        <p className="min-w-0 flex-1 text-xs leading-5 text-fg">{t("Add another device to see both on one screen.")}</p>
+        <p className="min-w-0 flex-1 text-[13px] leading-5 text-fg">{t("Add another device to see both on one screen.")}</p>
         <button
           type="button"
           data-testid="add-device-hint-add"

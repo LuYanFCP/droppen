@@ -10,7 +10,6 @@
  */
 import { useTranslation } from "react-i18next";
 import { ArrowRight } from "lucide-react";
-import { CapsLabel } from "@/components/ui/caps-label";
 import { cn } from "@/lib/cn";
 import { formatRelative } from "@/lib/format";
 import { useTicker } from "@/lib/ticker";
@@ -60,18 +59,20 @@ export function NeedsYouLedger({ needs, nameOf, onOpen, devices = true, readOnly
   ].filter((part): part is string => !!part);
   return (
     <section data-testid="needs-you-ledger" aria-label={t("what needs you")} className={cn("flex min-w-0 flex-col", className)}>
-      <div className="flex h-10 min-w-0 shrink-0 items-center gap-2.5 border-b border-border px-6 max-md:px-4">
-        <CapsLabel className="shrink-0 text-fg">{devices ? t("needs you · every device") : t("what needs you")}</CapsLabel>
-        <span className="min-w-0 truncate font-mono text-2xs text-faint">{counts.join(" · ")}</span>
+      <div className="flex min-w-0 flex-col gap-1 px-6 pb-2 max-md:px-4">
+        <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-border pb-2">
+          <h2 className="shrink-0 text-base leading-6 font-semibold text-fg">{devices ? t("needs you · every device") : t("what needs you")}</h2>
+          <span className="min-w-0 truncate font-mono text-xs text-faint">{counts.join(" · ")}</span>
+        </div>
       </div>
       {shown.length === 0 ? (
-        <p data-testid="needs-you-empty" className="border-b border-border px-6 py-4 font-mono text-2xs text-faint max-md:px-4">
+        <p data-testid="needs-you-empty" className="px-6 py-4 font-mono text-xs text-faint max-md:px-4">
           {t("nothing needs you: no session is asking, unread or working")}
         </p>
       ) : (
-        <ul className="flex flex-col">
+        <ul className="flex flex-col gap-2">
           {shown.map((entry) => (
-            <li key={entry.key} className="border-b border-border">
+            <li key={entry.key}>
               <LedgerRow
                 entry={entry}
                 device={devices ? nameOf(entry.ref.machine) : null}
@@ -84,7 +85,7 @@ export function NeedsYouLedger({ needs, nameOf, onOpen, devices = true, readOnly
         </ul>
       )}
       {more > 0 && (
-        <p className="border-b border-border px-6 py-2.5 font-mono text-2xs text-faint max-md:px-4">{t("and {{n}} more", { n: more })}</p>
+        <p className="px-6 py-2.5 font-mono text-xs text-faint max-md:px-4">{t("and {{n}} more", { n: more })}</p>
       )}
     </section>
   );
@@ -124,11 +125,11 @@ function LedgerRow({
       )}
     >
       <EdgeBar state={EDGE[kind]} />
-      {device && <span className="truncate font-mono text-2xs text-fg max-md:order-3 max-md:text-faint">{device}</span>}
+      {device && <span className="truncate font-mono text-xs text-fg max-md:order-3 max-md:text-faint">{device}</span>}
       <span className="flex min-w-0 flex-col">
         <span className={cn("min-w-0 truncate text-[13px] leading-4.5 text-fg", entry.unread > 0 && "font-semibold")}>{row.title}</span>
         {elsewhere && (
-          <span data-answer-elsewhere="" className="min-w-0 truncate font-mono text-2xs text-faint">
+          <span data-answer-elsewhere="" className="min-w-0 truncate font-mono text-xs text-faint">
             {t("answer it on that device itself")}
           </span>
         )}
@@ -137,7 +138,7 @@ function LedgerRow({
         <ActivityChipView row={row} />
         <UnreadPill count={entry.unread} />
       </span>
-      <span className="font-mono text-2xs text-faint tabular-nums max-md:order-4 max-md:text-right">{age}</span>
+      <span className="font-mono text-xs text-faint tabular-nums max-md:order-4 max-md:text-right">{age}</span>
       <span
         className={cn(
           "flex h-7 items-center justify-center gap-1 justify-self-end px-2.5 text-xs whitespace-nowrap max-md:hidden",

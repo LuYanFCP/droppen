@@ -229,6 +229,13 @@ test("the usage at the top of 「我的设备」: the plan, the transfer this pe
   const machines = [{ id: "m-1", copy: { streams: 3, bytes: 4 * GIB, lastWriteMs: Date.UTC(2026, 9, 17, 14, 2) } }];
   const high = draw(<UsagePanel plan={plan({ usage: { storageBytes: 4.6 * GIB, devices: 2, machines: 1 } })} machines={machines} names={new Map([["m-1", "Mac mini"]])} />, "zh-CN");
   assert.match(high, /data-testid="usage-summary"/);
+  // One sentence first, then five numbers: the summary is not five framed boxes.
+  assert.match(high, /data-testid="usage-summary-line"[^>]*>[^<]*免费版/);
+  assert.match(high, /data-section-head=""[^>]*>[\s\S]*?<h2[^>]*class="[^"]*text-base[^"]*font-semibold/);
+  assert.match(high, /@container\/usage/);
+  assert.match(high, /@min-\[36rem\]\/usage:col-span-2/);
+  assert.match(high, /@min-\[70rem\]\/usage:grid-cols-5/);
+  assert.doesNotMatch(high, /data-testid="usage-storage"[^>]*border/, "cells are separated by the grid's 1px, not each framed");
   assert.ok(high.includes("免费版"));
   assert.match(high, /data-testid="usage-storage"[\s\S]*>4\.6 GB<[\s\S]*\/ 5 GB/);
   assert.match(high, /role="meter"[^>]*aria-valuenow="92"/);

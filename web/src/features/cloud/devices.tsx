@@ -49,7 +49,7 @@ import { AlwaysConfirmSetting, EndPauseConfirm, PushRenewNotice, RenewalNotice, 
 import { LimitNote, UsageSummary, useMe } from "./plan";
 import { QrScanner } from "./qr";
 import { RecoveryWords } from "./recovery";
-import { danger, ErrorLine, errorText, field, Fingerprint, knownText, Note, primary, quiet, secondary, Tabs } from "./ui";
+import { danger, ErrorLine, errorText, field, Fingerprint, knownText, Note, primary, quiet, secondary, SectionHead, Tabs } from "./ui";
 import { Button } from "@/components/ui/button";
 import { CapsLabel } from "@/components/ui/caps-label";
 
@@ -423,6 +423,19 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
   const current = devices.filter((d) => d.status.type !== "removed").sort((a, b) => rank(a) - rank(b));
   const removed = devices.filter((d) => d.status.type === "removed");
   const hostsNow = hostIds.length;
+  // The header's one sentence of counts, not a generic security line (§3).
+  const offlineNow = current.filter((d) => {
+    const v = view(d);
+    return v.host && v.status === "active" && v.presence === "offline";
+  }).length;
+  const needsNow = needs.entries.length;
+  const summary = [
+    t("{{n}} devices", { n: current.length }),
+    offlineNow > 0 ? t("{{n}} offline", { n: offlineNow }) : null,
+    needsNow > 0 ? t("{{n}} need you", { n: needsNow }) : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" · ");
   // No device that runs AI yet (just signed up): adding one is what comes next.
   const firstHost = hostsNow === 0;
   // The device that joined while the first-run card was up, as the page follows it (its name, whether it is up).
@@ -615,13 +628,15 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
   const alwaysConfirm = section.kind === "list" && viewerAdmin && upgraded && renewals?.view?.enabled ? <AlwaysConfirmSetting runner={renewals} account={account} /> : null;
   return (
     <>
-      <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-4 border-b border-border px-6 pt-8 pb-5 max-md:px-4 max-md:pt-6">
+      <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-4 px-6 pt-8 pb-2 max-md:px-4 max-md:pt-6">
         <div className="flex min-w-0 flex-col gap-1.5">
-          {/* The counts are the summary's, under it: the title names the page. */}
-          <h1 data-testid="devices-title" className="text-[32px] leading-[1.1] font-semibold tracking-[-0.03em] text-fg max-md:text-[26px]">
+          {/* Summary first: what the account has, before anything generic. */}
+          <h1 data-testid="devices-title" className="text-[32px] leading-[1.1] font-semibold tracking-[-0.03em] text-fg max-md:text-[28px]">
             {t("my devices")}
           </h1>
-          <p className="text-xs leading-5 text-muted">{t("Every device holds its own keys. Compare fingerprints when you add one.")}</p>
+          <p data-testid="devices-summary" className="text-[13px] leading-5 text-muted">
+            {summary}
+          </p>
         </div>
         {viewerAdmin && !adding && (
           // One primary action a view: while a rotation is due, that is it; while the first-run card shows, the card's.
@@ -637,9 +652,10 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
           </button>
         )}
       </div>
+      <div className="flex flex-col gap-8 pb-12">
       {section.kind === "add" && <AddChooser onPick={(kind) => setSection({ kind })} onCancel={() => setSection({ kind: "list" })} />}
       {section.kind === "addBrowser" && (
-        <section data-testid="add-browser-section" className="border-b border-border">
+        <section data-testid="add-browser-section">
           <AddHead title={t("add a browser or phone")} onBack={() => setSection({ kind: "add" })} />
           <div className="flex max-w-xl flex-col gap-3 px-6 py-5 max-md:px-4">
             <AddDevice account={account} link={link} onDone={() => setSection({ kind: "list" })} />
@@ -647,7 +663,7 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
         </section>
       )}
       {section.kind === "addComputer" && (
-        <section data-testid="add-computer-section" className="border-b border-border">
+        <section data-testid="add-computer-section">
           <AddHead title={t("add a device that runs AI")} onBack={() => setSection({ kind: "add" })} />
           {/* Two ways to add (§3.7): the device's own local settings first, a one-time code second. */}
           <AddComputer
@@ -662,20 +678,33 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
       )}
       {firstRun && <FirstHostCard onGuide={() => setSection({ kind: "addComputer" })} onCode={() => setSection({ kind: "addComputer", code: true })} pairWith={pairWith} />}
       {justJoined && (
-        <section data-testid="first-host-joined" className="border-b border-border">
+        <section data-testid="first-host-joined">
           <NewDeviceReady account={account} added={joinedInfo} machines={machines} onDone={() => setJoined(null)} />
         </section>
       )}
       <UsageSummary account={account} link={link} />
       {!noHostYet && thisDevice}
-      <section data-testid="devices-section" className="max-md:pb-2">
-        <div className="flex h-10 items-center gap-2 border-b border-border px-6 max-md:border-b-0 max-md:px-4">
-          <CapsLabel className="text-fg">{t("devices")}</CapsLabel>
-          <span className="font-mono text-2xs text-faint tabular-nums">{current.length}</span>
+      <section data-testid="devices-section" className="@container/devices">
+        <div className="px-6 max-md:px-4">
+          <SectionHead index="03" title={t("devices")}>
+            <span className="font-mono text-xs text-faint tabular-nums">{current.length}</span>
+          </SectionHead>
         </div>
-        <ul data-testid="device-list" className="max-md:flex max-md:flex-col max-md:gap-2 max-md:px-4">
-          {current.map(row)}
-        </ul>
+        {current.length > 0 ? (
+          <ul data-testid="device-list" className="mt-4 flex flex-col gap-2.5 px-6 max-md:px-4">
+            {current.map(row)}
+          </ul>
+        ) : (
+          <div data-testid="devices-empty" className="flex flex-col items-start gap-3 px-6 pt-4 max-md:px-4">
+            <p className="text-[13px] leading-5 text-muted">{t("no devices yet")}</p>
+            {viewerAdmin && !adding && (
+              <button type="button" data-testid="add-device-empty" className={secondary} onClick={() => setSection({ kind: "add" })}>
+                <Plus className="size-3.5" />
+                {t("add a device")}
+              </button>
+            )}
+          </div>
+        )}
       </section>
       {!noHostYet && alwaysConfirm}
       {section.kind === "list" && done && (
@@ -692,10 +721,9 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
         </div>
       )}
       {/* One device that runs AI: a second one puts both on one screen (put away with its ×). */}
-      {!adding && <AddDeviceHint variant="row" onAdd={() => setSection({ kind: "addComputer" })} className="max-md:mt-2 max-md:border-t" />}
+      {!adding && <AddDeviceHint variant="row" onAdd={() => setSection({ kind: "addComputer" })} className="max-md:mt-2" />}
       {needs.entries.length > 0 && (
         <NeedsYouLedger
-          className="border-t border-border max-md:mt-2"
           needs={needs}
           nameOf={(key) => shownName(key, statuses.get(key) ?? null) ?? t("device {{id}}", { id: shortDeviceId(key) })}
           devices
@@ -703,7 +731,7 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
           onOpen={(entry) => openAt(entry.ref.machine, sessionPath(entry.ref.source, entry.ref.id))}
         />
       )}
-      <div className="flex max-w-xl flex-col gap-3 px-6 py-6 max-md:px-4">
+      <div className="flex max-w-xl flex-col gap-3 px-6 max-md:px-4">
         {!noHostYet && rotateKeys}
         {viewerAdmin && chain && !chain.currentRecoveryKey && section.kind === "list" && (
           <Note tone="warn">
@@ -730,14 +758,16 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
         </MoreSettings>
       )}
       {removed.length > 0 && (
-        <details data-testid="removed-devices" className="group/removed border-t border-border">
-          <summary className="flex h-10 cursor-pointer list-none items-center gap-2 px-6 select-none hover:bg-hover max-md:px-4 [&::-webkit-details-marker]:hidden">
-            <ChevronRight aria-hidden="true" className="size-3 text-muted transition-transform group-open/removed:rotate-90" />
-            <CapsLabel>{t("removed devices ({{n}})", { n: removed.length })}</CapsLabel>
+        <details data-testid="removed-devices" className="group/removed">
+          {/* A folded aside, not a section: 13px, muted, with its count. */}
+          <summary className="flex h-10 cursor-pointer list-none items-center gap-2 px-6 text-muted select-none hover:text-fg max-md:px-4 [&::-webkit-details-marker]:hidden">
+            <ChevronRight aria-hidden="true" className="size-3 transition-transform group-open/removed:rotate-90" />
+            <span className="text-[13px] leading-5 font-medium">{t("removed devices ({{n}})", { n: removed.length })}</span>
           </summary>
-          <ul className="border-t border-border max-md:flex max-md:flex-col max-md:gap-2 max-md:border-t-0 max-md:px-4 max-md:pb-4">{removed.map(row)}</ul>
+          <ul className="mt-2 flex flex-col gap-2.5 px-6 max-md:px-4">{removed.map(row)}</ul>
         </details>
       )}
+      </div>
     </>
   );
 }
@@ -746,11 +776,11 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
 function AddHead({ title, onBack }: { title: string; onBack: () => void }) {
   const { t } = useTranslation();
   return (
-    <div className="flex h-10 items-center gap-3 border-b border-border px-6 max-md:px-4">
+    <div className="flex h-12 items-center gap-3 border-b border-border px-6 max-md:px-4">
       <button type="button" onClick={onBack} title={t("back")} aria-label={t("back")} className="flex size-6 items-center justify-center text-muted hover:bg-hover hover:text-fg pointer-coarse:size-9">
         <ArrowLeft className="size-3.5" />
       </button>
-      <CapsLabel className="text-fg">{title}</CapsLabel>
+      <h2 className="text-base leading-6 font-semibold text-fg">{title}</h2>
     </div>
   );
 }
@@ -763,9 +793,9 @@ export function AddChooser({ onPick, onCancel }: { onPick: (kind: "addBrowser" |
     { kind: "addComputer" as const, testId: "add-computer", Icon: Server, title: t("a device that runs AI"), body: t("The device your AI CLIs run on, with Droppen installed: your sessions run there, and you open it from here.") },
   ];
   return (
-    <section data-testid="add-chooser" className="border-b border-border">
-      <div className="flex h-10 items-center justify-between gap-3 border-b border-border px-6 max-md:px-4">
-        <CapsLabel className="text-fg">{t("add a device")}</CapsLabel>
+    <section data-testid="add-chooser">
+      <div className="flex h-12 items-center justify-between gap-3 border-b border-border px-6 max-md:px-4">
+        <h2 className="text-base leading-6 font-semibold text-fg">{t("add a device")}</h2>
         <button type="button" className={cn(quiet, "h-7 px-2")} onClick={onCancel}>
           {t("cancel")}
         </button>
@@ -818,22 +848,25 @@ export function ThisDeviceSection({ name, relays }: { name: string | null; relay
     if (asked?.anchor === "relays") setRelaysOpen(true);
   }, [asked]);
   return (
-    <section data-testid="this-device" className="border-b border-border">
-      <div className="flex h-10 items-center gap-2.5 border-b border-border px-6 max-md:px-4">
-        <CapsLabel className="text-fg">{t("This device")}</CapsLabel>
-        {name && <span className="min-w-0 truncate font-mono text-2xs text-muted">{name}</span>}
+    <section data-testid="this-device">
+      <div className="px-6 max-md:px-4">
+        <SectionHead index="02" title={t("This device")}>
+          {name && <span className="min-w-0 truncate font-mono text-xs text-muted">{name}</span>}
+        </SectionHead>
       </div>
-      <DirectConnectionSetting />
-      {relays && (
-        <details open={relaysOpen} onToggle={(e) => setRelaysOpen(e.currentTarget.open)} className="group/relays border-t border-border">
-          <summary className="flex min-h-10 cursor-pointer list-none items-center gap-2 px-6 py-2 select-none hover:bg-hover max-md:px-4 [&::-webkit-details-marker]:hidden">
-            <ChevronRight aria-hidden="true" className="size-3 shrink-0 text-muted transition-transform group-open/relays:rotate-90" />
-            <span className="text-xs font-medium text-fg">{t("Relays")}</span>
-            <span className="min-w-0 truncate text-xs text-muted">{t("what carries a connection that is not direct")}</span>
-          </summary>
-          {relays}
-        </details>
-      )}
+      <div className="flex flex-col gap-1 pt-2">
+        <DirectConnectionSetting />
+        {relays && (
+          <details open={relaysOpen} onToggle={(e) => setRelaysOpen(e.currentTarget.open)} className="group/relays">
+            <summary className="flex min-h-10 cursor-pointer list-none items-center gap-2 px-6 py-2 select-none hover:bg-hover max-md:px-4 [&::-webkit-details-marker]:hidden">
+              <ChevronRight aria-hidden="true" className="size-3 shrink-0 text-muted transition-transform group-open/relays:rotate-90" />
+              <span className="text-[13px] font-medium text-fg">{t("Relays")}</span>
+              <span className="min-w-0 truncate text-xs text-muted">{t("what carries a connection that is not direct")}</span>
+            </summary>
+            {relays}
+          </details>
+        )}
+      </div>
     </section>
   );
 }
@@ -852,11 +885,11 @@ export function MoreSettings({ children }: { children: ReactNode }) {
     if (asked?.anchor === "relays") setOpen(true);
   }, [asked]);
   return (
-    <details data-testid="more-settings" open={open} onToggle={(e) => setOpen(e.currentTarget.open)} className="group/more border-t border-border">
-      <summary className="flex h-10 cursor-pointer list-none items-center gap-2 border-b border-transparent px-6 select-none group-open/more:border-border hover:bg-hover max-md:px-4 [&::-webkit-details-marker]:hidden">
-        <ChevronRight aria-hidden="true" className="size-3 text-muted transition-transform group-open/more:rotate-90" />
-        <CapsLabel>{t("more settings")}</CapsLabel>
-        <span className="min-w-0 truncate text-xs text-muted">{t("connections, relays and keys")}</span>
+    <details data-testid="more-settings" open={open} onToggle={(e) => setOpen(e.currentTarget.open)} className="group/more">
+      <summary className="flex h-10 cursor-pointer list-none items-center gap-2 px-6 text-muted select-none hover:text-fg max-md:px-4 [&::-webkit-details-marker]:hidden">
+        <ChevronRight aria-hidden="true" className="size-3 transition-transform group-open/more:rotate-90" />
+        <span className="text-[13px] leading-5 font-medium">{t("more settings")}</span>
+        <span className="min-w-0 truncate text-xs">{t("connections, relays and keys")}</span>
       </summary>
       {children}
     </details>
@@ -1836,7 +1869,7 @@ function RotateKeys({ account, link, due }: { account: CloudAccount; link: HubLi
     );
   }
   return (
-    <div data-testid="rotate-keys" className="flex flex-col gap-2 border-t border-border pt-4">
+    <div data-testid="rotate-keys" className="flex flex-col gap-2">
       <CapsLabel>{t("keys")}</CapsLabel>
       <p className="text-xs leading-5 text-muted">
         {t("Rotate the keys if a removal did not finish, or you think a key got out: every device gets a new user key and every device that runs AI a new content key. Old history stays readable here.")}
