@@ -58,7 +58,13 @@ impl Bucket {
         self.tokens -= cost;
     }
 
+    /// Refill up to `now`. Monotonic: a `now` older than the last refill
+    /// (taken by a caller before another one refilled — a sweep on its way
+    /// through its tables, a request that waited for a lock) adds nothing
+    /// and leaves the clock where it is, so no stretch of time is ever
+    /// refilled twice.
     fn refill(&mut self, now: Instant) {
+        let now = self.last.max(now);
         let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
         self.tokens = (self.tokens + elapsed * self.rate).min(self.burst);
         self.last = now;
@@ -129,7 +135,20 @@ impl ConnLimiter {
 /// The most keys (addresses, accounts, devices) one table tracks.
 pub const MAX_KEYS: usize = 50_000;
 
-/// "n per period" for every window, per key.
+/// The longest a table holds a key after its last request: a day, as
+/// droppen.app/privacy says ("count requests per address and per network
+/// in memory, for a day at most"). No window may be longer ([`Keyed::new`]).
+pub const FORGET_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How often a server forgets what it no longer needs ([`Keyed::forget_old`]).
+/// A key is forgotten at the last sweep before [`FORGET_AFTER`] is up, so
+/// none outlives it.
+pub const SWEEP_EVERY: Duration = Duration::from_secs(60);
+
+/// "n per period" for every window, per key. Memory only, and no key stays
+/// longer than it counts: [`Keyed::forget_old`], called every
+/// [`SWEEP_EVERY`], forgets each one whose windows have all refilled since
+/// its last request, and every one [`FORGET_AFTER`] after it at the latest.
 pub struct Keyed<K> {
     windows: Vec<(u32, Duration)>,
     max: usize,
@@ -141,7 +160,14 @@ impl<K: Hash + Eq + Clone> Keyed<K> {
         Self::bounded(windows, MAX_KEYS)
     }
 
+    /// At most `max` keys. A window longer than [`FORGET_AFTER`] is refused:
+    /// a key could not be forgotten when the privacy notice says without
+    /// loosening it.
     pub fn bounded(windows: &[(u32, Duration)], max: usize) -> Self {
+        assert!(
+            windows.iter().all(|(_, period)| *period <= FORGET_AFTER),
+            "a limit's window is longer than a key may be held ({FORGET_AFTER:?}): {windows:?}"
+        );
         Self {
             windows: windows.to_vec(),
             max: max.max(1),
@@ -188,6 +214,28 @@ impl<K: Hash + Eq + Clone> Keyed<K> {
             Some(wait) => Err(wait),
             None => Ok(()),
         }
+    }
+
+    /// Forget every key there is nothing more to count against — its every
+    /// window refilled since its last request, so a new key would answer
+    /// the same — and every key whose last request is [`FORGET_AFTER`] old
+    /// by the next sweep ([`SWEEP_EVERY`]), whatever its windows (one in
+    /// debt, after a request that cost more than its window holds): how
+    /// many went. Called every [`SWEEP_EVERY`], no key outlives
+    /// [`FORGET_AFTER`]; a key still counting (not refilled, and asked
+    /// within the day) is never forgotten, so no limit is reset early.
+    pub fn forget_old(&self, now: Instant) -> usize {
+        let mut table = self.table.lock().expect("rate table");
+        let before = table.len();
+        table.retain(|_, (buckets, last)| {
+            // Asked after the sweep's clock: counting, left as it is.
+            if *last > now {
+                return true;
+            }
+            let old = now.saturating_duration_since(*last) + SWEEP_EVERY >= FORGET_AFTER;
+            !old && !buckets.iter_mut().all(|b| b.full(now))
+        });
+        before - table.len()
     }
 
     /// How many keys the table holds (for tests and the memory bound).
@@ -256,6 +304,30 @@ mod tests {
         assert_eq!(c.try_take(201, t0 + w), None);
     }
 
+    /// An older `now` never moves a bucket's clock back: the time between it
+    /// and the last refill is refilled once, not again (#121 review).
+    #[test]
+    fn an_older_now_never_refills_twice() {
+        let t = Instant::now();
+        let mut b = Bucket::window(1, Duration::from_secs(20), t);
+        assert_eq!(b.try_take(1, t + Duration::from_secs(10)), None, "spent at 10 s");
+        // A caller with a clock from before (5 s): nothing added, and the
+        // bucket's clock stays at 10 s…
+        assert!(!b.full(t + Duration::from_secs(5)));
+        assert!(b.check(1.0, t + Duration::from_secs(5)).is_some());
+        // …so 15 s after the spend it has 0.75 of a token, not 1.0 (as it
+        // would, refilled from 5 s).
+        let wait = b.check(1.0, t + Duration::from_secs(25)).expect("not yet");
+        assert!((wait.as_secs_f64() - 5.0).abs() < 1e-6, "{wait:?}");
+        assert!(b.check(1.0, t + Duration::from_secs(31)).is_none(), "20 s after the spend");
+        // The same through a table: a sweep with an older clock, then a request.
+        let k: Keyed<u32> = Keyed::new(&[(1, Duration::from_secs(20))]);
+        k.allow(&1, t + Duration::from_secs(10)).unwrap();
+        assert_eq!(k.forget_old(t), 0, "still counting");
+        assert!(k.allow(&1, t + Duration::from_secs(25)).is_err(), "refilled once, from 10 s");
+        assert!(k.allow(&1, t + Duration::from_secs(31)).is_ok());
+    }
+
     #[test]
     fn a_bucket_allows_its_burst_then_paces_at_its_rate() {
         let t0 = Instant::now();
@@ -268,6 +340,55 @@ mod tests {
         // Refill never exceeds the burst.
         assert_eq!(b.take(200, t0 + Duration::from_secs(100)), Duration::ZERO);
         assert!(b.take(1, t0 + Duration::from_secs(100)) > Duration::ZERO);
+    }
+
+    #[test]
+    fn a_key_goes_once_its_windows_refill_and_a_day_after_its_last_request_at_most() {
+        let t = Instant::now();
+        let minute = Duration::from_secs(60);
+        let hour = 60 * minute;
+        // A minute's window: gone once it refilled, not before.
+        let k: Keyed<u32> = Keyed::new(&[(1, minute)]);
+        k.allow(&1, t).unwrap();
+        assert_eq!(k.forget_old(t + Duration::from_secs(30)), 0, "still counting");
+        assert!(k.allow(&1, t + Duration::from_secs(30)).is_err(), "and still limited");
+        assert_eq!(k.forget_old(t + Duration::from_secs(90)), 1, "refilled: nothing more to count");
+        assert!(k.is_empty());
+        // Two windows (the relay's upgrades), a burst spent: gone once both refilled.
+        let k: Keyed<u32> = Keyed::new(&[(60, minute), (20, Duration::from_secs(20))]);
+        for _ in 0..20 {
+            k.allow(&1, t).unwrap();
+        }
+        assert!(k.allow(&1, t).is_err(), "the burst is spent");
+        assert_eq!(k.forget_old(t + Duration::from_secs(10)), 0, "still counting");
+        assert_eq!(k.forget_old(t + Duration::from_secs(21)), 1, "both refilled");
+        // A day's window, partly spent: gone once refilled, not before.
+        let k: Keyed<u32> = Keyed::new(&[(5, hour), (10, FORGET_AFTER)]);
+        for _ in 0..6 {
+            k.allow(&1, t).unwrap_or(());
+        }
+        assert_eq!(k.forget_old(t + 11 * hour), 0, "five of ten spent: not refilled 11 hours on");
+        assert_eq!(k.forget_old(t + 12 * hour + Duration::from_secs(1)), 1, "refilled");
+        // In debt, a key would take two days to refill: it goes by a day all
+        // the same, at the last sweep before the day is up.
+        let k: Keyed<u32> = Keyed::new(&[(1, FORGET_AFTER)]);
+        k.allow_n(&1, 2.0, t).unwrap();
+        assert_eq!(k.forget_old(t + FORGET_AFTER - SWEEP_EVERY - Duration::from_secs(1)), 0);
+        assert_eq!(k.forget_old(t + FORGET_AFTER - SWEEP_EVERY), 1, "a day after its last request, at most");
+        // A request since keeps a key; the rest of the table goes.
+        let k: Keyed<u32> = Keyed::new(&[(1, FORGET_AFTER)]);
+        for i in 0..100 {
+            k.allow(&i, t).unwrap();
+        }
+        let _ = k.allow(&7, t + 12 * hour);
+        assert_eq!(k.forget_old(t + FORGET_AFTER - SWEEP_EVERY), 99, "but the one asked since");
+        assert_eq!(k.len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "longer than a key may be held")]
+    fn no_window_is_longer_than_a_key_is_held() {
+        let _: Keyed<u32> = Keyed::new(&[(7, FORGET_AFTER + Duration::from_secs(1))]);
     }
 
     #[test]
