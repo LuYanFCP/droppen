@@ -1126,7 +1126,7 @@ const ComposerSelectView = memo(function ComposerSelectView({
       </SelectTrigger>
       {/* Anchored to the chip like every select: a chip at the bottom of the
           composer opens upward, over the message box. */}
-      <SelectContent>
+      <SelectContent variant={ghost ? "chip" : "field"}>
         {items.map((o) => (
           <SelectItem key={o.value} value={o.value}>
             {o.label}

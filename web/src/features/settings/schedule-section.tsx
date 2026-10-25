@@ -33,6 +33,12 @@ import { cn } from "@/lib/cn";
 import { formatUntil, shortenHome } from "@/lib/format";
 import { isImeKeydown } from "@/lib/ime";
 import { Sheet } from "@/components/sheet";
+import {
+  SETTINGS_ACTION,
+  SETTINGS_ACTION_PRIMARY,
+  SETTINGS_COLUMN,
+  SETTINGS_FIELD,
+} from "@/features/settings/layout";
 import { useApi, useMachine } from "@/lib/machines/context";
 import { mq } from "@/lib/machines/query";
 import type { MachineKey } from "@/lib/machines/key";
@@ -43,8 +49,7 @@ type Source = components["schemas"]["Source"];
 
 export const scheduledTasksKey = (machine: MachineKey) => mq(machine, "scheduled-tasks");
 
-const field =
-  "h-6.5 w-full rounded border border-border bg-bg px-2 font-mono text-2xs text-fg placeholder:text-faint focus:border-fg focus:outline-none";
+const field = SETTINGS_FIELD;
 
 /** Sunday first, because `Date.getDay` and cron both number it zero. */
 const WEEKDAY_KEYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -375,9 +380,9 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
   };
 
   return (
-    <div className="mt-2 flex w-full max-w-xl flex-col gap-2 rounded border border-border bg-panel p-2">
+    <div className={cn(SETTINGS_COLUMN, "mt-2 flex w-full flex-col gap-2 border border-border bg-panel p-2")}>
       <Tabs value={source} onValueChange={(v) => switchSource(v as Source)}>
-        <TabsList className="w-40">
+        <TabsList className="w-full">
           <TabsTab value="claude">claude</TabsTab>
           <TabsTab value="codex">codex</TabsTab>
         </TabsList>
@@ -400,14 +405,14 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
       )}
 
       <div className="flex flex-col gap-1">
-        <span className="text-2xs text-faint">{t("schedule")}</span>
+        <span className="text-xs text-muted">{t("schedule")}</span>
         {advanced ? (
           <input
             value={rawExpr}
             onChange={(e) => setRawExpr(e.target.value)}
             spellCheck={false}
             placeholder="0 9 * * *"
-            className={field}
+            className={cn(field, "font-mono")}
           />
         ) : (
           <div className="flex flex-wrap items-center gap-1.5">
@@ -445,7 +450,7 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
                   onChange={(e) => setPreset({ ...preset, n: clampNumber(e.target.value, 1, 23, 1) })}
                   className={cn(field, "w-16")}
                 />
-                <span className="font-mono text-2xs text-faint">{t("hours, at minute")}</span>
+                <span className="text-xs text-muted">{t("hours, at minute")}</span>
                 <input
                   type="number"
                   min={0}
@@ -472,7 +477,7 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
         )}
         <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
           <span className="font-mono text-2xs text-muted">{expr}</span>
-          <span className="text-2xs text-faint">
+          <span className="text-xs text-muted">
             <ScheduleSummary expr={expr} />
           </span>
           <button
@@ -483,7 +488,7 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
               if (!advanced) setRawExpr(expr);
               setAdvanced(!advanced);
             }}
-            className="ml-auto rounded px-1.5 py-0.5 font-mono text-2xs text-accent hover:bg-accent/15"
+            className="ml-auto rounded px-1.5 py-0.5 text-xs font-medium text-muted hover:bg-hover hover:text-fg"
           >
             {advanced ? t("use the presets") : t("advanced")}
           </button>
@@ -500,7 +505,7 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
           </span>
         )}
         {upcoming.length > 0 && (
-          <span className="font-mono text-2xs text-faint">
+          <span className="font-mono text-xs text-muted">
             {t("next: {{times}}", {
               // The weekday earns its place here: "Tue Sep 8, 09:00" is the
               // reading that catches a `* * * * 2` meant as `* * * * 1`, which
@@ -519,7 +524,7 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
             })}
           </span>
         )}
-        <span className="text-2xs text-faint">
+        <span className="text-xs text-muted">
           {t(
             "The schedule is read in the server's time zone. The times above are drawn in this browser's ({{zone}}), so they only match if the server keeps the same clock.",
             { zone: Intl.DateTimeFormat().resolvedOptions().timeZone },
@@ -528,7 +533,7 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
       </div>
 
       <div className="flex flex-col gap-1">
-        <span className="text-2xs text-faint">{t("working directory")}</span>
+        <span className="text-xs text-muted">{t("working directory")}</span>
         <div className="flex items-center gap-1">
           <div className="min-w-0 flex-1">
             <Combobox
@@ -544,7 +549,7 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
             onClick={() => setBrowsing(!browsing)}
             className={cn(
               "flex size-6.5 shrink-0 items-center justify-center rounded border border-border hover:bg-hover",
-              browsing ? "bg-accent/15 text-accent" : "bg-raised text-muted",
+              browsing ? "bg-hover text-fg" : "bg-bg text-muted",
             )}
           >
             <FolderSearch className="size-3.5" />
@@ -561,8 +566,8 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
                 className={cn(
                   "max-w-full truncate rounded border px-1.5 py-0.5 font-mono text-2xs",
                   path === cwd.trim()
-                    ? "border-accent/60 bg-accent/10 text-accent"
-                    : "border-border bg-raised text-muted hover:border-accent/40 hover:bg-hover hover:text-fg",
+                    ? "border-fg bg-hover text-fg"
+                    : "border-border bg-bg text-muted hover:bg-hover hover:text-fg",
                 )}
               >
                 {shortenHome(path, homeDir)}
@@ -582,19 +587,19 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
       </div>
 
       <label className="flex flex-col gap-1">
-        <span className="text-2xs text-faint">{t("prompt")}</span>
+        <span className="text-xs text-muted">{t("prompt")}</span>
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           rows={4}
           placeholder={t("what should the agent do each time?")}
-          className="w-full resize-y rounded border border-border bg-bg px-2 py-1.5 text-xs text-fg placeholder:text-faint focus:border-fg focus:outline-none"
+          className="w-full resize-y border border-border bg-bg px-3 py-2 text-[13px] leading-[18px] text-fg placeholder:text-faint hover:border-border-strong focus:border-fg"
         />
       </label>
 
       <div className="flex flex-wrap items-end gap-2">
         <label className="flex min-w-32 flex-1 flex-col gap-1">
-          <span className="text-2xs text-faint">{t("model")}</span>
+          <span className="text-xs text-muted">{t("model")}</span>
           <ModelSelect
             models={models}
             value={model}
@@ -606,7 +611,7 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
         </label>
         {efforts.length > 0 && (
           <label className="flex min-w-24 flex-1 flex-col gap-1">
-            <span className="text-2xs text-faint">{t("effort")}</span>
+            <span className="text-xs text-muted">{t("effort")}</span>
             <SelectField
               value={effortToSend}
               onValueChange={setEffort}
@@ -615,7 +620,7 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
           </label>
         )}
         <label className="flex min-w-32 flex-1 flex-col gap-1">
-          <span className="text-2xs text-faint">{t("permission")}</span>
+          <span className="text-xs text-muted">{t("permission")}</span>
           <SelectField
             value={permission}
             onValueChange={setPermission}
@@ -631,7 +636,7 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
           onChange={(e) => setSkipIfBusy(e.target.checked)}
           className="mt-0.5 size-3 accent-accent"
         />
-        <span className="text-2xs text-faint">
+        <span className="text-xs text-muted">
           {t(
             "Skip a run while the session the previous one started is still working, instead of stacking a second session on top of it.",
           )}
@@ -639,7 +644,7 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
       </label>
 
       <label className="flex flex-col gap-1">
-        <span className="text-2xs text-faint">{t("name (optional)")}</span>
+        <span className="text-xs text-muted">{t("name (optional)")}</span>
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
@@ -655,7 +660,7 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
           type="button"
           disabled={!ready}
           onClick={() => save.mutate()}
-          data-variant="primary" className="flex h-7 items-center justify-center gap-1.5 bg-fg px-3 text-xs font-medium text-bg hover:bg-fg/85 disabled:opacity-40"
+          data-variant="primary" className={SETTINGS_ACTION_PRIMARY}
         >
           {save.isPending && <Loader2 className="size-3 animate-spin" />}
           {initial ? t("save") : t("add task")}
@@ -663,7 +668,7 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
         <button
           type="button"
           onClick={onDone}
-          className="flex h-7 items-center justify-center rounded border border-border px-3 font-mono text-2xs text-muted hover:bg-hover hover:text-fg"
+          className={SETTINGS_ACTION}
         >
           {t("cancel")}
         </button>
@@ -816,13 +821,13 @@ export function ScheduleSection() {
 
   return (
     <Sheet className="p-3">
-      <p className="max-w-2xl text-2xs text-faint">
+      <p className={cn(SETTINGS_COLUMN, "text-xs leading-[18px] text-muted")}>
         {t(
           "Each task starts a new session on its own schedule — there is no injecting a message into a session you already have open. The expression is read in the server's time zone, not this browser's, and a run whose time passed while the server was down is not made up afterwards: it simply waits for the next one.",
         )}
       </p>
 
-      <div className="mt-3 max-w-3xl">
+      <div className={cn(SETTINGS_COLUMN, "mt-3")}>
         {isPending && <Spinner />}
         {data && (
           <>
@@ -830,20 +835,20 @@ export function ScheduleSection() {
               <TaskRow key={task.id} task={task} />
             ))}
             {tasks.length === 0 && (
-              <p className="py-2 font-mono text-2xs text-faint">{t("no scheduled tasks yet")}</p>
+              <p className="py-2 text-xs text-muted">{t("no scheduled tasks yet")}</p>
             )}
           </>
         )}
       </div>
 
-      <div className="mt-3 max-w-3xl">
+      <div className={cn(SETTINGS_COLUMN, "mt-3")}>
         {adding ? (
           <TaskForm onDone={() => setAdding(false)} />
         ) : (
           <button
             type="button"
             onClick={() => setAdding(true)}
-            data-variant="primary" className="flex h-7 items-center gap-1.5 bg-fg px-3 text-xs font-medium text-bg hover:bg-fg/85"
+            data-variant="primary" className={SETTINGS_ACTION_PRIMARY}
           >
             <Plus className="size-3" />
             {t("add scheduled task")}

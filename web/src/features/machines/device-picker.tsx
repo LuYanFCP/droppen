@@ -133,7 +133,9 @@ function DeviceRow({
       disabled={disabled}
       onClick={onSelect}
       className={cn(
-        "flex h-7 w-full items-center gap-2 px-2 text-left font-mono text-2xs text-fg hover:bg-hover disabled:opacity-40 disabled:hover:bg-transparent",
+        // The select menu's rows: 32px (44px under a finger), 12px in, 13px
+        // sans. The device's state is the only colour in the row.
+        "flex min-h-8 w-full items-center gap-2 px-3 py-1 text-left text-[13px] text-fg hover:bg-hover pointer-coarse:min-h-11 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent",
       )}
     >
       <DeviceDot info={info} />
@@ -205,17 +207,25 @@ export function DevicePicker({
         title={t("device")}
         aria-label={t("device")}
         className={cn(
+          // The same field as every other select (32px, 12px sides, 13px
+          // sans; 40px on a phone), not a second 22px language. The composer's
+          // ghost chip keeps its 24px mono form.
           ghost
-            ? "flex h-6 max-w-full shrink-0 items-center gap-1.5 rounded pr-1 pl-1.5 font-mono text-2xs hover:bg-hover data-[popup-open]:bg-hover"
-            : "flex h-5.5 max-w-full items-center gap-1.5 rounded border border-border bg-raised px-1.5 font-mono text-2xs focus:border-accent/60",
-          "text-muted hover:text-fg focus:outline-none disabled:opacity-40",
+            ? "group flex h-6 max-w-full shrink-0 items-center gap-1.5 pr-1 pl-1.5 font-mono text-2xs text-muted hover:bg-hover hover:text-fg data-[popup-open]:bg-hover data-[popup-open]:text-fg"
+            : "group flex h-8 max-w-full items-center justify-between gap-2 border border-border bg-bg px-3 text-[13px] text-fg transition-colors hover:border-border-strong data-[popup-open]:border-fg max-md:h-10",
+          "disabled:cursor-default disabled:border-border disabled:bg-raised disabled:text-faint",
           className,
         )}
       >
         <Chosen machine={value} />
-        <ChevronDown className="size-2.5 shrink-0 text-faint" />
+        <ChevronDown className="size-3.5 shrink-0 text-faint transition-transform duration-150 ease-out group-data-[popup-open]:rotate-180" />
       </PopoverTrigger>
-      <PopoverContent side="bottom" className="max-h-[50vh] w-80 max-w-[calc(100vw-2rem)] overflow-y-auto p-1">
+      {/* The select's list: 4px off the trigger, `border-strong`, no shadow,
+          6px above/below the rows, 32px rows (44px touch). */}
+      <PopoverContent
+        side="bottom"
+        className="max-h-[min(50vh,20rem)] min-w-[max(var(--anchor-width),10rem)] max-w-[min(100vw-2rem,20rem)] overflow-y-auto p-0 py-1.5"
+      >
         <div data-testid="device-picker-list" className="flex flex-col">
           {machines.map((machine) => (
             <DeviceRow

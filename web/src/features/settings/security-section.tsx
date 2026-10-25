@@ -14,6 +14,13 @@ import { droppenCommand } from "@/lib/droppen-command";
 import { cn } from "@/lib/cn";
 import { disablePushOnSignOut } from "@/lib/push";
 import { Sheet } from "@/components/sheet";
+import {
+  SECTION_TITLE,
+  SETTINGS_ACTION,
+  SETTINGS_ACTION_PRIMARY,
+  SETTINGS_COLUMN,
+  SETTINGS_FIELD,
+} from "@/features/settings/layout";
 import { useApi, useMachine } from "@/lib/machines/context";
 import type { MachineKey } from "@/lib/machines/key";
 import { mq } from "@/lib/machines/query";
@@ -23,10 +30,9 @@ type AuthSession = components["schemas"]["AuthSession"];
 const authStatusKey = (machine: MachineKey) => mq(machine, "auth-status");
 const authSessionsKey = (machine: MachineKey) => mq(machine, "auth-sessions");
 
-const field =
-  "h-6.5 w-full rounded border border-border bg-bg px-2 font-mono text-2xs text-fg placeholder:text-faint focus:border-fg focus:outline-none";
+const field = SETTINGS_FIELD;
 
-const sectionTitle = "label-caps -mx-3 -mt-3 mb-3 flex h-9 items-center border-b border-border px-3 text-2xs text-fg";
+const sectionTitle = SECTION_TITLE;
 
 /**
  * This tab's `GET /api/auth/status`: the answer, or the failure as an error —
@@ -76,16 +82,16 @@ function AccountSection({ user }: { user: string }) {
   return (
     <section className="border-b border-border p-3">
       <h2 data-label="" className={sectionTitle}>{t("signed in")}</h2>
-      <div className="flex max-w-xl items-center justify-between gap-4">
+      <div className={cn(SETTINGS_COLUMN, "flex items-center justify-between gap-4")}>
         <div className="min-w-0">
           <div className="font-mono text-xs">{user}</div>
-          <div className="text-2xs text-faint">{t("this browser's account")}</div>
+          <div className="text-xs text-muted">{t("this browser's account")}</div>
         </div>
         <button
           type="button"
           disabled={busy}
           onClick={() => void signOut()}
-          className="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded border border-border px-3 font-mono text-2xs text-muted hover:bg-hover hover:text-fg disabled:opacity-40"
+          className={SETTINGS_ACTION}
         >
           <LogOut className="size-3" />
           {t("sign out")}
@@ -128,9 +134,9 @@ function PasswordSection() {
   return (
     <section className="border-b border-border p-3">
       <h2 data-label="" className={sectionTitle}>{t("password")}</h2>
-      <div className="flex max-w-xs flex-col gap-2">
+      <div className={cn(SETTINGS_COLUMN, "flex flex-col gap-2")}>
         <label className="flex flex-col gap-1">
-          <span className="text-2xs text-faint">{t("current password")}</span>
+          <span className="text-xs text-muted">{t("current password")}</span>
           <input
             type="password"
             autoComplete="current-password"
@@ -140,7 +146,7 @@ function PasswordSection() {
           />
         </label>
         <label className="flex flex-col gap-1">
-          <span className="text-2xs text-faint">{t("new password")}</span>
+          <span className="text-xs text-muted">{t("new password")}</span>
           <input
             type="password"
             autoComplete="new-password"
@@ -150,7 +156,7 @@ function PasswordSection() {
           />
         </label>
         <label className="flex flex-col gap-1">
-          <span className="text-2xs text-faint">{t("confirm new password")}</span>
+          <span className="text-xs text-muted">{t("confirm new password")}</span>
           <input
             type="password"
             autoComplete="new-password"
@@ -164,7 +170,7 @@ function PasswordSection() {
             type="button"
             disabled={!ready}
             onClick={() => change.mutate()}
-            data-variant="primary" className="flex h-7 items-center justify-center bg-fg px-3 text-xs font-medium text-bg hover:bg-fg/85 disabled:opacity-40"
+            data-variant="primary" className={SETTINGS_ACTION_PRIMARY}
           >
             {change.isPending ? t("saving…") : t("change password")}
           </button>
@@ -178,7 +184,7 @@ function PasswordSection() {
             {refusal(change.error, t("that is not the current password"))}
           </div>
         )}
-        <p className="text-2xs text-faint">
+        <p className="text-xs leading-[18px] text-muted">
           {t("Changing it signs out every other device, but not this one.")}
         </p>
       </div>
@@ -254,14 +260,14 @@ function SessionsSection() {
 
   return (
     <section className="@container/security p-3">
-      <div className="mb-2 flex max-w-2xl items-center justify-between gap-4">
+      <div className={cn(SETTINGS_COLUMN, "mb-2 flex items-center justify-between gap-4")}>
         <h2 data-label="" className={sectionTitle + " mb-0"}>{t("signed-in devices")}</h2>
         {others.length > 0 && (
           <button
             type="button"
             disabled={revoke.isPending}
             onClick={() => revoke.mutate(others.map((s) => s.id))}
-            className="flex h-6 items-center justify-center rounded border border-border px-2 font-mono text-2xs text-muted hover:bg-hover hover:text-fg disabled:opacity-40"
+            className={SETTINGS_ACTION}
           >
             {t("sign out everywhere else")}
           </button>
@@ -269,10 +275,10 @@ function SessionsSection() {
       </div>
       {isPending && <Spinner />}
       {data && data.length === 0 && (
-        <div className="font-mono text-2xs text-faint">{t("no other logins")}</div>
+        <div className="text-xs text-muted">{t("no other logins")}</div>
       )}
       {data && data.length > 0 && (
-        <table className="block w-full max-w-2xl @[36rem]/security:table">
+        <table className={cn(SETTINGS_COLUMN, "block @[36rem]/security:table")}>
           <tbody className="block @[36rem]/security:table-row-group">
             {data.map((session) => (
               <SessionRow
@@ -341,7 +347,7 @@ export function SecuritySection({ embedded = false }: { embedded?: boolean } = {
     return (
       <section className="p-3" data-testid="security-status-failed">
         <h2 data-label="" className={sectionTitle}>{t("login")}</h2>
-        <div data-signal="failed" className="max-w-xl font-mono text-2xs text-danger">
+        <div data-signal="failed" className={cn(SETTINGS_COLUMN, "font-mono text-2xs text-danger")}>
           {t("Could not ask this device's server about its login.")} {error ? refusal(error, "") : null}
         </div>
       </section>
@@ -352,7 +358,7 @@ export function SecuritySection({ embedded = false }: { embedded?: boolean } = {
     return (
       <section className="p-3" data-testid="security-auth-off">
         <h2 data-label="" className={sectionTitle}>{t("login")}</h2>
-        <div className="max-w-xl text-2xs text-faint">
+        <div className={cn(SETTINGS_COLUMN, "text-xs text-muted")}>
           <div className="mb-1 text-xs text-fg">{t("switched off")}</div>
           {t(
             "Local login is switched off on this device (auth.enabled = false), so its page answers anyone who can reach it. To require a login, remove this setting from the server's configuration and restart the server:",
@@ -374,7 +380,7 @@ export function SecuritySection({ embedded = false }: { embedded?: boolean } = {
     return (
       <section className="p-3" data-testid="security-local-owner">
         <h2 data-label="" className={sectionTitle}>{t("login")}</h2>
-        <div className="max-w-xl text-2xs text-faint">
+        <div className={cn(SETTINGS_COLUMN, "text-xs text-muted")}>
           <div className="mb-1 text-xs text-fg">{t("no account yet")}</div>
           <p className="mb-3">{t(OWNER_EXPLANATION)}</p>
           <FirstAccountForm withCode={false} size="settings" />
@@ -394,7 +400,7 @@ export function SecuritySection({ embedded = false }: { embedded?: boolean } = {
       <Page>
         <section className="border-b border-border p-3" data-testid="security-desktop-app">
           <h2 data-label="" className={sectionTitle}>{t("signed in")}</h2>
-          <div className="max-w-xl text-2xs text-faint">{t("The Droppen app signs in for you on this device.")}</div>
+          <div className={cn(SETTINGS_COLUMN, "text-xs text-muted")}>{t("The Droppen app signs in for you on this device.")}</div>
         </section>
         <SessionsSection />
       </Page>

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { components } from "@/api/schema";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { SETTINGS_ACTION, SETTINGS_ACTION_PRIMARY, SETTINGS_FIELD } from "@/features/settings/layout";
 import { EnvBlockField } from "@/features/accounts/env-block-field";
 import { parseEnvBlock } from "@/features/accounts/env-block";
 import {
@@ -24,12 +25,10 @@ type SetupTokenStarted = components["schemas"]["SetupTokenStarted"];
 const WIDE = "w-[min(48rem,calc(100vw-2rem))]";
 const TERMINAL_BOX = "h-[min(50vh,22rem)] overflow-hidden rounded border border-border";
 
-const field =
-  "h-6.5 w-full rounded border border-border bg-bg px-2 font-mono text-2xs text-fg placeholder:text-faint focus:border-fg focus:outline-none";
-const primary =
-  "flex h-7 items-center justify-center gap-1.5 bg-fg px-3 text-xs font-medium text-bg hover:bg-fg/85 disabled:opacity-40";
-const secondary =
-  "flex h-7 items-center justify-center gap-1.5 rounded border border-border px-3 font-mono text-2xs text-muted hover:bg-hover hover:text-fg disabled:opacity-40";
+// Tokens, URLs and codes are values: mono in every field of the wizards.
+const field = `${SETTINGS_FIELD} font-mono`;
+const primary = SETTINGS_ACTION_PRIMARY;
+const secondary = SETTINGS_ACTION;
 
 /** The URL to authorize, as text to copy. Nothing here opens a browser. */
 function AuthUrlBlock({ url }: { url: string }) {

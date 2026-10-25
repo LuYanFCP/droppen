@@ -47,12 +47,12 @@ export function PrefsControls() {
         </Menu.Trigger>
         <Menu.Portal>
           <Menu.Positioner side="bottom" align="end" sideOffset={4} className="z-50 outline-none">
-            <Menu.Popup className="min-w-36 border border-border-strong bg-bg py-1 outline-none">
+            <Menu.Popup className="popup-motion max-h-[min(var(--available-height),20rem)] min-w-[10rem] max-w-[20rem] overflow-y-auto border border-border-strong bg-bg py-1.5 outline-none">
               <Menu.RadioGroup value={language} onValueChange={(value: LanguagePref) => chooseLanguage(value)}>
                 <Menu.RadioItem
                   value="auto"
                   closeOnClick
-                  className="flex w-full cursor-pointer items-center gap-2 px-3 py-1 text-left text-xs text-fg outline-none data-[highlighted]:bg-hover"
+                  className="flex min-h-8 w-full cursor-pointer items-center gap-2 px-3 py-1 text-left text-[13px] text-fg outline-none pointer-coarse:min-h-11 data-[highlighted]:bg-hover"
                 >
                   <span className="flex size-3.5 shrink-0 items-center justify-center">
                     <Menu.RadioItemIndicator>
@@ -70,7 +70,7 @@ export function PrefsControls() {
                     value={l.id}
                     lang={l.id}
                     closeOnClick
-                    className="flex w-full cursor-pointer items-center gap-2 px-3 py-1 text-left text-xs text-fg outline-none data-[highlighted]:bg-hover"
+                    className="flex min-h-8 w-full cursor-pointer items-center gap-2 px-3 py-1 text-left text-[13px] text-fg outline-none pointer-coarse:min-h-11 data-[highlighted]:bg-hover"
                   >
                     <span className="flex size-3.5 shrink-0 items-center justify-center">
                       <Menu.RadioItemIndicator>

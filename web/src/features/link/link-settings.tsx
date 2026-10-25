@@ -4,6 +4,13 @@ import { useTranslation } from "react-i18next";
 import type { components } from "@/api/schema";
 import { Spinner } from "@/components/ui/spinner";
 import { Sheet } from "@/components/sheet";
+import {
+  SECTION_TITLE,
+  SETTINGS_ACTION,
+  SETTINGS_ACTION_PRIMARY,
+  SETTINGS_COLUMN,
+  SETTINGS_FIELD,
+} from "@/features/settings/layout";
 import { cn } from "@/lib/cn";
 import { formatTime } from "@/lib/format";
 import { hubWebOrigin } from "./handoff";
@@ -27,12 +34,11 @@ type CloudStatus = components["schemas"]["CloudStatus"];
 
 export { cloudKey };
 
-const sectionTitle = "label-caps -mx-3 -mt-3 mb-3 flex h-9 items-center border-b border-border px-3 text-2xs text-fg";
-const primary = "flex h-7 items-center justify-center bg-fg px-3 text-xs font-medium text-bg hover:bg-fg/85 disabled:opacity-40";
-const quiet =
-  "flex h-7 shrink-0 items-center justify-center gap-1.5 rounded border border-border px-3 font-mono text-2xs text-muted hover:bg-hover hover:text-fg disabled:opacity-40";
-const field =
-  "h-6.5 w-full rounded border border-border bg-bg px-2 font-mono text-2xs text-fg placeholder:text-faint focus:border-fg focus:outline-none";
+const sectionTitle = SECTION_TITLE;
+const primary = SETTINGS_ACTION_PRIMARY;
+const quiet = SETTINGS_ACTION;
+// A relay URL is a value, so mono; the box still measures like every field.
+const field = `${SETTINGS_FIELD} font-mono`;
 
 /** Two keys/values in a row of the status table. */
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
@@ -167,7 +173,7 @@ export function DroppenSection({ embedded = false }: { embedded?: boolean } = {}
         <h2 data-label="" className={sectionTitle}>
           Droppen
         </h2>
-        <div className="flex max-w-xl flex-col gap-3">
+        <div className={cn(SETTINGS_COLUMN, "flex flex-col gap-3")}>
           {!status.localAuth ? (
             <NoLocalAccount />
           ) : busy || flow.kind === "closed" || flow.kind === "expired" || (flow.kind === "error" && status.state === "none") ? (
@@ -228,12 +234,12 @@ export function DroppenSection({ embedded = false }: { embedded?: boolean } = {}
         status.localAuth && (
         <section className="border-b border-border p-3">
           <h2 data-label="" className={sectionTitle}>{t("disconnect this device")}</h2>
-          <div className="flex max-w-xl flex-col gap-2">
-            <p className="text-2xs text-faint">
+          <div className={cn(SETTINGS_COLUMN, "flex flex-col gap-2")}>
+            <p className="text-xs text-muted">
               {t("Stops its Droppen link and deletes its Droppen keys here. It keeps working locally exactly as before. Remove it on droppen.app too, if it is still listed there.")}
             </p>
             {!status.canManage ? (
-              <p className="text-2xs text-faint">{t("Only {{owner}}, who signed this device in, can disconnect it.", { owner: status.owner ?? "—" })}</p>
+              <p className="text-xs text-muted">{t("Only {{owner}}, who signed this device in, can disconnect it.", { owner: status.owner ?? "—" })}</p>
             ) : !confirmUnlink ? (
               <div>
                 <button type="button" className={quiet} data-testid="droppen-unlink" onClick={() => setConfirmUnlink(true)}>
@@ -278,7 +284,7 @@ function UnencryptedNote() {
   const { t } = useTranslation();
   if (!unencryptedOverNetwork()) return null;
   return (
-    <p data-testid="droppen-remote-unencrypted" data-signal="warn" className="max-w-xl font-mono text-2xs text-warn-fg">
+    <p data-testid="droppen-remote-unencrypted" data-signal="warn" className={cn(SETTINGS_COLUMN, "font-mono text-xs text-warn-fg")}>
       {t("This page is open over the network without encryption (http://): others on the network can read what it shows, your other devices' sessions included.")}
     </p>
   );
@@ -310,8 +316,8 @@ export function RemoteAccess({
   const { t } = useTranslation();
   if (!status.canManage) {
     return (
-      <div className="flex max-w-xl flex-col gap-2">
-        <p data-testid="droppen-remote-self" data-remote={status.seesOtherDevices ? "on" : "off"} className="text-2xs text-faint">
+      <div className={cn(SETTINGS_COLUMN, "flex flex-col gap-2")}>
+        <p data-testid="droppen-remote-self" data-remote={status.seesOtherDevices ? "on" : "off"} className="text-xs text-muted">
           {status.seesOtherDevices
             ? t("This local account sees your other devices here.")
             : status.owner
@@ -324,8 +330,8 @@ export function RemoteAccess({
   }
   if (status.canClaim) {
     return (
-      <div data-testid="droppen-remote-claim" className="flex max-w-xl flex-col gap-2">
-        <p className="text-2xs text-faint">
+      <div data-testid="droppen-remote-claim" className={cn(SETTINGS_COLUMN, "flex flex-col gap-2")}>
+        <p className="text-xs text-muted">
           {t("Nobody sees your other devices here yet: this device joined Droppen without signing in here (or the local account that did is gone). If you added it, say so: then you see them here, and decide who else does.")}
         </p>
         <div>
@@ -340,8 +346,8 @@ export function RemoteAccess({
   }
   const accounts = status.accounts ?? [];
   return (
-    <div data-testid="droppen-remote-access" className="flex max-w-xl flex-col gap-2">
-      <p className="text-2xs text-faint">
+    <div data-testid="droppen-remote-access" className={cn(SETTINGS_COLUMN, "flex flex-col gap-2")}>
+      <p className="text-xs text-muted">
         {t("Your other devices' sessions show in this device's app only to these local accounts. Anyone using one of them sees what those devices copy here.")}
       </p>
       <UnencryptedNote />
@@ -350,7 +356,7 @@ export function RemoteAccess({
           <li key={account.user} data-remote-user={account.user} className="flex min-h-9 flex-wrap items-center gap-x-4 border-b border-border py-0.5">
             <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg">{account.user}</span>
             {account.owner ? (
-              <span className="font-mono text-2xs text-faint">{t("signed this device in: always sees them")}</span>
+              <span className="font-mono text-xs text-muted">{t("signed this device in: always sees them")}</span>
             ) : (
               <SquareSwitch
                 on={account.remote}
@@ -396,19 +402,19 @@ function SignedOut(props: {
         {t("Sign in to use this device from your phone on droppen.app, and to see your other devices here too. Everything works without signing in as well.")}
       </p>
       {!status.canManage && status.owner && (
-        <p className="text-2xs text-faint">{t("Only {{owner}} can sign this device in.", { owner: status.owner })}</p>
+        <p className="text-xs text-muted">{t("Only {{owner}} can sign this device in.", { owner: status.owner })}</p>
       )}
       <div className="flex flex-wrap items-center gap-2">
         <button type="button" data-variant="primary" className={primary} data-testid="droppen-sign-in" disabled={!status.canManage || !props.hubValid} onClick={props.onSignIn}>
           {t("Sign in to Droppen")}
         </button>
-        <button type="button" className="font-mono text-2xs text-faint underline-offset-2 hover:text-fg hover:underline" onClick={() => props.setAdvanced(!props.advanced)}>
+        <button type="button" className="font-mono text-xs text-muted underline-offset-2 hover:text-fg hover:underline" onClick={() => props.setAdvanced(!props.advanced)}>
           {props.advanced ? t("hide advanced") : t("advanced")}
         </button>
       </div>
       {props.advanced && (
-        <label className="flex max-w-xs flex-col gap-1">
-          <span className="text-2xs text-faint">{t("hub address")}</span>
+        <label className={cn(SETTINGS_COLUMN, "flex flex-col gap-1")}>
+          <span className="text-xs text-muted">{t("hub address")}</span>
           <input
             value={props.hubInput}
             onChange={(e) => props.setHubInput(e.target.value)}
@@ -480,7 +486,7 @@ function InProgress({
       </p>
       {fingerprint && (
         <div className="flex flex-col gap-1">
-          <span className="text-2xs text-faint">{t("this device's fingerprint — droppen.app shows the same")}</span>
+          <span className="text-xs text-muted">{t("this device's fingerprint — droppen.app shows the same")}</span>
           <Fingerprint value={fingerprint} />
         </div>
       )}
@@ -525,15 +531,15 @@ function Linked({ status, onAggregator, aggregatorBusy }: { status: CloudStatus;
   }, [link, status.state, t]);
   return (
     <>
-      <table className="w-full max-w-xl" data-testid="droppen-linked">
+      <table className={SETTINGS_COLUMN} data-testid="droppen-linked">
         <tbody>
           <Row label={t("account")}>
             {status.account?.email ?? status.account?.id ?? "—"}
-            {status.account && <div className="text-2xs text-faint">{status.account.fingerprint}</div>}
+            {status.account && <div className="text-xs text-muted">{status.account.fingerprint}</div>}
           </Row>
           <Row label={t("this device")}>
             {status.machine.hostname} · {status.machine.id ?? "—"}
-            <div className="text-2xs text-faint">{status.machine.fingerprint}</div>
+            <div className="text-xs text-muted">{status.machine.fingerprint}</div>
           </Row>
           <Row label={t("link")}>
             <span data-signal={link?.connected ? "ok" : "warn"} className={link?.connected ? "text-ok" : "text-warn-fg"} data-testid="droppen-connection">
@@ -598,7 +604,7 @@ export function AggregatorLine({
         )}
       </div>
       {aggregator.enabled && missing.length > 0 && (
-        <span className="text-2xs text-faint" data-testid="droppen-aggregator-missing">
+        <span className="text-xs text-muted" data-testid="droppen-aggregator-missing">
           {aggregator.askedMs
             ? t("missing: {{ids}} · asked the account's full devices at {{when}}", { ids: missing.join(", "), when: formatTime(new Date(aggregator.askedMs).toISOString()) })
             : t("missing: {{ids}}", { ids: missing.join(", ") })}
@@ -614,7 +620,7 @@ export function AggregatorLine({
           {aggregator.error}
         </span>
       )}
-      {aggregator.enabled && canManage && <span className="text-2xs text-faint">{t("turning it off deletes the other devices' content keys here")}</span>}
+      {aggregator.enabled && canManage && <span className="text-xs text-muted">{t("turning it off deletes the other devices' content keys here")}</span>}
     </div>
   );
 }

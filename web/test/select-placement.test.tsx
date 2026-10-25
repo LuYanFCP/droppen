@@ -197,7 +197,7 @@ test("a long list in a short window takes the roomier side, stops at the screen'
   assert.ok(!overlaps(list, layout.trigger));
 });
 
-test("the list is the menus' sheet: hairline frame, no shadow, square, 24px rows set in the trigger's font", async () => {
+test("the list is the menus' sheet: hairline frame, no shadow, square, 32px rows set in the trigger's font", async () => {
   layout.viewport = { w: 1000, h: 800 };
   layout.trigger = { x: 200, y: 120, w: 180, h: 26 };
   layout.list = { w: 200, h: 130 };
@@ -205,12 +205,13 @@ test("the list is the menus' sheet: hairline frame, no shadow, square, 24px rows
   assert.match(popup.className, /\bborder\b/);
   assert.match(popup.className, /border-border-strong/);
   assert.match(popup.className, /\bbg-bg\b/);
-  assert.match(popup.className, /\bpy-1\b/);
+  assert.match(popup.className, /\bpy-1\.5\b/, "6px above the first row");
   assert.match(popup.className, /font-mono/, "the chip's mono");
-  assert.match(popup.className, /min-w-\[max\(var\(--anchor-width\),8rem\)\]/, "never a sliver under a short chip");
+  assert.match(popup.className, /min-w-\[max\(var\(--anchor-width\),10rem\)\]/, "never a sliver under a short chip");
+  assert.match(popup.className, /max-w-\[min\(var\(--available-width\),20rem\)\]/, "never wider than 20rem");
   assert.doesNotMatch(popup.className, /shadow|rounded/);
   const row = popup.querySelector<HTMLElement>('[role="option"]')!;
-  assert.match(row.className, /\bmin-h-6\b/, "24px rows");
-  assert.match(row.className, /\bpx-2\b/, "text 8px in, under a field's own text");
-  assert.match(row.className, /pointer-coarse:min-h-9/, "36px under a finger");
+  assert.match(row.className, /\bmin-h-8\b/, "32px rows");
+  assert.match(row.className, /\bpx-3\b/, "text 12px in, under a field's own text");
+  assert.match(row.className, /pointer-coarse:min-h-11/, "44px under a finger");
 });
