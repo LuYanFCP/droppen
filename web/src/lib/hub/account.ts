@@ -345,6 +345,8 @@ export const HOST_KEYS_WAIT = { forMs: 20_000, everyMs: 1_000 };
  * `chain_v3_not_ready` naming only that host is tried again for this long.
  */
 export const CHAIN_V3_WAIT = { forMs: 5000, everyMs: 500 };
+/** The most entries the hub takes in one append (`POST /v1/chain`, docs/hub-api/http.md): a bigger batch is refused here, before anything is signed. */
+export const MAX_APPEND_ENTRIES = 64;
 /** The most first sightings kept per account. */
 const MAX_FIRST_SEEN = 4096;
 /** The most entry hashes the seen record keeps (`SeenRecord.heads`): how far behind a tab can still be checked against it. */
@@ -552,6 +554,12 @@ export type AccountErrorKind =
   | "joinMismatch"
   /** The account has as many passkey slots as it may. */
   | "tooManySlots"
+  /** The batch is more entries than the hub takes in one append ({@link MAX_APPEND_ENTRIES}). */
+  | "tooManyEntries"
+  /** A veto would remove nothing: what it was for is out of the account already. Nothing is signed. */
+  | "nothingToRemove"
+  /** A veto confirmed on a hold this device has since taken in, with the chain moved on after that: the person looks again. Nothing is signed. */
+  | "vetoStale"
   /**
    * A host that may have had its identity key copied (`hostsToRotate`) or is
    * isolated would be let control another one: renew its identity key first
@@ -919,6 +927,46 @@ export interface FreshUserKey {
   recovery: boolean;
 }
 
+/** A device a veto would take out ({@link VetoPlan}), and what brought it in. */
+export interface VetoTarget {
+  id: string;
+  /** It runs AI (a host): taken out, it must be added to the account again. */
+  host: boolean;
+  /** Who brought it in: the device that signed it, a passkey slot, or `null` for the recovery words (`null` too for the held device itself). */
+  by: string | null;
+}
+
+/**
+ * What vetoing a held-back activation would take out, for the page to show
+ * before the person confirms (issue #17): `scope`, which the veto always
+ * takes, and `trusted`, which it takes only if asked.
+ */
+export interface VetoPlan {
+  /** The device whose activation is held back. */
+  device: string;
+  /** Where the hold starts: the activation's seq. */
+  seq: number;
+  /** The devices this view trusted when the plan was read: what the veto never removes (handed back to `removeDevice`'s `veto`). */
+  view: string[];
+  /** The held device first, then what it, the recovery words or a passkey slot brought in (`vetoScope`). */
+  scope: VetoTarget[];
+  /**
+   * What the devices this view already trusted (other than this one) brought
+   * in while the activation was held back here, and what those brought in:
+   * not in `scope`, kept unless the person asks (`removeDevice`'s
+   * `alsoTrusted`). Never this device, nor a device this view already trusted.
+   */
+  trusted: VetoTarget[];
+  /** Whether the veto voids the account's current recovery words (a device it takes out set them, or came back with them). */
+  voidsWords: boolean;
+  /** Whether also taking out `trusted` voids them where `scope` alone does not. */
+  trustedVoidsWords: boolean;
+  /** Whether the veto turns off passkey slots (one a device it takes out registered, or came in through): joining with them stops. */
+  voidsPasskeys: boolean;
+  /** Whether also taking out `trusted` turns off slots `scope` alone does not. */
+  trustedVoidsPasskeys: boolean;
+}
+
 /** One entry the hub's chain has past a held-back activation, as the page shows it. */
 export interface HeldChange {
   seq: number;
@@ -1225,6 +1273,13 @@ export class CloudAccount {
   /** {@link hostsToRotate} for the chain as it was last asked, by its head (and the narrowed groups it read). */
   private exposureCache: { chain: ChainState; seq: number; exposed: Map<string, Exposure> } | null = null;
   private held: HeldBack | null = null;
+  /**
+   * The last hold a sync took in on this device's own clock (its day passed
+   * here): its activation, and how far this view went with it. A veto the
+   * person confirmed on that hold's plan is still a veto, but only while
+   * nothing newer has been taken in since (`removeDevice`'s `veto`).
+   */
+  private taken: { seq: number; device: string; takenThroughSeq: number } | null = null;
   /** Set (for good, in this page) once this view conflicted with the chain this browser verified: why. */
   private forkedWhy: string | null = null;
   private unwatchSeen: (() => void) | null = null;
@@ -2205,6 +2260,11 @@ export class CloudAccount {
 
   private setHeld(held: HeldBack | null): void {
     const was = this.held;
+    // A hold taken in by the clock (not by the person's approve or veto, `adopt`): kept, so a veto confirmed on it a moment ago still is one.
+    if (was?.device && was.seq !== held?.seq && this.state && this.state.seq >= was.seq) {
+      const at = this.state.entryAt(was.seq)?.draft.action;
+      if ((at?.type === "activateRecovered" || at?.type === "passkeyActivate") && at.id === was.device) this.taken = { seq: was.seq, device: was.device, takenThroughSeq: this.state.seq };
+    }
     this.held = held;
     this.scheduleHeld();
     if ((was?.seq ?? -1) !== (held?.seq ?? -1) || (was?.entries.length ?? 0) !== (held?.entries.length ?? 0)) this.emit();
@@ -2298,6 +2358,8 @@ export class CloudAccount {
     for (let seq = this.state!.seq + 1; seq <= chain.seq; seq++) clock.observe(seq);
     await this.install(chain, clock);
     this.held = null;
+    // Settled by the person: no earlier plan is a veto any more.
+    this.taken = null;
     this.scheduleHeld();
     this.emit();
   }
@@ -2357,7 +2419,15 @@ export class CloudAccount {
         );
       }
       const base = held ? await this.provisional(held) : this.state;
-      const entries = await this.signChained(base, await build(base), opts.asV3);
+      const actions = await build(base);
+      // The hub takes 1–64 entries an append: a bigger batch is said here, before anything is signed.
+      if (actions.length > MAX_APPEND_ENTRIES) {
+        throw new AccountError("tooManyEntries", "that would write {{n}} entries to the account's chain at once, and the hub takes at most {{max}}: do it in smaller steps", undefined, undefined, {
+          n: String(actions.length),
+          max: String(MAX_APPEND_ENTRIES),
+        });
+      }
+      const entries = await this.signChained(base, actions, opts.asV3);
       // Refused here, by the chain's own rule, before anything leaves this device (review 13).
       await verifyBatch(base, entries);
       try {
@@ -4036,9 +4106,39 @@ export class CloudAccount {
    * and only if `opts.rotateMachineKeys` (the default). Chain v2 removes a
    * machine (`removeMachine`) with no rotation: it held its own key only.
    */
-  async removeDevice(id: string, courier: MachineKeyCourier, reencrypt = false, opts: { rotateMachineKeys?: boolean } = {}): Promise<RotationReport> {
+  async removeDevice(
+    id: string,
+    courier: MachineKeyCourier,
+    reencrypt = false,
+    opts: {
+      rotateMachineKeys?: boolean;
+      /**
+       * The veto the person confirmed (`vetoPlan`): it stays a veto — what the
+       * device brought in goes with it — even if this device's day has passed
+       * and the activation was taken in before the call.
+       */
+      veto?: Pick<VetoPlan, "device" | "seq" | "view">;
+      /** With `veto`: the trusted additions the person was shown and chose to take out too (issue #17). */
+      alsoTrusted?: readonly string[];
+    } = {},
+  ): Promise<RotationReport> {
     if (id === this.deviceId) throw new AccountError("self", "remove this device from another device");
-    const held = this.held;
+    const veto = opts.veto?.device === id ? opts.veto : undefined;
+    // The hold the veto is over: this view's, or — taken in by this device's
+    // clock since the person read the plan — that one, but only while it is
+    // the last one taken in and the chain here has not moved since: a stale
+    // plan could take out a device trusted after it (the person looks again).
+    let held: HeldBack | null = this.held;
+    let sweepTo: number | null = null;
+    if (!held && veto) {
+      const taken = this.taken;
+      if (!taken || taken.seq !== veto.seq || taken.device !== id || this.state?.seq !== taken.takenThroughSeq) {
+        throw new AccountError("vetoStale", "{{id}}'s activation was taken in here, and the account's chain has moved on since: look at your devices again, and remove what is not yours there", undefined, undefined, { id });
+      }
+      held = { seq: veto.seq, device: id, readyMs: 0, entries: [] };
+      // What the plan could stand for: up to where this view took the hold in.
+      sweepTo = taken.takenThroughSeq;
+    }
     if (!held) {
       const record = this.state?.deviceRecord(id);
       const v3 = this.state?.isV3 === true;
@@ -4075,17 +4175,63 @@ export class CloudAccount {
         held.readyMs,
       );
     }
-    return this.rotate(
-      courier,
-      reencrypt,
-      (chain) => {
-        const scope = this.vetoScope(this.held ?? held, chain);
-        // A v3 chain takes v3 removals only (no v2 entry after the first v3 one).
-        if (chain.isV3) return [...scope.devices, ...scope.machines].map((d): Action => ({ type: "removeDevice3", id: d }));
-        return [...scope.devices.map((d): Action => ({ type: "removeDevice", id: d })), ...scope.machines.map((m): Action => ({ type: "removeMachine", id: m }))];
-      },
-      { overHeld: true },
-    );
+    // Asked for (issue #17): also what the devices this view trusted brought
+    // in meanwhile — only the ones the person was shown (`vetoPlan`), and what
+    // those brought in, as the chain the veto is signed on has it.
+    const alsoTrusted = opts.alsoTrusted?.length ? new Set(opts.alsoTrusted) : undefined;
+    // The devices this view trusted, as it stands now: the syncs ahead (rotate's,
+    // and appendBatch's on a 409) may take the activation in once its day has
+    // passed here, and the veto must still take out what it is for — not find
+    // the held device trusted by then and remove nothing. Taken in already
+    // before the call: as the plan the person confirmed read them.
+    const view = sweepTo === null || !veto ? this.trustedView() : new Set([...veto.view, this.deviceId]);
+    try {
+      const report = await this.rotate(
+        courier,
+        reencrypt,
+        (chain) => {
+          const live = this.held;
+          // Another device's activation held back meanwhile: the veto is not signed on top of it (that would take it in).
+          if (live && live.device !== held.device) throw new AccountError("heldBack", `${heldWho(live)}: approve or remove it first`, live.readyMs);
+          // The hold as it stands now (its entries may have grown); taken in on
+          // the way, everything the chain the veto is signed on has from the
+          // activation on — what the held device added since the plan included;
+          // taken in before the call, up to where this view took it in.
+          const now: HeldBack = live ?? { ...held, entries: chain.allEntries().filter((e) => e.draft.seq >= held.seq && (sweepTo === null || e.draft.seq <= sweepTo)) };
+          const scope = this.vetoScope(now, chain, { view, ...(alsoTrusted ? { trusted: alsoTrusted } : {}) });
+          // A veto that removes nothing is never published: it would be a bare
+          // rotation, its new keys mailed to everyone still in.
+          if (!scope.devices.length && !scope.machines.length) {
+            throw new AccountError(
+              "nothingToRemove",
+              "{{id}} and what it brought in are out of the account already, so nothing was signed. Approving it is safe now: it takes in the account's chain as it stands.",
+              undefined,
+              undefined,
+              { id: held.device ?? id },
+            );
+          }
+          // A v3 chain takes v3 removals only (no v2 entry after the first v3 one).
+          if (chain.isV3) return [...scope.devices, ...scope.machines].map((d): Action => ({ type: "removeDevice3", id: d }));
+          return [...scope.devices.map((d): Action => ({ type: "removeDevice", id: d })), ...scope.machines.map((m): Action => ({ type: "removeMachine", id: m }))];
+        },
+        { overHeld: true },
+      );
+      // Done: the plan it was read on is no veto any more.
+      if (this.taken?.seq === held.seq) this.taken = null;
+      return report;
+    } catch (error) {
+      // A veto is one append (it cannot be split): with the wider choice on, the way out is to leave it off.
+      if (alsoTrusted && error instanceof AccountError && error.kind === "tooManyEntries") {
+        throw new AccountError(
+          "tooManyEntries",
+          "this veto would write {{n}} entries to the account's chain at once, and the hub takes at most {{max}}: untick “Also remove what your other devices added”, then remove those devices one by one afterwards",
+          undefined,
+          undefined,
+          error.vars,
+        );
+      }
+      throw error;
+    }
   }
 
   /**
@@ -5495,21 +5641,103 @@ export class CloudAccount {
    * the recovery words or through a passkey slot (a secret held off every
    * device, as the words are) — that is still there. What a device this view
    * already trusted signed in that stretch stands.
+   *
+   * Unless `opts.trusted` (issue #17, the person's choice): then also what
+   * those devices — all of them but this one — brought in in that stretch
+   * (`true`), or only the ones in the set (what the person was shown), and
+   * in either case what those brought in in turn. Never this device, and
+   * never a device this view already trusted: what the veto removes was
+   * brought in only while the activation was held back here. (So the last
+   * admin is never among them: this device, which signs the veto, is one.)
+   *
+   * `opts.view`: the devices this view trusted, taken before any sync could
+   * take the activation in ({@link trustedView}); without it, this view's
+   * active devices now.
    */
-  vetoScope(held: HeldBack, chain: ChainState): { devices: string[]; machines: string[] } {
+  vetoScope(held: HeldBack, chain: ChainState, opts: { trusted?: true | ReadonlySet<string>; view?: ReadonlySet<string> } = {}): { devices: string[]; machines: string[] } {
     const tainted = new Set<string>(held.device ? [held.device] : []);
     const machines = new Set<string>();
+    const trust = opts.trusted;
     for (const e of held.entries) {
       const { signer, action } = e.draft;
-      if (!(signer.type === "recovery" || signer.type === "passkey" || (signer.type === "device" && tainted.has(signer.id)))) continue;
-      if (action.type === "addDevice" || action.type === "recoveryJoin" || action.type === "recoveryJoin3") tainted.add(action.device.id);
-      else if (action.type === "addDevice3") (action.device.flags.host && !action.device.flags.admin ? machines : tainted).add(action.device.id);
-      else if (action.type === "approveDevice" || action.type === "activateRecovered" || action.type === "passkeyActivate") tainted.add(action.id);
-      else if (action.type === "addMachine") machines.add(action.machine.id);
+      const brought = signer.type === "recovery" || signer.type === "passkey" || (signer.type === "device" && tainted.has(signer.id));
+      // Signed by another device this view trusted: what it brought in goes only if asked.
+      const byTrusted = !brought && trust !== undefined && signer.type === "device" && signer.id !== this.deviceId;
+      if (!brought && !byTrusted) continue;
+      const take = (id: string, into: Set<string>) => {
+        if (brought || trust === true || (typeof trust === "object" && trust.has(id))) into.add(id);
+      };
+      if (action.type === "addDevice" || action.type === "recoveryJoin" || action.type === "recoveryJoin3") take(action.device.id, tainted);
+      else if (action.type === "addDevice3") take(action.device.id, action.device.flags.host && !action.device.flags.admin ? machines : tainted);
+      else if (action.type === "approveDevice" || action.type === "activateRecovered" || action.type === "passkeyActivate") take(action.id, tainted);
+      else if (action.type === "addMachine") take(action.machine.id, machines);
     }
-    const devices = [...tainted].filter((id) => id !== this.deviceId && chain.deviceRecord(id) && chain.deviceRecord(id)!.status.type !== "removed");
+    // Neither this device nor one this view already trusted: only what came in while the activation was held back.
+    const view = opts.view ?? this.trustedView();
+    const trustedHere = (id: string) => id === this.deviceId || view.has(id);
+    const devices = [...tainted].filter((id) => !trustedHere(id) && chain.deviceRecord(id) && chain.deviceRecord(id)!.status.type !== "removed");
     devices.sort((x, y) => (x === held.device ? -1 : y === held.device ? 1 : 0));
-    return { devices, machines: [...machines].filter((m) => chain.machine(m)) };
+    return { devices, machines: [...machines].filter((m) => !trustedHere(m) && chain.machine(m)) };
+  }
+
+  /**
+   * What vetoing the held-back activation would take out, on the hub's chain
+   * as it stands now (`null` with nothing held back): for the page to list
+   * before the person confirms, with the choice to take out what the devices
+   * this view trusted brought in meanwhile too (`trusted`; issue #17), and
+   * what it does to the recovery words.
+   */
+  async vetoPlan(): Promise<VetoPlan | null> {
+    const held = this.held;
+    if (!held?.device || !this.state) return null;
+    const view = this.trustedView();
+    const chain = await this.provisional(held);
+    const scope = this.vetoScope(held, chain, { view });
+    const wide = this.vetoScope(held, chain, { view, trusted: true });
+    const inScope = new Set([...scope.devices, ...scope.machines]);
+    // Who brought each one in: the first held-back entry that did.
+    const by = new Map<string, string | null>();
+    for (const e of held.entries) {
+      const { signer, action } = e.draft;
+      const subject =
+        action.type === "addDevice" || action.type === "recoveryJoin" || action.type === "recoveryJoin3" || action.type === "addDevice3"
+          ? action.device.id
+          : action.type === "addMachine"
+            ? action.machine.id
+            : action.type === "approveDevice" || action.type === "activateRecovered" || action.type === "passkeyActivate"
+              ? action.id
+              : null;
+      if (subject !== null && subject !== held.device && !by.has(subject)) by.set(subject, signer.type === "device" ? signer.id : signer.type === "passkey" ? signer.slot : null);
+    }
+    const target = (id: string): VetoTarget => ({ id, host: chain.deviceRecord(id)?.host === true, by: by.get(id) ?? null });
+    const trusted = [...wide.devices, ...wide.machines].filter((id) => !inScope.has(id));
+    const voids = (ids: Iterable<string>) => [...ids].some((id) => chain.voidsRecoveryWords(id, "removal"));
+    const voidsWords = voids(inScope);
+    // The passkey slots a removal turns off, as the chain rules: those its device registered, and the one it came in through.
+    const slotsOf = (ids: Iterable<string>) => {
+      const gone = new Set(ids);
+      const through = new Set([...gone].flatMap((id) => chain.deviceRecord(id)?.viaPasskey ?? []));
+      return new Set(chain.allSlots().flatMap((s) => (!s.removed && (gone.has(s.setBy) || through.has(s.slot.slot)) ? [s.slot.slot] : [])));
+    };
+    const slots = slotsOf(inScope);
+    return {
+      device: held.device,
+      seq: held.seq,
+      view: [...view],
+      scope: [...scope.devices, ...scope.machines].map(target),
+      trusted: trusted.map(target),
+      voidsWords,
+      trustedVoidsWords: !voidsWords && voids(trusted),
+      voidsPasskeys: slots.size > 0,
+      trustedVoidsPasskeys: [...slotsOf(trusted)].some((slot) => !slots.has(slot)),
+    };
+  }
+
+  /** The devices this view trusts now (active in it), and this device: what a veto never removes. */
+  private trustedView(): Set<string> {
+    const ids = new Set((this.state?.allDevices() ?? []).filter((d) => d.status.type === "active").map((d) => d.info.id));
+    ids.add(this.deviceId);
+    return ids;
   }
 
   /** The entries held back past the activation, as the page lists them ("what approving takes in"). */
