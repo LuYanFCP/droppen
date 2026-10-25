@@ -1,8 +1,6 @@
 import { type ReactNode, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
-import { AlertTriangle, ArrowLeft, ArrowRight, ChevronRight, ClipboardPaste, ExternalLink, Hash, KeyRound, Loader2, MonitorSmartphone, Plus, RefreshCw, Server } from "lucide-react";
-import { DOWNLOAD_PATH } from "@/features/landing/get-droppen";
-import { publicHref } from "@/features/landing/route";
+import { AlertTriangle, ArrowLeft, ArrowRight, ChevronRight, ClipboardPaste, Hash, KeyRound, Loader2, MonitorSmartphone, Plus, RefreshCw, Server } from "lucide-react";
 import { osLabel, versionLabel } from "@/features/machines/device-facts";
 import { useDeviceSessions } from "@/features/machines/device-sessions";
 import { needsYou, recentSessions } from "@/features/machines/needs-you";
@@ -32,14 +30,16 @@ import { abandonCandidate, type Candidate, candidateFromOffer, runCodeInitiator 
 import type { StatusState } from "@/lib/hub/streams";
 import { uaLabel, uaLabelOf } from "@/lib/hub/ua-label";
 import { useHomeMachine } from "@/lib/machines/context";
+import type { MachineInfo } from "@/lib/machines/runtime";
 import { useStore } from "@/lib/machines/store";
 import { cn } from "@/lib/cn";
 import { setHubOnly } from "@/lib/transport/p2p";
 import { atLimit, copyWarning, DEVICES_KEY, type LimitHit, limitOf, offlineSince, retentionOf } from "@/lib/hub/plan";
-import { AddComputer, V3Pending, v3Blocker, type V3Blocker } from "./add-computer";
+import { AddComputer, NewDeviceReady, V3Pending, v3Blocker, type V3Blocker } from "./add-computer";
 import { useAgentKeyState, useHubOnly, usePresenceVersion, useShellCopies } from "./context";
 import { DeviceRow, type DeviceRowView, shortDeviceId } from "./device-row";
 import { askedPlace } from "./devices-route";
+import { FirstHostCard } from "./first-host";
 import { hubShell, sessionPath, shellCourier, useFocusedMachine, useShellMachines } from "./hub-shell";
 import { MachineNotes, noteRenamed, RenameMachineForm, renameThroughNewChannel, shownName, useMachineStatuses, useRenamed } from "./machine-name";
 import { addAsked } from "./onboarding";
@@ -62,7 +62,10 @@ export { DeviceRow, type DeviceRowView, ReEnrollWarning, type RowMenuItem, rowMe
  * device's own settings (`ThisDeviceSection`), then every device the chain
  * lists in one list — this one marked, the devices that run AI among them
  * with the way into each, one waiting after a recovery; removed ones folded
- * below (`device-row.tsx` draws a row).
+ * below (`device-row.tsx` draws a row). Until the account has a device that
+ * runs AI (just signed up), a first-run card leads with how to connect one
+ * (`first-host.tsx`), and this device's settings and the keys' rotation wait
+ * folded under 「更多设置」 (`MoreSettings`).
  *
  * From here: adding a device (a browser or phone: paste its text, scan its QR
  * code, or type the code it shows — `lib/hub/pairing.ts`; a device that runs
@@ -118,7 +121,8 @@ export type Section =
   /** 「添加设备」: which kind, a browser or phone or a device that runs AI. */
   | { kind: "add" }
   | { kind: "addBrowser" }
-  | { kind: "addComputer" }
+  /** The 「添加可运行 AI 的设备」 guide; `code`: opened on its one-time code (a device with no browser). */
+  | { kind: "addComputer"; code?: boolean }
   | { kind: "remove"; device: string }
   /** Making a limited device a full device: confirmed first (§3.7). */
   | { kind: "grant"; device: string }
@@ -308,6 +312,17 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
     addAsked.set(false);
     if (account.isAdmin) setSection({ kind: "addComputer" });
   }, [asked, account]);
+  // Just signed up — the chain read, this a full device, no device that runs AI in it: the first-run card, and 「更多设置」 folded.
+  const noHostYet = chain != null && viewerAdmin && hostIds.length === 0;
+  const adding = section.kind === "add" || section.kind === "addBrowser" || section.kind === "addComputer";
+  const cardNow = noHostYet && !adding;
+  // The card goes once a device that runs AI joins: said, once, as the guide says it (the guide, open, says it itself).
+  const [cardUp, setCardUp] = useState(cardNow);
+  const [joined, setJoined] = useState<string | null>(null);
+  if (cardNow !== cardUp) {
+    setCardUp(cardNow);
+    if (cardUp && chain != null && hostIds.length > 0) setJoined(hostIds[0]!);
+  }
 
   if (section.kind === "words") {
     // A page of its own, over 「我的设备」 until they are written down.
@@ -410,6 +425,10 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
   const hostsNow = hostIds.length;
   // No device that runs AI yet (just signed up): adding one is what comes next.
   const firstHost = hostsNow === 0;
+  // The device that joined while the first-run card was up, as the page follows it (its name, whether it is up).
+  const joinedInfo: MachineInfo | null = joined
+    ? (machines.find((m) => m.key === joined) ?? { key: joined, name: shownName(joined, statuses.get(joined) ?? null) ?? joined, state: "unknown", since: 0, canManage: true, live: "copy" })
+    : null;
   const selfRecord = devices.find((d) => d.info.id === account.deviceId);
   const selfName = selfRecord ? view(selfRecord).name : ownLabel();
 
@@ -573,7 +592,27 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
     );
   };
 
-  const adding = section.kind === "add" || section.kind === "addBrowser" || section.kind === "addComputer";
+  // Just signed up: the card that says what comes next, until the first device that runs AI joins (or another way to add one is open).
+  const firstRun = cardNow;
+  // The word that it joined, in the card's place, until put away.
+  const justJoined = joinedInfo !== null && section.kind === "list";
+  const pairWith = (done: () => void) => <AddDevice account={account} link={link} onDone={done} />;
+  // This device's own settings and the keys': folded under 「更多设置」 while there is no device that runs AI to use them with.
+  const thisDevice = (
+    <ThisDeviceSection
+      name={selfName}
+      relays={
+        shell?.relays ? (
+          <>
+            <RelayStandbySetting account={account} link={link} />
+            <RelaySection pool={shell.relays} machine={inView} channel={shell.machine(inView)?.channel} bare />
+          </>
+        ) : null
+      }
+    />
+  );
+  const rotateKeys = viewerAdmin && !account.rotationDue && section.kind === "list" ? <RotateKeys account={account} link={link} due={false} /> : null;
+  const alwaysConfirm = section.kind === "list" && viewerAdmin && upgraded && renewals?.view?.enabled ? <AlwaysConfirmSetting runner={renewals} account={account} /> : null;
   return (
     <>
       <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-4 border-b border-border px-6 pt-8 pb-5 max-md:px-4 max-md:pt-6">
@@ -583,15 +622,14 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
             {t("my devices")}
           </h1>
           <p className="text-xs leading-5 text-muted">{t("Every device holds its own keys. Compare fingerprints when you add one.")}</p>
-          {firstHost && viewerAdmin && <FirstHostLine />}
         </div>
         {viewerAdmin && !adding && (
-          // One primary action a view: while a rotation is due, that is it.
+          // One primary action a view: while a rotation is due, that is it; while the first-run card shows, the card's.
           <button
             type="button"
-            data-variant={account.rotationDue ? "secondary" : "primary"}
+            data-variant={account.rotationDue || firstRun || justJoined ? "secondary" : "primary"}
             data-testid="add-device"
-            className={cn(account.rotationDue ? secondary : primary, "max-md:w-full")}
+            className={cn(account.rotationDue || firstRun || justJoined ? secondary : primary, "max-md:w-full")}
             onClick={() => setSection(firstHost ? { kind: "addComputer" } : { kind: "add" })}
           >
             <Plus className="size-3.5" />
@@ -617,22 +655,19 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
             link={link}
             origin={origin ?? hubOrigin() ?? ""}
             onDone={() => setSection({ kind: "list" })}
-            pairWith={(done) => <AddDevice account={account} link={link} onDone={done} />}
+            pairWith={pairWith}
+            initialMode={section.code ? "code" : "guide"}
           />
         </section>
       )}
+      {firstRun && <FirstHostCard onGuide={() => setSection({ kind: "addComputer" })} onCode={() => setSection({ kind: "addComputer", code: true })} pairWith={pairWith} />}
+      {justJoined && (
+        <section data-testid="first-host-joined" className="border-b border-border">
+          <NewDeviceReady account={account} added={joinedInfo} machines={machines} onDone={() => setJoined(null)} />
+        </section>
+      )}
       <UsageSummary account={account} link={link} />
-      <ThisDeviceSection
-        name={selfName}
-        relays={
-          shell?.relays ? (
-            <>
-              <RelayStandbySetting account={account} link={link} />
-              <RelaySection pool={shell.relays} machine={inView} channel={shell.machine(inView)?.channel} bare />
-            </>
-          ) : null
-        }
-      />
+      {!noHostYet && thisDevice}
       <section data-testid="devices-section" className="max-md:pb-2">
         <div className="flex h-10 items-center gap-2 border-b border-border px-6 max-md:border-b-0 max-md:px-4">
           <CapsLabel className="text-fg">{t("devices")}</CapsLabel>
@@ -642,7 +677,7 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
           {current.map(row)}
         </ul>
       </section>
-      {section.kind === "list" && viewerAdmin && upgraded && renewals?.view?.enabled && <AlwaysConfirmSetting runner={renewals} account={account} />}
+      {!noHostYet && alwaysConfirm}
       {section.kind === "list" && done && (
         <div data-testid="change-report" data-signal="ok" className="mx-6 my-4 flex flex-col gap-1 border border-border p-3 shadow-[inset_2px_0_0_var(--color-ok)] max-md:mx-4">
           <span className="font-mono text-xs text-ok">{done.title}</span>
@@ -669,7 +704,7 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
         />
       )}
       <div className="flex max-w-xl flex-col gap-3 px-6 py-6 max-md:px-4">
-        {viewerAdmin && !account.rotationDue && section.kind === "list" && <RotateKeys account={account} link={link} due={false} />}
+        {!noHostYet && rotateKeys}
         {viewerAdmin && chain && !chain.currentRecoveryKey && section.kind === "list" && (
           <Note tone="warn">
             <span data-signal="warn" className="flex items-center gap-1.5 font-mono text-xs text-warn-fg">
@@ -687,6 +722,13 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
         )}
         <ErrorLine message={error} />
       </div>
+      {noHostYet && (
+        <MoreSettings>
+          {thisDevice}
+          {alwaysConfirm}
+          {rotateKeys && <div className="flex max-w-xl flex-col gap-3 px-6 pb-6 max-md:px-4">{rotateKeys}</div>}
+        </MoreSettings>
+      )}
       {removed.length > 0 && (
         <details data-testid="removed-devices" className="group/removed border-t border-border">
           <summary className="flex h-10 cursor-pointer list-none items-center gap-2 px-6 select-none hover:bg-hover max-md:px-4 [&::-webkit-details-marker]:hidden">
@@ -796,17 +838,28 @@ export function ThisDeviceSection({ name, relays }: { name: string | null; relay
   );
 }
 
-/** What comes after signing up: Droppen on the device the AI runs on, from the download page, then added here. */
-export function FirstHostLine() {
+/**
+ * 「更多设置」: what 「我的设备」 keeps folded while the account has no device
+ * that runs AI — this device's direct connections and relays, and the keys'
+ * rotation: nothing to use them with yet, and the first-run card is what
+ * matters. Open when a way in asked for the relays (“change relay…”).
+ */
+export function MoreSettings({ children }: { children: ReactNode }) {
   const { t } = useTranslation();
+  const asked = useStore(askedPlace);
+  const [open, setOpen] = useState(() => askedPlace.get()?.anchor === "relays");
+  useEffect(() => {
+    if (asked?.anchor === "relays") setOpen(true);
+  }, [asked]);
   return (
-    <p data-testid="first-host" className="flex flex-wrap items-center gap-x-2 text-xs leading-5 text-fg">
-      <span>{t("Next: install Droppen on the device your AI runs on, then add it here.")}</span>
-      <a href={publicHref(DOWNLOAD_PATH)} target="_blank" rel="noopener" data-testid="first-host-download" className="inline-flex items-center gap-1 text-fg underline underline-offset-2 hover:no-underline">
-        {t("download page")}
-        <ExternalLink className="size-3" />
-      </a>
-    </p>
+    <details data-testid="more-settings" open={open} onToggle={(e) => setOpen(e.currentTarget.open)} className="group/more border-t border-border">
+      <summary className="flex h-10 cursor-pointer list-none items-center gap-2 border-b border-transparent px-6 select-none group-open/more:border-border hover:bg-hover max-md:px-4 [&::-webkit-details-marker]:hidden">
+        <ChevronRight aria-hidden="true" className="size-3 text-muted transition-transform group-open/more:rotate-90" />
+        <CapsLabel>{t("more settings")}</CapsLabel>
+        <span className="min-w-0 truncate text-xs text-muted">{t("connections, relays and keys")}</span>
+      </summary>
+      {children}
+    </details>
   );
 }
 
