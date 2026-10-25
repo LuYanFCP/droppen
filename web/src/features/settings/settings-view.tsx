@@ -11,6 +11,7 @@ import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
 import { Content, Panel, PanelHeader } from "@/components/panel";
 import { useShowHiddenFiles } from "@/features/files/use-files-prefs";
 import { AccessSection } from "@/features/settings/access-section";
+import { SettingsUpdatesRow } from "@/features/updates/updates-row";
 import { AccountsSection } from "@/features/settings/accounts-section";
 import { ScheduleSection } from "@/features/settings/schedule-section";
 import { ALL_SECTIONS, askedSection, type SectionId } from "@/features/settings/sections";
@@ -646,6 +647,7 @@ function GeneralSettings() {
       <PhoneNotificationsSection />
       <InstallSection />
       <ChatProviderSection />
+      <SettingsUpdatesRow />
       <section className="p-3">
         <h2 data-label="" className={SECTION_TITLE}>
           {t("server info")}
