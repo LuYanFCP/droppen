@@ -71,6 +71,24 @@ jobs:
       - run: pnpm install --frozen-lockfile --filter "@remote-hand/web..."
       - run: pnpm --filter @remote-hand/web test:shard
 
+
+  # The UI spec's machine-checkable invariants (`docs/ui-spec.md` §7): the
+  # fixture renders the real components, Playwright measures them, and a
+  # failure is a change that drifted from the spec. Every web UI change runs
+  # this before it merges.
+  ui-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @remote-hand/e2e exec playwright install --with-deps chromium
+      - run: pnpm ui-audit --check
+
   # The public web build (what droppen.app serves) is reproducible: two fresh
   # checkouts in different directories, built apart under different time
   # zones, give a byte-identical `web/dist`.
