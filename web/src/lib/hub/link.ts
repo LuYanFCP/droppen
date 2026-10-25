@@ -88,6 +88,13 @@ const STABLE_MS = 30_000;
 export const HEARTBEAT_MS = 10_000;
 /** No message at all from the hub for this long, and the connection is taken for dead. */
 export const SILENCE_MS = 25_000;
+/**
+ * How long a wake-up ping (`wake`) has to be answered before the connection is
+ * replaced. A phone's pause can leave a socket that looks open and carries
+ * nothing; waiting the whole {@link SILENCE_MS} for a connection the page has
+ * just come back to is what made every wake cost tens of seconds.
+ */
+export const WAKE_PROBE_MS = 2_000;
 /** The hub's close for a refused sign-in (a bad or expired session among other things). */
 export const SIGN_IN_REFUSED = 4401;
 /** At most one session renewal per this long for refused sign-ins. */
@@ -125,6 +132,8 @@ export interface LinkOptions {
   silenceMs?: number;
   /** How long a connection must keep answering to reset the backoff; 30 s unless a test says otherwise. */
   stableMs?: number;
+  /** How long the wake-up ping waits for an answer; {@link WAKE_PROBE_MS} unless a test says otherwise. */
+  probeMs?: number;
 }
 
 type Listener<T> = (value: T) => void;
@@ -157,6 +166,9 @@ export class HubLink {
   private presenceHeard = false;
   /** A late beat: the page was away, and this connection may have died meanwhile — until it answers. */
   private doubted = false;
+  /** The wake-up ping sent on coming back, and when nothing has answered it: replace the socket. */
+  private probeTimer: ReturnType<typeof setTimeout> | null = null;
+  private probeAnswered = false;
   /** Those waiting for presence to be fresh ({@link waitPresence}). */
   private readonly freshWaiters = new Set<() => void>();
   private readonly routes = new Map<number, (frame: Frame) => void>();
@@ -255,8 +267,9 @@ export class HubLink {
   /**
    * The page is back (in view again, online again, shown from the back-forward
    * cache): closed, connect now — not at the end of a backoff that grew while
-   * it was away; open, check the connection now (a beat: a late one doubts it
-   * until it answers, and replaces it if it does not).
+   * it was away; open, ask it to prove it in {@link WAKE_PROBE_MS}: a beat
+   * alone would let a socket that died in the pause stand for up to a whole
+   * silence, which on a phone is what every return to the app cost.
    */
   wake(): void {
     if (this.stopped) return;
@@ -267,7 +280,46 @@ export class HubLink {
       this.connect();
       return;
     }
-    if (this.state === "open" && this.socket) this.beat(this.socket);
+    if (this.state !== "open" || !this.socket) return;
+    const socket = this.socket;
+    this.beat(socket);
+    this.probe(socket);
+  }
+
+  /** The beat just sent is the probe: unless anything is heard back in `probeMs`, replace the connection at once. */
+  private probe(socket: SocketLike): void {
+    if (this.socket !== socket || this.state !== "open" || this.probeTimer) return;
+    this.probeAnswered = false;
+    this.probeTimer = setTimeout(() => {
+      this.probeTimer = null;
+      if (this.socket !== socket || this.state !== "open") return;
+      // Anything at all from the hub since the probe was sent is an answer.
+      if (this.probeAnswered) return;
+      this.lastClose = null;
+      this.dropConnection();
+      // A dead connection will not finish a closing handshake: let it go in its own time.
+      try {
+        socket.close(4000, "the wake-up ping went unanswered");
+      } catch {
+        // already gone
+      }
+      this.reconnectNow();
+    }, this.opts.probeMs ?? WAKE_PROBE_MS);
+  }
+
+  /** Drop the probe: the connection answered, or is gone. */
+  private answered(): void {
+    if (this.probeTimer) clearTimeout(this.probeTimer);
+    this.probeTimer = null;
+  }
+
+  /** The next connection now, not at the end of a backoff that was waiting for a socket this page has given up on. */
+  private reconnectNow(): void {
+    if (this.stopped) return;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.backoff = BACKOFF_MIN;
+    this.connect();
   }
 
   /** A fresh channel number on this page (never reused), and where its frames go. */
@@ -322,6 +374,8 @@ export class HubLink {
     socket.onmessage = (ev) => {
       if (this.socket !== socket) return;
       this.lastHeard = this.clock();
+      this.probeAnswered = true;
+      this.answered();
       if (this.doubted) {
         // It answered after the pause: it lived through it, and told this page every change meanwhile (before this).
         this.doubted = false;
@@ -458,6 +512,7 @@ export class HubLink {
   private dropConnection(): void {
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = null;
+    this.answered();
     // Stable means it kept answering that long, not that it was open that
     // long: a hub that signs the page in and then says nothing is dropped for
     // silence after about as long, and must not reset the backoff each time.

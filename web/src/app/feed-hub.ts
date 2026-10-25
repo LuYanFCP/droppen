@@ -82,6 +82,8 @@ export interface FeedHubDeps {
   compress?: () => boolean;
   random?: () => number;
   now?: () => number;
+  /** How long a wake-up ping waits for an answer; {@link WAKE_PROBE_MS} unless a test says otherwise. */
+  probeMs?: number;
 }
 
 /** What the page wants from the list half of the socket. */
@@ -96,6 +98,12 @@ export type HubMode = "unknown" | "mux" | "legacy";
 
 export const HEARTBEAT_MS = 25_000;
 export const SILENCE_MS = 60_000;
+/**
+ * How long a socket the page has come back to has to answer a ping before it is
+ * replaced. Without it a phone that slept through the socket's death waited a
+ * whole {@link SILENCE_MS} before anything happened.
+ */
+export const WAKE_PROBE_MS = 2_000;
 /** How many of the list's frames a connection keeps for a list that is not listening yet. */
 export const EARLY_FRAMES = 32;
 const OPEN = 1;
@@ -190,6 +198,9 @@ export class FeedHub {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private heartbeat: ReturnType<typeof setInterval> | undefined;
   private lastHeard = 0;
+  /** The wake-up ping sent on coming back: unless answered, replace the socket now. */
+  private probeTimer: ReturnType<typeof setTimeout> | undefined;
+  private probeAnswered = false;
   private nextSub = 1;
   private readonly channels = new Map<number, Channel>();
   /** `unknown` until the first frame of a connection says which server this is. */
@@ -261,6 +272,7 @@ export class FeedHub {
     this.earlyLost = false;
     clearTimeout(this.timer);
     clearInterval(this.heartbeat);
+    this.answered();
     const ws = this.ws;
     this.ws = null;
     ws?.close();
@@ -293,6 +305,7 @@ export class FeedHub {
     this.ws = null;
     clearInterval(this.heartbeat);
     clearTimeout(this.timer);
+    this.answered();
     for (const channel of [...this.channels.values()]) {
       if (channel.readyState === OPEN) {
         this.channels.delete(channel.sub);
@@ -310,12 +323,39 @@ export class FeedHub {
     this.connect();
   }
 
-  /** Reconnect now rather than at the end of the backoff: the network is back. */
+  /**
+   * The page is back (in view, online again): reconnect now rather than at the
+   * end of the backoff, or, on a socket that is still open, ask it to answer
+   * within {@link WAKE_PROBE_MS} and replace it if it does not. The socket a
+   * phone slept through often still looks open while everything sent on it is
+   * lost; waiting for its heartbeat would cost a whole silence.
+   */
   kick(): void {
-    if (!this.running || this.ws) return;
-    clearTimeout(this.timer);
-    this.retry = 0;
-    this.connect();
+    if (!this.running) return;
+    const ws = this.ws;
+    if (!ws) {
+      clearTimeout(this.timer);
+      this.retry = 0;
+      this.connect();
+      return;
+    }
+    // A server too old to answer pings (no `hello`) is left as it was: there is
+    // nothing to probe it with, and its feeds are their own sockets anyway.
+    if (ws.readyState !== OPEN || this.mode !== "mux" || this.probeTimer) return;
+    this.sendRaw({ type: "ping" });
+    this.probeAnswered = false;
+    this.probeTimer = setTimeout(() => {
+      this.probeTimer = undefined;
+      if (this.ws !== ws || this.probeAnswered) return;
+      // No answer: let go of it now, rather than at the next silence check.
+      this.fresh();
+    }, this.deps.probeMs ?? WAKE_PROBE_MS);
+  }
+
+  /** The socket answered (or is gone): no probe is pending. */
+  private answered(): void {
+    clearTimeout(this.probeTimer);
+    this.probeTimer = undefined;
   }
 
   /**
@@ -421,6 +461,8 @@ export class FeedHub {
     ws.onmessage = (e) => {
       if (this.ws !== ws) return;
       this.lastHeard = this.now();
+      this.probeAnswered = true;
+      this.answered();
       const data = e.data;
       // The common case, a text frame with nothing being decoded ahead of it,
       // is read at once; anything else queues behind whatever is.
@@ -458,6 +500,7 @@ export class FeedHub {
     if (this.ws !== ws) return;
     this.ws = null;
     clearInterval(this.heartbeat);
+    this.answered();
     // Every channel the server held is gone with the socket. A channel still
     // waiting to be subscribed keeps waiting for the next one.
     for (const channel of [...this.channels.values()]) {

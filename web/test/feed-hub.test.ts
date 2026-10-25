@@ -211,6 +211,30 @@ test("a dropped connection closes its channels, and the next one re-subscribes t
   assert.deepEqual((sockets[1]!.sent[0]!.feeds as unknown[])[0], { sub: 2, source: "claude", id: "a", since: 9, fp: "f" });
 });
 
+test("kick probes a socket that only looks open, and replaces it when nothing answers", async (t) => {
+  const { hub, sockets } = harness({ probeMs: 20 });
+  t.after(() => hub.stop());
+  await flush();
+  sockets[0]!.open();
+  sockets[0]!.frame({ type: "hello", features: ["sub", "ping"], compress: null });
+  hub.kick();
+  assert.deepEqual(sockets[0]!.sent.at(-1), { type: "ping" }, "the page coming back asks the socket to prove it");
+  await until(() => sockets.length === 2, "replaced after the wake probe", 1_500);
+});
+
+test("kick keeps a socket that answers the probe", async (t) => {
+  const { hub, sockets } = harness({ probeMs: 20 });
+  t.after(() => hub.stop());
+  await flush();
+  sockets[0]!.open();
+  sockets[0]!.frame({ type: "hello", features: ["sub", "ping"], compress: null });
+  hub.kick();
+  sockets[0]!.frame({ type: "pong" });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(sockets.length, 1, "it answered: it lived through the pause");
+  assert.equal(sockets[0]!.readyState, 1);
+});
+
 test("kick reconnects at once instead of at the end of the backoff", async (t) => {
   const { hub, sockets } = harness({ random: () => 1 });
   t.after(() => hub.stop());
