@@ -1,15 +1,17 @@
 import { Select as BaseSelect } from "@base-ui-components/react/select";
 import { Check, ChevronDown, ChevronUp } from "lucide-react";
-import { memo, useCallback, useLayoutEffect, useMemo, useRef } from "react";
+import { Children, memo, useCallback, useLayoutEffect, useMemo, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/cn";
 
 /**
  * shadcn's Base UI Select, drawn on the drafting sheet:
  * the sheet the app's menus use — `bg`, a 1px `border-strong` frame, square
- * corners, no shadow, 24px rows — the highlighted row tinted with `hover`, the
- * chosen one marked with an ink check; never the system popup, whose blue
- * highlight and rounded menu belong to another app. The list opens against its
- * trigger (`SelectContent`) and is set in the trigger's font.
+ * corners, no shadow, 32px rows (44 under a finger) — one `hover` fill for
+ * pointer and keyboard, the chosen row a `raised` well with an ink check and
+ * 500 weight; never the system popup, whose blue highlight and rounded menu
+ * belong to another app. The list opens 4px against its trigger
+ * (`SelectContent`) and is set in the trigger's font.
  *
  * Root, value and groups are Base UI's own; the parts below only add the look.
  * Keyboard (arrows, Home/End, typeahead, Enter/Space, Escape) and the listbox
@@ -26,14 +28,18 @@ export function SelectValue({ className, ...props }: React.ComponentProps<typeof
 }
 
 const TRIGGER = {
-  // A form field: the same 26px box, border and ink focus as `Input`. Phones
-  // draw it at 16px like the inputs beside it (docs/ui-spec.md §1), so a row
-  // of fields keeps one size even though a button never makes iOS zoom.
+  // A form field: 32px with 12px sides and a 13px sans value (model ids and
+  // paths may set `font-mono` on the trigger), the same box as `Input`. Phones
+  // draw it 40px high and 16px, like the inputs beside it (docs/ui-spec.md
+  // §1/§2), so a row of fields keeps one size even though a button never makes
+  // iOS zoom. Border states: `border` → hover `border-strong` → open `fg`;
+  // keyboard focus is the base layer's 2px ink ring. A disabled field is a
+  // fixed grey box, not the whole control faded.
   field:
-    "flex h-6.5 w-full min-w-0 cursor-pointer items-center justify-between gap-1.5 border border-border bg-bg px-2 text-left font-mono text-2xs text-fg focus:border-fg data-[popup-open]:border-fg disabled:cursor-default disabled:opacity-40 max-md:text-base",
+    "group flex h-8 w-full min-w-0 cursor-pointer items-center justify-between gap-2 border border-border bg-bg px-3 text-left text-[13px] text-fg transition-colors hover:border-border-strong focus:border-fg data-[popup-open]:border-fg disabled:cursor-default disabled:border-border disabled:bg-raised disabled:text-faint max-md:h-10 max-md:text-base",
   // The composer's ghost chip (docs/ui-spec.md §2): 24px, borderless, muted
   // until hovered or open.
-  chip: "relative inline-flex h-6 shrink-0 cursor-pointer items-center gap-0.5 pr-1 pl-1.5 text-left font-mono text-2xs text-muted hover:bg-hover hover:text-fg data-[popup-open]:bg-hover data-[popup-open]:text-fg disabled:cursor-default disabled:opacity-40",
+  chip: "group relative inline-flex h-6 shrink-0 cursor-pointer items-center gap-0.5 pr-1 pl-1.5 text-left font-mono text-2xs text-muted hover:bg-hover hover:text-fg data-[popup-open]:bg-hover data-[popup-open]:text-fg disabled:cursor-default disabled:opacity-40",
 } as const;
 
 export type SelectTriggerVariant = keyof typeof TRIGGER;
@@ -54,8 +60,9 @@ export function SelectTrigger({
       {children}
       <BaseSelect.Icon
         className={cn(
-          "flex shrink-0 text-faint",
-          variant === "chip" ? "[&>svg]:size-2.5" : "[&>svg]:size-3",
+          // 14px and a 150ms half-turn, tied to the trigger's open state.
+          "flex shrink-0 text-faint transition-transform duration-150 ease-out group-data-[popup-open]:rotate-180",
+          variant === "chip" ? "[&>svg]:size-2.5" : "[&>svg]:size-3.5",
           iconClassName,
         )}
       >
@@ -65,12 +72,17 @@ export function SelectTrigger({
   );
 }
 
+// The scroll arrows sit in the list's flow, not over it: a sticky or absolute
+// arrow covers the first/last row it exists to reveal. They scroll with the
+// list, 24px tall, and only appear while there is more in that direction.
 const ARROW =
-  "inset-x-px z-10 flex h-4 cursor-default items-center justify-center border-border bg-bg text-faint [&>svg]:size-3";
+  "flex h-6 w-full cursor-default items-center justify-center border-border bg-bg text-faint [&>svg]:size-3.5";
 
 export function SelectContent({
   className,
   children,
+  variant = "field",
+  emptyLabel,
   side = "bottom",
   align = "start",
   sideOffset = 4,
@@ -80,7 +92,13 @@ export function SelectContent({
 }: Omit<React.ComponentProps<typeof BaseSelect.Positioner>, "className"> & {
   /** Classes for the popup sheet (fonts, widths), not the positioner. */
   className?: string;
+  /** The trigger it hangs from: a field's 13px sans or a chip's 11px mono. */
+  variant?: SelectTriggerVariant;
+  /** What an empty list says; a sentence in muted 13px. */
+  emptyLabel?: string;
 }) {
+  const { t } = useTranslation();
+  const empty = Children.count(children) === 0;
   return (
     <BaseSelect.Portal>
       {/* Against the trigger, 4px off it with the left edges together: below
@@ -97,27 +115,33 @@ export function SelectContent({
         className="z-50 outline-none"
         {...props}
       >
-        <BaseSelect.ScrollUpArrow className={cn(ARROW, "top-px border-b")}>
-          <ChevronUp />
-        </BaseSelect.ScrollUpArrow>
         <BaseSelect.Popup
           className={cn(
-            // Never taller than the room on its side, so a long list scrolls
-            // inside the sheet instead of leaving the screen; at least as wide
-            // as the trigger and never a sliver under a short chip; never
-            // wider than the viewport.
-            "max-h-[min(var(--available-height),20rem)] min-w-[max(var(--anchor-width),8rem)] max-w-[min(var(--available-width),24rem)]",
-            // The menus' sheet (session actions, language, new…), 4px above
-            // the first row and below the last.
-            "overflow-y-auto overscroll-contain border border-border-strong bg-bg py-1 font-mono text-2xs text-fg outline-none",
+            // Never taller than the room on its side (20rem at most), so a long
+            // list scrolls inside the sheet instead of leaving the screen; at
+            // least as wide as the trigger or 10rem, never past 20rem or the
+            // viewport.
+            "max-h-[min(var(--available-height),20rem)] min-w-[max(var(--anchor-width),10rem)] max-w-[min(var(--available-width),20rem)]",
+            // The menus' sheet: 1px `border-strong`, square, no shadow, 6px
+            // above the first row and below the last, and the fade/rise in
+            // `web/src/index.css`.
+            "popup-motion overflow-y-auto overscroll-contain border border-border-strong bg-bg py-1.5 text-fg outline-none",
+            variant === "chip" ? "font-mono text-2xs" : "text-[13px]",
             className,
           )}
         >
-          {children}
+          <BaseSelect.ScrollUpArrow className={cn(ARROW, "border-b")}>
+            <ChevronUp />
+          </BaseSelect.ScrollUpArrow>
+          {empty ? (
+            <div className="px-3 py-2 text-[13px] text-muted">{emptyLabel ?? t("no options")}</div>
+          ) : (
+            children
+          )}
+          <BaseSelect.ScrollDownArrow className={cn(ARROW, "border-t")}>
+            <ChevronDown />
+          </BaseSelect.ScrollDownArrow>
         </BaseSelect.Popup>
-        <BaseSelect.ScrollDownArrow className={cn(ARROW, "bottom-px border-t")}>
-          <ChevronDown />
-        </BaseSelect.ScrollDownArrow>
       </BaseSelect.Positioner>
     </BaseSelect.Portal>
   );
@@ -127,13 +151,14 @@ export function SelectItem({ className, children, ...props }: React.ComponentPro
   return (
     <BaseSelect.Item
       className={cn(
-        // 24px rows like the menus that drop from a button; 36px under a
-        // finger, the size of the phone nav's buttons, with text that can be
-        // read at arm's length. The text starts 8px in, where a form field's
-        // own text does, so the list lines up under the field.
-        "flex min-h-6 cursor-pointer items-center gap-3 px-2 py-1 outline-none select-none",
-        "pointer-coarse:min-h-9 pointer-coarse:text-sm",
-        "data-[highlighted]:bg-hover data-[selected]:text-fg",
+        // 32px rows like the menus that drop from a button; 44px under a
+        // finger. The text starts 12px in, where a form field's own text does,
+        // so the list lines up under the field. One `hover` fill serves the
+        // pointer and the keyboard; the chosen row is a `raised` well with the
+        // 14px ink check and 500 weight, not just a tint.
+        "flex min-h-8 cursor-pointer items-center gap-3 px-3 py-1 outline-none select-none",
+        "pointer-coarse:min-h-11",
+        "data-[highlighted]:bg-hover data-[selected]:bg-raised data-[selected]:font-medium data-[selected]:text-fg",
         "data-[disabled]:cursor-default data-[disabled]:opacity-40",
         className,
       )}
@@ -141,7 +166,7 @@ export function SelectItem({ className, children, ...props }: React.ComponentPro
     >
       <BaseSelect.ItemText className="min-w-0 flex-1 truncate">{children}</BaseSelect.ItemText>
       <BaseSelect.ItemIndicator keepMounted className="flex shrink-0 text-fg not-data-[selected]:invisible">
-        <Check className="size-3" />
+        <Check className="size-3.5" />
       </BaseSelect.ItemIndicator>
     </BaseSelect.Item>
   );
@@ -151,14 +176,14 @@ export function SelectGroupLabel({ className, ...props }: React.ComponentProps<t
   return (
     <BaseSelect.GroupLabel
       data-label=""
-      className={cn("px-2 pt-1.5 pb-1 font-mono text-[10px] tracking-label text-muted uppercase", className)}
+      className={cn("px-3 pt-2 pb-1 font-mono text-[10px] tracking-label text-muted uppercase", className)}
       {...props}
     />
   );
 }
 
 export function SelectSeparator({ className, ...props }: React.ComponentProps<typeof BaseSelect.Separator>) {
-  return <BaseSelect.Separator className={cn("my-1 h-px bg-border", className)} {...props} />;
+  return <BaseSelect.Separator className={cn("my-1.5 h-px bg-border", className)} {...props} />;
 }
 
 /** One entry of a flat select: the stored value and what the list says for it. */
@@ -237,7 +262,7 @@ const SelectFieldView = memo(function SelectFieldView({
       <SelectTrigger variant={variant} className={className} {...trigger}>
         <SelectValue />
       </SelectTrigger>
-      <SelectContent className={popupClassName}>
+      <SelectContent className={popupClassName} variant={variant}>
         {options.map((o) => (
           <SelectItem key={o.value} value={o.value} disabled={o.disabled}>
             {o.label}

@@ -229,6 +229,66 @@ test("a disabled option is listed but cannot be picked", async () => {
   assert.deepEqual(picked, []);
 });
 
+test("a field trigger is 32px, 12px in, 13px sans: hover darkens the border, open inks it, and the chevron turns in 150ms", async () => {
+  await render(<Field />);
+  const t = trigger();
+  assert.match(t.className, /\bh-8\b/, "32px on a desktop");
+  assert.match(t.className, /\bpx-3\b/, "12px of side padding");
+  assert.match(t.className, /text-\[13px\]/, "a 13px sans value");
+  assert.doesNotMatch(t.className, /font-mono/, "the value is not a machine string");
+  assert.match(t.className, /hover:border-border-strong/, "hover");
+  assert.match(t.className, /data-\[popup-open\]:border-fg/, "open");
+  assert.match(t.className, /max-md:h-10/, "40px under a finger");
+  assert.match(t.className, /\bgroup\b/, "the icon turns with its open state");
+  const icon = t.querySelector("svg")?.parentElement;
+  assert.ok(icon, "the chevron");
+  assert.match(icon.className, /group-data-\[popup-open\]:rotate-180/);
+  assert.match(icon.className, /duration-150/, "150ms");
+  assert.match(icon.className, /\[&>svg\]:size-3\.5/, "14px");
+});
+
+test("a disabled field is a fixed grey box, not the whole control faded", async () => {
+  await render(<Field disabled />);
+  const t = trigger();
+  assert.match(t.className, /disabled:bg-raised/);
+  assert.match(t.className, /disabled:text-faint/);
+  assert.match(t.className, /disabled:border-border/);
+  assert.doesNotMatch(t.className, /disabled:opacity-40/);
+});
+
+test("the menu is 32px rows (44 touch), one hover fill, and a raised, 500-weight chosen row with a 14px check", async () => {
+  await render(<Field />);
+  await press(trigger());
+  const list = listbox();
+  assert.ok(list);
+  assert.match(list.className, /max-h-\[min\(var\(--available-height\),20rem\)\]/);
+  assert.match(list.className, /min-w-\[max\(var\(--anchor-width\),10rem\)\]/);
+  assert.match(list.className, /max-w-\[min\(var\(--available-width\),20rem\)\]/);
+  assert.match(list.className, /\bpy-1\.5\b/, "6px above the first row");
+  assert.match(list.className, /popup-motion/, "the 120ms fade and 2px rise");
+  assert.match(list.className, /text-\[13px\]/);
+  const row = option("xhigh");
+  assert.match(row.className, /\bmin-h-8\b/, "32px rows");
+  assert.match(row.className, /pointer-coarse:min-h-11/, "44px under a finger");
+  assert.match(row.className, /\bpx-3\b/, "12px in");
+  assert.match(row.className, /data-\[highlighted\]:bg-hover/, "one fill for pointer and keyboard");
+  assert.match(row.className, /data-\[selected\]:bg-raised/, "the chosen row is a well");
+  assert.match(row.className, /data-\[selected\]:font-medium/, "and 500 weight");
+  const check = row.querySelector("svg");
+  assert.ok(check, "the ink check");
+  assert.match(check.getAttribute("class") ?? "", /size-3\.5/, "14px");
+  assert.equal(options().filter((o) => o.hasAttribute("data-selected")).length, 1, "one chosen row");
+});
+
+test("an empty list says so once, in muted 13px", async () => {
+  await render(<SelectField aria-label="empty" value="" options={[]} onValueChange={() => {}} />);
+  await press(trigger());
+  const list = listbox();
+  assert.ok(list, "the list still opens");
+  assert.equal(list.querySelectorAll('[role="option"]').length, 0);
+  assert.equal(list.textContent, "no options");
+});
+
 test("the composer's chip keeps its look — borderless, 24px, muted mono — and still picks", async () => {
   const picked: string[] = [];
   function Chip() {

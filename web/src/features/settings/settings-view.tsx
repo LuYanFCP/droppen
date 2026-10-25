@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { components } from "@/api/schema";
 import { useFeedSessions, useFeedSettings } from "@/app/global-feed";
+import { SelectField } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
 import { Content, Panel, PanelHeader } from "@/components/panel";
@@ -13,6 +14,16 @@ import { AccessSection } from "@/features/settings/access-section";
 import { AccountsSection } from "@/features/settings/accounts-section";
 import { ScheduleSection } from "@/features/settings/schedule-section";
 import { ALL_SECTIONS, askedSection, type SectionId } from "@/features/settings/sections";
+import {
+  PREFERENCE_ROW,
+  ROW_HINT,
+  ROW_LABEL,
+  SECTION_TITLE,
+  SETTINGS_ACTION,
+  SETTINGS_ACTION_PRIMARY,
+  SETTINGS_COLUMN,
+  SETTINGS_FIELD,
+} from "@/features/settings/layout";
 import { SetupSection } from "@/features/setup/settings-section";
 import { cn } from "@/lib/cn";
 import { formatTime } from "@/lib/format";
@@ -33,9 +44,42 @@ import { mq } from "@/lib/machines/query";
 
 type Prefs = components["schemas"]["Prefs"];
 
-// Use the available pane width: settings can be narrow even on a desktop.
-const preferenceRow =
-  "flex max-w-xl flex-col items-start gap-2 @min-[36rem]/settings:flex-row @min-[36rem]/settings:items-center @min-[36rem]/settings:justify-between @min-[36rem]/settings:gap-4";
+// One row grid for the whole page (features/settings/layout.ts): a fixed
+// 16rem label and 14rem control from 36rem up, stacked below it.
+const preferenceRow = PREFERENCE_ROW;
+
+/** A boolean setting: the square switch of the control vocabulary (native checkbox, square, 28px row). */
+function SettingSwitch({
+  on,
+  label,
+  disabled,
+  onChange,
+}: {
+  on: boolean;
+  label: string;
+  disabled?: boolean;
+  onChange: (on: boolean) => void;
+}) {
+  return (
+    <label
+      className={cn(
+        "flex h-7 items-center gap-2 text-xs font-medium",
+        disabled ? "cursor-not-allowed text-faint" : "cursor-pointer text-muted hover:text-fg",
+      )}
+    >
+      <input
+        type="checkbox"
+        role="switch"
+        checked={on}
+        disabled={disabled}
+        aria-label={label}
+        onChange={(event) => onChange(event.target.checked)}
+        className="size-4 shrink-0 accent-fg"
+      />
+      <span>{label}</span>
+    </label>
+  );
+}
 
 /** Exported for the render tests (`test/cross-device-render.test.tsx`). */
 export function PreferencesSection() {
@@ -66,94 +110,95 @@ export function PreferencesSection() {
 
   return (
     <section className="border-b border-border p-3">
-      <h2 data-label="" className="label-caps -mx-3 -mt-3 mb-3 flex h-9 items-center border-b border-border px-3 text-2xs text-fg">
+      <h2 data-label="" className={SECTION_TITLE}>
         {t("preferences")}
       </h2>
       <div className={preferenceRow}>
         <div>
-          <div className="text-xs">{t("session list grouping")}</div>
-          <div className="text-2xs text-faint">{t("group sessions by project directory")}</div>
+          <div className={ROW_LABEL}>{t("session list grouping")}</div>
+          <div className={ROW_HINT}>{t("group sessions by project directory")}</div>
         </div>
         {prefs ? (
           <Tabs
-            className="max-w-full shrink-0"
+            className="w-full"
             value={prefs.sessionGrouping}
             onValueChange={(v) => save.mutate({ ...prefs, sessionGrouping: v as Prefs["sessionGrouping"] })}
           >
-            <TabsList className="w-40">
+            <TabsList className="w-full">
               <TabsTab value="flat">{t("flat")}</TabsTab>
               <TabsTab value="directory">{t("directory")}</TabsTab>
             </TabsList>
           </Tabs>
         ) : (
-          <span className="font-mono text-2xs text-faint">…</span>
+          <span className="font-mono text-xs text-muted">…</span>
         )}
       </div>
       <div className={cn(preferenceRow, "mt-3")}>
         <div>
-          <div className="text-xs">{t("message display")}</div>
-          <div className="text-2xs text-faint">{t("chat bubbles or a flat list")}</div>
+          <div className={ROW_LABEL}>{t("message display")}</div>
+          <div className={ROW_HINT}>{t("chat bubbles or a flat list")}</div>
         </div>
         {prefs ? (
           <Tabs
-            className="max-w-full shrink-0"
+            className="w-full"
             value={prefs.transcriptStyle}
             onValueChange={(v) => save.mutate({ ...prefs, transcriptStyle: v as Prefs["transcriptStyle"] })}
           >
-            <TabsList className="w-40">
+            <TabsList className="w-full">
               <TabsTab value="flat">{t("flat")}</TabsTab>
               <TabsTab value="bubble">{t("bubbles")}</TabsTab>
             </TabsList>
           </Tabs>
         ) : (
-          <span className="font-mono text-2xs text-faint">…</span>
+          <span className="font-mono text-xs text-muted">…</span>
         )}
       </div>
       {onMain ? (
         <>
           <div className={cn(preferenceRow, "mt-3")}>
             <div>
-              <div className="text-xs">{t("font size")}</div>
-              <div className="text-2xs text-faint">{t("scales the whole UI, synced across devices")}</div>
+              <div className={ROW_LABEL}>{t("font size")}</div>
+              <div className={ROW_HINT}>{t("scales the whole UI, synced across devices")}</div>
             </div>
             {prefs ? (
-              <Tabs
-                className="max-w-full shrink-0"
+              // Four sizes: a select, not a segmented control.
+              <SelectField
+                aria-label={t("font size")}
                 value={prefs.fontSize}
+                options={[
+                  { value: "small", label: "sm" },
+                  { value: "default", label: "md" },
+                  { value: "large", label: "lg" },
+                  { value: "xlarge", label: "xl" },
+                ]}
                 onValueChange={(v) => save.mutate({ ...prefs, fontSize: v as Prefs["fontSize"] })}
-              >
-                <TabsList className="w-56">
-                  <TabsTab value="small">sm</TabsTab>
-                  <TabsTab value="default">md</TabsTab>
-                  <TabsTab value="large">lg</TabsTab>
-                  <TabsTab value="xlarge">xl</TabsTab>
-                </TabsList>
-              </Tabs>
+              />
             ) : (
-              <span className="font-mono text-2xs text-faint">…</span>
+              <span className="font-mono text-xs text-muted">…</span>
             )}
           </div>
           <div className={cn(preferenceRow, "mt-3")}>
             <div>
-              <div className="text-xs">{t("language")}</div>
-              <div className="text-2xs text-faint">{t("auto follows the browser language")}</div>
+              <div className={ROW_LABEL}>{t("language")}</div>
+              <div className={ROW_HINT}>{t("auto follows the browser language")}</div>
             </div>
             {prefs ? (
-              <Tabs
-                className="max-w-full shrink-0"
+              // Five languages: a select. An 11px segmented strip could not
+              // hold 简体 / 繁體 / 日本語 without shrinking the text.
+              <SelectField
+                aria-label={t("language")}
                 value={prefs.language}
+                options={[
+                  { value: "auto", label: t("auto") },
+                  { value: "en", label: "EN" },
+                  { value: "zh-CN", label: "简体" },
+                  { value: "zh-TW", label: "繁體" },
+                  { value: "ja", label: "日本語" },
+                ]}
                 onValueChange={(v) => save.mutate({ ...prefs, language: v as Prefs["language"] })}
-              >
-                <TabsList className="w-72 max-w-full">
-                  <TabsTab value="auto">{t("auto")}</TabsTab>
-                  <TabsTab value="en">EN</TabsTab>
-                  <TabsTab value="zh-CN">简体</TabsTab>
-                  <TabsTab value="zh-TW">繁體</TabsTab>
-                  <TabsTab value="ja">日本語</TabsTab>
-                </TabsList>
-              </Tabs>
+              />
             ) : (
-              <span className="font-mono text-2xs text-faint">…</span>
+              <span className="font-mono text-xs text-muted">…</span>
             )}
           </div>
         </>
@@ -162,16 +207,16 @@ export function PreferencesSection() {
         // (`PrefsSync`): set here they would be saved on this device and
         // never applied.
         <div data-appearance-on-main="" className={cn(preferenceRow, "mt-3")}>
-          <div className="text-2xs text-faint">{t("Font size and language follow the main device: change them in its settings.")}</div>
-          <MachineLink machine={home} to="/settings" className="shrink-0 font-mono text-2xs text-accent hover:underline">
+          <div className={ROW_HINT}>{t("Font size and language follow the main device: change them in its settings.")}</div>
+          <MachineLink machine={home} to="/settings" className="shrink-0 text-[13px] font-medium text-fg underline underline-offset-2 hover:text-muted">
             {t("main device settings")}
           </MachineLink>
         </div>
       )}
       <div className={cn(preferenceRow, "mt-3")}>
         <div>
-          <div className="text-xs">{t("composer send shortcut")}</div>
-          <div className="text-2xs text-faint">
+          <div className={ROW_LABEL}>{t("composer send shortcut")}</div>
+          <div className={ROW_HINT}>
             {prefs?.composerSend === "modifier"
               ? t("⌘/Ctrl+Enter sends · Enter inserts a newline")
               : t("Enter sends · Shift+Enter inserts a newline")}
@@ -179,32 +224,32 @@ export function PreferencesSection() {
         </div>
         {prefs ? (
           <Tabs
-            className="max-w-full shrink-0"
+            className="w-full"
             value={prefs.composerSend}
             onValueChange={(v) => save.mutate({ ...prefs, composerSend: v as Prefs["composerSend"] })}
           >
-            <TabsList className="w-40">
+            <TabsList className="w-full">
               <TabsTab value="enter">{t("enter")}</TabsTab>
               <TabsTab value="modifier">⌘+enter</TabsTab>
             </TabsList>
           </Tabs>
         ) : (
-          <span className="font-mono text-2xs text-faint">…</span>
+          <span className="font-mono text-xs text-muted">…</span>
         )}
       </div>
       <div className={cn(preferenceRow, "mt-3")}>
         <div>
-          <div className="text-xs">{t("show hidden files")}</div>
-          <div className="text-2xs text-faint">
+          <div className={ROW_LABEL}>{t("show hidden files")}</div>
+          <div className={ROW_HINT}>
             {t("dot-files in the file browser · this device only")}
           </div>
         </div>
         <Tabs
-          className="max-w-full shrink-0"
+          className="w-full"
           value={showHiddenFiles ? "show" : "hide"}
           onValueChange={(v) => setShowHiddenFiles(v === "show")}
         >
-          <TabsList className="w-40">
+          <TabsList className="w-full">
             <TabsTab value="hide">{t("hide")}</TabsTab>
             <TabsTab value="show">{t("show")}</TabsTab>
           </TabsList>
@@ -251,13 +296,13 @@ function NotificationsSection() {
 
   return (
     <section className="border-b border-border p-3">
-      <h2 data-label="" className="label-caps -mx-3 -mt-3 mb-3 flex h-9 items-center border-b border-border px-3 text-2xs text-fg">
+      <h2 data-label="" className={SECTION_TITLE}>
         {t("notifications")}
       </h2>
-      <div className="flex max-w-xl items-center justify-between gap-4">
+      <div className={preferenceRow}>
         <div className="min-w-0">
-          <div className="text-xs">{t("push notifications")}</div>
-          <div className="text-2xs text-faint">
+          <div className={ROW_LABEL}>{t("push notifications")}</div>
+          <div className={ROW_HINT}>
             {t("Ping this browser when a session finishes a turn or asks for input.")}
           </div>
           {state === "denied" && (
@@ -266,30 +311,24 @@ function NotificationsSection() {
             </div>
           )}
           {state === "unsupported" && (
-            <div className="mt-0.5 text-2xs text-faint">
+            <div className="mt-0.5 text-2xs text-muted">
               {t("Unavailable here: push needs a service worker, which means a production build over https (or localhost).")}
             </div>
           )}
           {error !== "" && <div data-signal="failed" className="mt-0.5 font-mono text-2xs text-danger">{error}</div>}
         </div>
         {state === "loading" ? (
-          <span className="font-mono text-2xs text-faint">…</span>
+          <span className="font-mono text-xs text-muted">…</span>
         ) : state === "on" || state === "off" ? (
-          <button
-            type="button"
+          // A boolean, so a square switch, not a 24px button with a verb.
+          <SettingSwitch
+            on={state === "on"}
             disabled={busy}
-            onClick={() => void toggle()}
-            className={cn(
-              "flex h-7 w-24 shrink-0 items-center justify-center rounded font-mono text-2xs disabled:opacity-40",
-              state === "on"
-                ? "border border-border text-muted hover:bg-hover hover:text-fg"
-                : "bg-fg text-bg hover:bg-fg/85",
-            )}
-          >
-            {busy ? t("saving…") : state === "on" ? t("disable") : t("enable")}
-          </button>
+            label={state === "on" ? t("enabled") : t("disabled")}
+            onChange={() => void toggle()}
+          />
         ) : (
-          <span className="shrink-0 font-mono text-2xs text-faint">{t("unavailable")}</span>
+          <span className="shrink-0 font-mono text-xs text-muted">{t("unavailable")}</span>
         )}
       </div>
     </section>
@@ -342,22 +381,22 @@ function PhoneNotificationsSection() {
 
   const dirty = endpoint.trim() !== "" || baseUrl !== null;
   const armed = config?.hasEndpoint ?? false;
-  const field =
-    "h-6.5 w-full rounded border border-border bg-bg px-2 font-mono text-2xs text-fg placeholder:text-faint focus:border-fg focus:outline-none";
+  // A device key and an address: values, so mono.
+  const field = cn(SETTINGS_FIELD, "font-mono");
 
   return (
     <section className="border-b border-border p-3">
-      <h2 data-label="" className="label-caps -mx-3 -mt-3 mb-3 flex h-9 items-center border-b border-border px-3 text-2xs text-fg">
+      <h2 data-label="" className={SECTION_TITLE}>
         {t("phone notifications")}
       </h2>
-      <div className="flex max-w-xl flex-col gap-2">
-        <p className="text-2xs text-faint">
+      <div className={cn(SETTINGS_COLUMN, "flex flex-col gap-2")}>
+        <p className="text-xs leading-[18px] text-muted">
           {t(
             "Lets a session interrupt you on purpose — when it is blocked on a decision, has found something you would want to stop for, or has finished. Delivered by Bark on iOS; the device key stays on the server and is never given to the agent.",
           )}
         </p>
         <label className="flex flex-col gap-1">
-          <span className="text-2xs text-faint">
+          <span className="text-xs text-muted">
             {t("bark device key or endpoint")}{" "}
             {armed && t("· saved (enter a new one to replace)")}
           </span>
@@ -370,14 +409,14 @@ function PhoneNotificationsSection() {
           />
         </label>
         <label className="flex flex-col gap-1">
-          <span className="text-2xs text-faint">{t("address your phone opens")}</span>
+          <span className="text-xs text-muted">{t("address your phone opens")}</span>
           <input
             value={baseUrl ?? config?.baseUrl ?? ""}
             onChange={(e) => setBaseUrl(e.target.value)}
             placeholder={window.location.origin}
             className={field}
           />
-          <span className="text-2xs text-faint">
+          <span className="text-xs text-muted">
             {t("Tapping a notification opens the session it came from. Leave it empty for no link.")}
           </span>
         </label>
@@ -396,7 +435,7 @@ function PhoneNotificationsSection() {
                 ...(!armed && endpoint.trim() !== "" ? { enabled: true } : {}),
               });
             }}
-            data-variant="primary" className="flex h-7 w-24 items-center justify-center bg-fg text-xs font-medium text-bg hover:bg-fg/85 disabled:opacity-40"
+            data-variant="primary" className={SETTINGS_ACTION_PRIMARY}
           >
             {save.isPending ? t("saving…") : t("save")}
           </button>
@@ -408,27 +447,22 @@ function PhoneNotificationsSection() {
               test.mutate();
             }}
             title={dirty ? t("save first") : undefined}
-            className="flex h-7 items-center justify-center rounded border border-border px-3 font-mono text-2xs text-muted hover:bg-hover hover:text-fg disabled:opacity-40"
+            className={SETTINGS_ACTION}
           >
             {test.isPending ? t("sending…") : t("send test")}
           </button>
           {armed && (
-            <button
-              type="button"
-              disabled={save.isPending}
-              onClick={() => {
-                setSent(false);
-                save.mutate({ enabled: !config?.enabled });
-              }}
-              className={cn(
-                "ml-auto flex h-7 w-24 items-center justify-center rounded font-mono text-2xs disabled:opacity-40",
-                config?.enabled
-                  ? "border border-border text-muted hover:bg-hover hover:text-fg"
-                  : "bg-fg text-bg hover:bg-fg/85",
-              )}
-            >
-              {config?.enabled ? t("disable") : t("enable")}
-            </button>
+            <span className="ml-auto">
+              <SettingSwitch
+                on={config?.enabled ?? false}
+                disabled={save.isPending}
+                label={config?.enabled ? t("enabled") : t("disabled")}
+                onChange={() => {
+                  setSent(false);
+                  save.mutate({ enabled: !config?.enabled });
+                }}
+              />
+            </span>
           )}
         </div>
         {armed && !config?.enabled && (
@@ -462,17 +496,17 @@ function InstallSection() {
 
   return (
     <section className="border-b border-border p-3">
-      <h2 data-label="" className="label-caps -mx-3 -mt-3 mb-3 flex h-9 items-center border-b border-border px-3 text-2xs text-fg">
+      <h2 data-label="" className={SECTION_TITLE}>
         {t("install")}
       </h2>
-      <div className="flex max-w-xl items-center justify-between gap-4">
+      <div className={preferenceRow}>
         <div className="min-w-0">
-          <div className="text-xs">{t("home screen app")}</div>
-          <div className="text-2xs text-faint">
+          <div className={ROW_LABEL}>{t("home screen app")}</div>
+          <div className={ROW_HINT}>
             {t("Opens full-screen with its own icon, and can badge it when a session needs you.")}
           </div>
           {state === "ios-hint" && (
-            <div className="mt-0.5 text-2xs text-faint">
+            <div className="mt-0.5 text-xs text-muted">
               {t("On iOS: tap the Share button in Safari, then “Add to Home Screen”.")}
             </div>
           )}
@@ -481,7 +515,7 @@ function InstallSection() {
           <button
             type="button"
             onClick={() => void promptInstall()}
-            data-variant="primary" className="flex h-7 w-24 shrink-0 items-center justify-center bg-fg text-xs font-medium text-bg hover:bg-fg/85"
+            data-variant="primary" className={SETTINGS_ACTION_PRIMARY}
           >
             {t("install app")}
           </button>
@@ -528,17 +562,17 @@ function ChatProviderSection() {
   });
 
   const dirty = baseUrl !== null || apiKey !== "" || model !== null;
-  const field =
-    "h-6.5 w-full rounded border border-border bg-bg px-2 font-mono text-2xs text-fg placeholder:text-faint focus:border-fg focus:outline-none";
+  // A base URL, a key and a model id: values, so mono.
+  const field = cn(SETTINGS_FIELD, "font-mono");
 
   return (
     <section className="border-b border-border p-3">
-      <h2 data-label="" className="label-caps -mx-3 -mt-3 mb-3 flex h-9 items-center border-b border-border px-3 text-2xs text-fg">
+      <h2 data-label="" className={SECTION_TITLE}>
         {t("instant chat · api provider")}
       </h2>
-      <div className="flex max-w-xl flex-col gap-2">
+      <div className={cn(SETTINGS_COLUMN, "flex flex-col gap-2")}>
         <label className="flex flex-col gap-1">
-          <span className="text-2xs text-faint">{t("base url (openai-compatible)")}</span>
+          <span className="text-xs text-muted">{t("base url (openai-compatible)")}</span>
           <input
             value={baseUrl ?? provider?.baseUrl ?? ""}
             onChange={(e) => setBaseUrl(e.target.value)}
@@ -547,7 +581,7 @@ function ChatProviderSection() {
           />
         </label>
         <label className="flex flex-col gap-1">
-          <span className="text-2xs text-faint">
+          <span className="text-xs text-muted">
             {t("api key")} {provider?.hasKey && t("· saved (enter a new one to replace)")}
           </span>
           <input
@@ -559,7 +593,7 @@ function ChatProviderSection() {
           />
         </label>
         <label className="flex flex-col gap-1">
-          <span className="text-2xs text-faint">{t("default model")}</span>
+          <span className="text-xs text-muted">{t("default model")}</span>
           <input
             value={model ?? provider?.model ?? ""}
             onChange={(e) => setModel(e.target.value)}
@@ -571,7 +605,7 @@ function ChatProviderSection() {
           type="button"
           disabled={!dirty || save.isPending}
           onClick={() => save.mutate()}
-          data-variant="primary" className="flex h-7 w-24 items-center justify-center bg-fg text-xs font-medium text-bg hover:bg-fg/85 disabled:opacity-40"
+          data-variant="primary" className={SETTINGS_ACTION_PRIMARY}
         >
           {t("save")}
         </button>
@@ -613,12 +647,12 @@ function GeneralSettings() {
       <InstallSection />
       <ChatProviderSection />
       <section className="p-3">
-        <h2 data-label="" className="label-caps -mx-3 -mt-3 mb-3 flex h-9 items-center border-b border-border px-3 text-2xs text-fg">
+        <h2 data-label="" className={SECTION_TITLE}>
           {t("server info")}
         </h2>
         {isPending && <Spinner />}
         {data && (
-          <table className="w-full max-w-xl">
+          <table className={SETTINGS_COLUMN}>
             <tbody>
               {rows.map(([k, v]) => (
                 <tr key={k} className="border-b border-border">
@@ -674,7 +708,8 @@ export function SettingsView() {
         </div>
       </Panel>
       <Content className="@container/settings">
-        <header className="flex min-h-8 shrink-0 flex-col justify-center gap-1 border-b border-border bg-bg px-4 py-1 md:h-8 md:flex-row md:items-center md:justify-between md:py-0">
+        {/* The page title and every section title start at the same 12px. */}
+        <header className="flex min-h-8 shrink-0 flex-col justify-center gap-1 border-b border-border bg-bg px-3 py-1 md:h-8 md:flex-row md:items-center md:justify-between md:py-0">
           <span className="text-[13px] font-semibold max-md:hidden">{t(section)}</span>
           {devices && <span className="flex min-w-0 justify-end max-md:hidden">{devices}</span>}
           <div
@@ -686,7 +721,9 @@ export function SettingsView() {
             }}
           >
             <Tabs value={section} onValueChange={(v) => setSection(v as SectionId)}>
-              <TabsList className="w-max min-w-full">
+              {/* Phone category strip: 36px, one scrolling row, labels never
+                  wrap or shrink (docs/ui-spec.md §4). */}
+              <TabsList className="h-9 w-max min-w-full">
                 {ALL_SECTIONS.map((id) => (
                   <TabsTab key={id} value={id} className="shrink-0 whitespace-nowrap">
                     {t(id)}

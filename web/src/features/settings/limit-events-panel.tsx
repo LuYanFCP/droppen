@@ -132,17 +132,17 @@ export function LimitEventsPanel({ accounts }: { accounts: Account[] }) {
   const list = events.data?.events ?? [];
 
   return (
-    <div className="mt-4 max-w-3xl">
+    <div className="mt-4 w-full max-w-3xl">
       <div className="flex items-center gap-1.5 py-1">
         <button
           type="button"
           aria-expanded={open}
           onClick={() => setOpen((v) => !v)}
-          className="flex items-center gap-1 rounded px-1 py-0.5 font-mono text-2xs text-muted hover:bg-hover hover:text-fg"
+          className="flex h-7 items-center gap-1.5 rounded px-2 text-xs font-medium text-muted hover:bg-hover hover:text-fg"
         >
           <ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} />
           {t("limit log")}
-          <span className="rounded bg-raised px-1 tabular-nums text-faint">
+          <span className="tabular-nums text-faint">
             {events.isPending ? "…" : events.isError ? "?" : list.length}
           </span>
         </button>

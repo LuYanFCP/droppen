@@ -41,6 +41,12 @@ import { LimitEventsPanel } from "@/features/settings/limit-events-panel";
 import { isImeKeydown } from "@/lib/ime";
 import { cn } from "@/lib/cn";
 import { Sheet } from "@/components/sheet";
+import {
+  SETTINGS_ACTION,
+  SETTINGS_ACTION_PRIMARY,
+  SETTINGS_COLUMN,
+  SETTINGS_FIELD,
+} from "@/features/settings/layout";
 import { useApi, useMachine } from "@/lib/machines/context";
 import { mq } from "@/lib/machines/query";
 
@@ -61,8 +67,7 @@ const PROVIDERS: AccountProvider[] = ["claude", "codex"];
 /** Proper names, untranslated: they are the products' own spelling. */
 const PROVIDER_NAME: Record<AccountProvider, string> = { claude: "Claude", codex: "Codex" };
 
-const field =
-  "h-6.5 w-full rounded border border-border bg-bg px-2 font-mono text-2xs text-fg placeholder:text-faint focus:border-fg focus:outline-none";
+const field = SETTINGS_FIELD;
 
 /** Label cell that turns into an input on click; Enter commits, Escape reverts. */
 function AccountLabel({ account }: { account: Account }) {
@@ -232,7 +237,7 @@ function AccountRow({
           onChange={onMakeDefault}
           className="size-3 accent-accent"
         />
-        <span className="font-mono text-2xs text-faint">{t("default")}</span>
+        <span className="text-xs text-muted">{t("default")}</span>
       </label>
       <AccountLabel account={account} />
       <Badge variant={provider}>{PROVIDER_NAME[provider]}</Badge>
@@ -290,7 +295,7 @@ function AccountRow({
           type="button"
           onClick={onEnableUsage}
           title={t("log this account in to /usage so its quota shows up")}
-          className="rounded px-1.5 py-0.5 font-mono text-2xs text-accent hover:bg-accent/15"
+          className="rounded px-1.5 py-0.5 text-xs font-medium text-fg hover:bg-hover"
         >
           {usage === "login_expired" ? t("log in to usage again") : t("enable usage")}
         </button>
@@ -308,7 +313,7 @@ function AccountRow({
               onChange={(e) => rotate.mutate(e.target.checked)}
               className="size-3 accent-accent"
             />
-            <span className="font-mono text-2xs text-faint">{t("auto-rotation")}</span>
+            <span className="text-xs text-muted">{t("auto-rotation")}</span>
           </label>
         )}
         {/*
@@ -338,7 +343,7 @@ function AccountRow({
             <button
               type="button"
               disabled={remove.isPending}
-              onClick={() => remove.mutate()} data-signal="failed" className="rounded px-1.5 py-0.5 font-mono text-2xs text-danger hover:bg-danger/15 disabled:opacity-40"
+              onClick={() => remove.mutate()} data-signal="failed" className="rounded px-1.5 py-0.5 text-xs font-medium text-danger hover:bg-hover disabled:opacity-40"
             >
               {remove.isPending ? t("removing…") : t("remove")}
             </button>
@@ -461,9 +466,9 @@ function AddAccountForm({
   const ready = label.trim() !== "" && credentialReady && !add.isPending;
 
   return (
-    <div className="mt-2 flex max-w-xl flex-col gap-2 rounded border border-border bg-panel p-2">
+    <div className={cn(SETTINGS_COLUMN, "mt-2 flex flex-col gap-2 border border-border bg-panel p-2")}>
       <div className="flex flex-col gap-1">
-        <span className="text-2xs text-faint">{t("cli")}</span>
+        <span className="text-xs text-muted">{t("cli")}</span>
         <Tabs
           value={provider}
           onValueChange={(value) => {
@@ -471,14 +476,14 @@ function AddAccountForm({
             setUnverified(null);
           }}
         >
-          <TabsList className="w-40">
+          <TabsList className="w-full">
             <TabsTab value="claude">claude</TabsTab>
             <TabsTab value="codex">codex</TabsTab>
           </TabsList>
         </Tabs>
       </div>
       <label className="flex flex-col gap-1">
-        <span className="text-2xs text-faint">{t("how it authenticates")}</span>
+        <span className="text-xs text-muted">{t("how it authenticates")}</span>
         {provider === "claude" ? (
           <SelectField<AddMode>
             value={mode}
@@ -492,7 +497,7 @@ function AddAccountForm({
 
       {effectiveMode === "oauth_wizard" ? (
         <>
-          <p className="text-2xs text-faint">
+          <p className="text-xs leading-[18px] text-muted">
             {t(
               "Runs `claude setup-token` in a terminal here. Nothing opens a browser: copy the URL it prints, authorize it yourself, and paste the code back — the token is then stored as a new account.",
             )}
@@ -501,14 +506,14 @@ function AddAccountForm({
             <button
               type="button"
               onClick={onRunWizard}
-              data-variant="primary" className="flex h-7 items-center justify-center gap-1.5 bg-fg px-3 text-xs font-medium text-bg hover:bg-fg/85"
+              data-variant="primary" className={SETTINGS_ACTION_PRIMARY}
             >
               {t("run setup-token wizard")}
             </button>
             <button
               type="button"
               onClick={onDone}
-              className="flex h-7 items-center justify-center rounded border border-border px-3 font-mono text-2xs text-muted hover:bg-hover hover:text-fg"
+              className={SETTINGS_ACTION}
             >
               {t("cancel")}
             </button>
@@ -517,7 +522,7 @@ function AddAccountForm({
       ) : (
         <>
           <label className="flex flex-col gap-1">
-            <span className="text-2xs text-faint">{t("label")}</span>
+            <span className="text-xs text-muted">{t("label")}</span>
             <input
               autoFocus
               value={label}
@@ -536,7 +541,7 @@ function AddAccountForm({
             />
           ) : (
             <label className="flex flex-col gap-1">
-              <span className="text-2xs text-faint">
+              <span className="text-xs text-muted">
                 {t("oauth token")}
                 {" · "}
                 {t("stored on the server, never shown again")}
@@ -568,7 +573,7 @@ function AddAccountForm({
               type="button"
               disabled={!ready}
               onClick={() => add.mutate()}
-              data-variant="primary" className="flex h-7 items-center justify-center gap-1.5 bg-fg px-3 text-xs font-medium text-bg hover:bg-fg/85 disabled:opacity-40"
+              data-variant="primary" className={SETTINGS_ACTION_PRIMARY}
             >
               {add.isPending && <Loader2 className="size-3 animate-spin" />}
               {t("add account")}
@@ -576,7 +581,7 @@ function AddAccountForm({
             <button
               type="button"
               onClick={onDone}
-              className="flex h-7 items-center justify-center rounded border border-border px-3 font-mono text-2xs text-muted hover:bg-hover hover:text-fg"
+              className={SETTINGS_ACTION}
             >
               {t("cancel")}
             </button>
@@ -704,7 +709,7 @@ function ProviderGroup({
           onReauth={() => onReauth(account)}
         />
       ))}
-      {accounts.length === 0 && <p className="py-2 font-mono text-2xs text-faint">{t("no accounts yet")}</p>}
+      {accounts.length === 0 && <p className="py-2 text-xs text-muted">{t("no accounts yet")}</p>}
     </div>
   );
 }
@@ -754,16 +759,16 @@ export function AccountsSection() {
 
   return (
     <Sheet className="p-3">
-      <p className="max-w-2xl text-2xs text-faint">
+      <p className={cn(SETTINGS_COLUMN, "text-xs leading-[18px] text-muted")}>
         {t(
           "Sessions started under an account use Droppen's own Claude config dir, so they never touch your local login. Sessions you start from a terminal keep using the local login.",
         )}
       </p>
-      <p className="mt-1 max-w-2xl text-2xs text-faint">
+      <p className={cn(SETTINGS_COLUMN, "mt-1 text-xs leading-[18px] text-muted")}>
         {t("A local token is handed to the CLI through its environment instead, for the session it starts.")}
       </p>
       {settings?.claudeManagedDir && (
-        <p className="mt-1 font-mono text-2xs text-faint">
+        <p className={cn(SETTINGS_COLUMN, "mt-1 font-mono text-xs text-muted")}>
           {t("managed config dir")}: <span className="break-all text-muted">{settings.claudeManagedDir}</span>
         </p>
       )}
@@ -804,7 +809,7 @@ export function AccountsSection() {
         )}
       </div>
 
-      <div className="mt-3 max-w-3xl">
+      <div className={cn(SETTINGS_COLUMN, "mt-3")}>
         {adding ? (
           <AddAccountForm
             provider={addProvider}
@@ -816,7 +821,7 @@ export function AccountsSection() {
           <button
             type="button"
             onClick={() => setAdding(true)}
-            data-variant="primary" className="flex h-7 items-center gap-1.5 bg-fg px-3 text-xs font-medium text-bg hover:bg-fg/85"
+            data-variant="primary" className={SETTINGS_ACTION_PRIMARY}
           >
             <Plus className="size-3" />
             {t("add account")}

@@ -696,6 +696,7 @@ export const ja: Record<string, string> = {
   "system message": "システムメッセージ",
   "match {{n}} of {{total}}": "{{total}} 件中 {{n}} 件目",
   "no matches": "一致なし",
+  "no options": "選択肢なし",
   "older match (Enter)": "古い一致へ（Enter）",
   "newer match (Shift+Enter)": "新しい一致へ（Shift+Enter）",
   "list of matches": "一致の一覧",

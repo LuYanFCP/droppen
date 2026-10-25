@@ -175,6 +175,30 @@ svg.lucide[stroke-width="2"] {
   }
 }
 
+/* Floating sheets (a select's list, a menu) settle in over 120ms: opacity and
+   a 2px rise, ease-out. Under `prefers-reduced-motion` the movement is gone and
+   only the fade is kept (docs/ui-spec.md §2). Base UI marks the first and last
+   painted frame with `data-starting-style` / `data-ending-style`. */
+.popup-motion {
+  transition:
+    opacity 120ms ease-out,
+    transform 120ms ease-out;
+}
+.popup-motion[data-starting-style],
+.popup-motion[data-ending-style] {
+  opacity: 0;
+  transform: translateY(2px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .popup-motion {
+    transition: opacity 120ms ease-out;
+  }
+  .popup-motion[data-starting-style],
+  .popup-motion[data-ending-style] {
+    transform: none;
+  }
+}
+
 /* Small uppercase machine labels: section titles, table heads, message roles. */
 @utility label-caps {
   font-family: var(--font-mono);

@@ -695,6 +695,7 @@ export const zhTW: Record<string, string> = {
   "system message": "系統訊息",
   "match {{n}} of {{total}}": "第 {{n}} 筆，共 {{total}} 筆",
   "no matches": "沒有符合項目",
+  "no options": "沒有可選項",
   "older match (Enter)": "更早的符合項目（Enter）",
   "newer match (Shift+Enter)": "較新的符合項目（Shift+Enter）",
   "list of matches": "符合項目清單",

@@ -695,6 +695,7 @@ export const zhCN: Record<string, string> = {
   "system message": "系统消息",
   "match {{n}} of {{total}}": "第 {{n}} 条，共 {{total}} 条",
   "no matches": "没有匹配",
+  "no options": "没有可选项",
   "older match (Enter)": "更早的匹配（Enter）",
   "newer match (Shift+Enter)": "较新的匹配（Shift+Enter）",
   "list of matches": "匹配列表",

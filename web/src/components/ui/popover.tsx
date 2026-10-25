@@ -15,9 +15,10 @@ export function PopoverContent({
 }) {
   return (
     <BasePopover.Portal>
-      <BasePopover.Positioner side={side} sideOffset={6} className="z-50 outline-none">
+      {/* 4px off the trigger, like a select's list (docs/ui-spec.md §2). */}
+      <BasePopover.Positioner side={side} sideOffset={4} className="z-50 outline-none">
         <BasePopover.Popup
-          className={cn("border border-border-strong bg-bg p-3 outline-none", className)}
+          className={cn("popup-motion border border-border-strong bg-bg p-3 outline-none", className)}
         >
           {children}
         </BasePopover.Popup>
