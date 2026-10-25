@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+/* The UI audit fixture (`web/ui-audit`, run by `scripts/ui-audit`) renders the
+   real components outside the app. It is not a source of production CSS: its
+   classes are already used by `web/src`, and scanning it would change the
+   built stylesheet (and its hash) for no product reason. */
+@source not "../ui-audit";
+
 /* Pane width, not viewport width: three desktop panes need the same compact
    preview navigation as a phone. No second file-browser implementation. */
 .files-browser { container-type: inline-size; }

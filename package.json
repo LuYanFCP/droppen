@@ -24,7 +24,8 @@
     "test:publish-release": "node --test scripts/publish-release.test.mjs",
     "test:release-notes": "node --test scripts/release-notes.test.mjs",
     "test:ai-attribution": "node --test scripts/check-ai-attribution.test.mjs",
-    "test:sdk": "pnpm --filter @droppen/plugin-sdk test"
+    "test:sdk": "pnpm --filter @droppen/plugin-sdk test",
+    "ui-audit": "node scripts/ui-audit/run.mjs"
   },
   "pnpm": {
     "overrides": {

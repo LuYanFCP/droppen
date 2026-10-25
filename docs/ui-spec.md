@@ -76,7 +76,7 @@ composer 的附加文件/拍照与 ghost 选项为 24px，主发送按钮为 26p
 
 ## 7. 视觉语言（可机检）
 
-以下规则以 computed style 为准，由界面一致性扫描脚本（内部工具，不在公开仓库）逐项检查；`[data-signal]`、`[data-edge]`、`[data-activity]`、`[data-unread]`、`[data-pane-state]` 标出合法使用状态色的元素。
+以下规则以 computed style 为准，由仓库内的 `scripts/ui-audit`（`pnpm ui-audit --check`，配合 `.claude/skills/ui-consistency`）逐项检查；`[data-signal]`、`[data-edge]`、`[data-activity]`、`[data-unread]`、`[data-pane-state]` 标出合法使用状态色的元素。每次修改 `web/src` 里的 UI，合并前都要跑一次 before/after。
 
 | # | 规则 | 检查方法 | 允许的例外 |
 | --- | --- | --- | --- |

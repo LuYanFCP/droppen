@@ -1,0 +1,310 @@
+#!/usr/bin/env node
+/*
+ * Droppen UI audit — the executable half of `.claude/skills/ui-consistency`.
+ *
+ * Renders the fixture in `web/ui-audit/` with the real Vite/Tailwind setup and
+ * the real production components, then measures computed styles and captures
+ * screenshots with Playwright. It is a reporting tool by default; `--check`
+ * turns the target invariants in `docs/ui-spec.md` into a pass/fail gate for
+ * UI changes.
+ *
+ *   pnpm ui-audit                     # report + screenshots
+ *   pnpm ui-audit --check             # fail on a spec violation
+ *   pnpm ui-audit --url http://127.0.0.1:8700/settings
+ *                                     # measure a running page (no fixture)
+ *
+ * Options:
+ *   --out <dir>        where measurements/screenshots go (default /tmp/droppen-ui-audit-<date>)
+ *   --theme <t>        light | dark | both (default both)
+ *   --viewport <v>     desktop | mobile | both (default both)
+ *   --channel <name>   Playwright browser channel, e.g. chrome (default: bundled Chromium)
+ *   --url <url>        skip the fixture and audit a running page
+ *   --check            exit 1 if any target invariant fails
+ */
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+import fs from "node:fs/promises";
+import path from "node:path";
+
+const repo = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
+const web = path.join(repo, "web");
+const requireFromWeb = createRequire(path.join(web, "package.json"));
+const requireFromE2e = createRequire(path.join(repo, "e2e/package.json"));
+
+const argv = process.argv.slice(2);
+const flag = (name, fallback) => {
+  const i = argv.indexOf(`--${name}`);
+  return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[i + 1] : fallback;
+};
+const has = (name) => argv.includes(`--${name}`);
+if (has("help")) {
+  console.log(await fs.readFile(fileURLToPath(import.meta.url), "utf8").then((s) => s.split("*/")[0] + "*/"));
+  process.exit(0);
+}
+
+const out = path.resolve(flag("out", `/tmp/droppen-ui-audit-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}`));
+const themes = flag("theme", "both") === "both" ? ["light", "dark"] : [flag("theme", "light")];
+const views =
+  flag("viewport", "both") === "both"
+    ? [
+        { name: "desktop", width: 1440, height: 1000 },
+        { name: "mobile", width: 390, height: 844 },
+      ]
+    : [{ name: flag("viewport", "desktop"), width: 390, height: 844 }];
+const channel = flag("channel", process.env.UI_AUDIT_CHANNEL ?? "");
+const liveUrl = flag("url", "");
+const check = has("check");
+
+await fs.mkdir(out, { recursive: true });
+
+/** Start the app's own Vite server (fixture mode only). */
+let server = null;
+let base = liveUrl;
+if (!liveUrl) {
+  process.env.RH_DEV_PROXY ??= "http://127.0.0.1:9";
+  const { createServer } = await import(requireFromWeb.resolve("vite"));
+  server = await createServer({
+    configFile: path.join(web, "vite.config.ts"),
+    root: web,
+    server: { host: "127.0.0.1", port: 0 },
+  });
+  await server.listen();
+  const urls = server.resolvedUrls?.local ?? [];
+  base = urls[0];
+  if (!base) throw new Error("the Vite server did not report a local URL");
+  console.log(`ui-audit: fixture at ${base}ui-audit/index.html`);
+}
+
+// The e2e workspace already pins Playwright; no second copy for an audit tool.
+const { chromium } = requireFromE2e("@playwright/test");
+const browser = await chromium.launch({ headless: true, ...(channel ? { channel } : {}) });
+
+const results = [];
+const failures = [];
+
+/** Everything measured on one page load. */
+async function measure(page) {
+  return page.evaluate(() => {
+    const rect = (e) => {
+      if (!e) return null;
+      const r = e.getBoundingClientRect();
+      return { x: +r.x.toFixed(1), y: +r.y.toFixed(1), w: +r.width.toFixed(1), h: +r.height.toFixed(1) };
+    };
+    const style = (e) => {
+      if (!e) return null;
+      const s = getComputedStyle(e);
+      return {
+        font: s.fontFamily,
+        size: s.fontSize,
+        weight: s.fontWeight,
+        line: s.lineHeight,
+        color: s.color,
+        bg: s.backgroundColor,
+        border: s.borderColor,
+        borderW: s.borderWidth,
+        radius: s.borderRadius,
+        padding: s.padding,
+        outline: `${s.outlineWidth} ${s.outlineStyle} ${s.outlineColor}`,
+        outlineColor: s.outlineColor,
+        outlineOffset: s.outlineOffset,
+        shadow: s.boxShadow,
+        transition: s.transition,
+        transform: s.transform,
+        opacity: s.opacity,
+      };
+    };
+    const root = document.querySelector("[data-audit-row]")?.closest("body") ?? document.body;
+    const rows = [...document.querySelectorAll("[data-audit-row]")].map((r) => ({
+      id: r.dataset.auditRow,
+      rect: rect(r),
+      label: style(r.querySelector("[data-audit-label] > div")),
+      hint: style(r.querySelector("[data-audit-label] > div:nth-child(2)")),
+      control: rect(r.querySelector("[data-audit-control]")),
+    }));
+    const trigger = document.querySelector('[data-audit-row="model"] button');
+    const effort = document.querySelector('[data-audit-row="effort"] button');
+    const empty = document.querySelector('[data-audit-row="empty"] button');
+    const input = document.querySelector('[data-audit-row="name"] input');
+    const activeTab = document.querySelector('[data-audit-row="grouping"] [data-active]');
+    const visible = (e) => e && e.getBoundingClientRect().width > 0;
+    const borders = [...root.querySelectorAll("button,input,[role=tab],[role=listbox],[role=option]")]
+      .filter(visible)
+      .map((e) => ({ tag: e.tagName, radius: getComputedStyle(e).borderRadius, shadow: getComputedStyle(e).boxShadow }))
+      .filter((x) => parseFloat(x.radius) > 0 || (x.shadow !== "none" && !x.shadow.includes("inset")));
+    return {
+      rows,
+      header: rect(document.querySelector("header")),
+      sectionTitle: rect(document.querySelector("h2")),
+      trigger: { rect: rect(trigger), style: style(trigger) },
+      effort: { style: style(effort) },
+      input: { rect: rect(input), style: style(input) },
+      activeTab: { rect: rect(activeTab), style: style(activeTab), focus: activeTab?.matches(":focus-visible") ?? null },
+      invalidBorders: borders,
+    };
+  });
+}
+
+async function auditFixture(theme, view) {
+  const page = await browser.newPage({ viewport: { width: view.width, height: view.height }, deviceScaleFactor: 1 });
+  await page.goto(`${base}ui-audit/index.html?theme=${theme}`);
+  await page.evaluate(() => document.fonts.ready);
+  await page.waitForTimeout(200);
+
+  // Keyboard focus, as a keyboard user gets it.
+  await page.locator('[data-audit-row="name"] input').focus();
+  const inputFocus = await page.evaluate(() => {
+    const e = document.querySelector('[data-audit-row="name"] input');
+    const s = getComputedStyle(e);
+    return { focusVisible: e.matches(":focus-visible"), width: s.outlineWidth, style: s.outlineStyle, color: s.outlineColor, offset: s.outlineOffset };
+  });
+  await page.locator('[data-audit-row="grouping"] [data-active]').focus();
+  const tabFocus = await page.evaluate(() => {
+    const e = document.querySelector('[data-audit-row="grouping"] [data-active]');
+    const s = getComputedStyle(e);
+    return { focusVisible: e.matches(":focus-visible"), width: s.outlineWidth, style: s.outlineStyle, color: s.outlineColor, offset: s.outlineOffset, bg: s.backgroundColor };
+  });
+
+  const before = await measure(page);
+
+  const trigger = page.locator('[data-audit-row="model"] button');
+  const baseBorder = await trigger.evaluate((e) => getComputedStyle(e).borderColor);
+  await trigger.hover();
+  await page.waitForTimeout(200);
+  const hoverBorder = await trigger.evaluate((e) => getComputedStyle(e).borderColor);
+  await trigger.click();
+  await page.waitForTimeout(250);
+  // Move the highlight off the selected row: a selected row must stay
+  // distinguishable from an unhighlighted normal one, not only while focused.
+  await page.keyboard.press("ArrowDown");
+  await page.waitForTimeout(150);
+  const open = await page.evaluate(() => {
+    const style = (e) => {
+      const s = getComputedStyle(e);
+      return { font: s.fontFamily, size: s.fontSize, color: s.color, bg: s.backgroundColor, padding: s.padding, radius: s.borderRadius, transform: s.transform, borderLeft: `${s.borderLeftWidth} ${s.borderLeftColor}` };
+    };
+    const rect = (e) => {
+      const r = e.getBoundingClientRect();
+      return { x: +r.x.toFixed(1), y: +r.y.toFixed(1), w: +r.width.toFixed(1), h: +r.height.toFixed(1) };
+    };
+    const lists = [...document.querySelectorAll('[role="listbox"]')];
+    const list = lists.at(-1);
+    const options = [...(list?.querySelectorAll('[role="option"]') ?? [])];
+    const selected = options.find((o) => o.hasAttribute("data-selected"));
+    const normal = options.find((o) => !o.hasAttribute("data-selected") && !o.hasAttribute("data-highlighted"));
+    const chevron = document.querySelector('[data-audit-row="model"] button svg');
+    return {
+      list: { rect: rect(list), style: style(list), text: (list?.innerText ?? "").trim() },
+      options: options.map((o) => ({ text: o.textContent?.trim(), rect: rect(o), style: style(o) })),
+      selected: selected ? { style: style(selected), check: !!selected.querySelector("svg") } : null,
+      normal: normal ? { style: style(normal) } : null,
+      chevron: chevron ? { transform: getComputedStyle(chevron).transform } : null,
+    };
+  });
+  await page.screenshot({ path: `${out}/select-open-${theme}-${view.name}.png` });
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(350);
+  await page.waitForFunction(() => !document.querySelector('[role="listbox"]'), undefined, { timeout: 2000 }).catch(() => undefined);
+
+  // The empty state: open the select with no options.
+  await page.locator('[data-audit-row="empty"] button').click();
+  await page.waitForTimeout(250);
+  const empty = await page.evaluate(() => {
+    const lists = [...document.querySelectorAll('[role="listbox"]')];
+    const list = lists.at(-1);
+    return { text: (list?.innerText ?? "").trim(), html: (list?.innerHTML ?? "").trim(), open: lists.length > 0 };
+  });
+  await page.screenshot({ path: `${out}/select-empty-${theme}-${view.name}.png` });
+  await page.keyboard.press("Escape");
+
+  await page.screenshot({ path: `${out}/settings-${theme}-${view.name}.png` });
+
+  const record = { mode: "fixture", theme, viewport: view.name, inputFocus, tabFocus, before, select: { baseBorder, hoverBorder, open }, empty };
+  results.push(record);
+
+  // ---- target invariants (docs/ui-spec.md) ----
+  const fail = (id, actual, expected) => failures.push({ theme, viewport: view.name, id, actual, expected });
+  const desktop = view.name === "desktop";
+  const fieldH = desktop ? 32 : 40;
+  const rowH = desktop ? 32 : 44;
+  const focusVisible = (f) => f.style !== "none" && parseFloat(f.width) >= 2 && f.color !== "rgba(0, 0, 0, 0)";
+  if (!focusVisible(inputFocus)) fail("focus.input", inputFocus, "2px visible outline");
+  const tabRingVisible = tabFocus.style !== "none" && parseFloat(tabFocus.width) >= 2 && tabFocus.color !== tabFocus.bg;
+  if (!tabRingVisible) fail("focus.tab", tabFocus, "visible ring outside the ink fill");
+  if (before.trigger.rect.h < fieldH) fail("size.trigger", before.trigger.rect.h, `>= ${fieldH}px`);
+  if (before.input.rect.h < fieldH) fail("size.input", before.input.rect.h, `>= ${fieldH}px`);
+  if (parseFloat(before.effort.style.size) < 13) fail("type.value", before.effort.style.size, ">= 13px");
+  if (/mono|Menlo|Consolas|SFMono/i.test(before.effort.style.font)) fail("type.value-family", before.effort.style.font, "sans for a plain value");
+  if (desktop) {
+    const widths = before.rows.filter((r) => r.control).map((r) => r.control.w);
+    const spread = Math.max(...widths) - Math.min(...widths);
+    if (spread > 1) fail("layout.control-widths", widths, "one control column, spread <= 1px");
+  }
+  if (baseBorder === hoverBorder) fail("select.hover", hoverBorder, "a border change on hover");
+  if (!open.chevron || open.chevron.transform === "none" || !/matrix\(-1/.test(open.chevron.transform)) fail("select.chevron", open.chevron?.transform, "rotated ~180deg while open");
+  if (!open.options.length) fail("select.options", 0, "at least one option");
+  const itemH = open.options[0]?.rect.h ?? 0;
+  if (itemH < rowH) fail("select.row-height", itemH, `>= ${rowH}px`);
+  const selected = open.selected?.style;
+  const normal = open.normal?.style;
+  if (!selected || !normal) fail("select.selected", null, "a selected and a normal option");
+  else if (selected.bg === normal.bg && selected.weight === normal.weight && selected.color === normal.color && selected.borderLeft === normal.borderLeft) {
+    fail("select.selected", { bg: selected.bg, weight: selected.weight }, "a selected row that stays distinct from an unhighlighted normal one");
+  }
+  if (!open.selected?.check) fail("select.check", null, "a check on the selected row");
+  if (!empty.open || !empty.text) fail("select.empty", empty, "an open list with a sentence when there are no options");
+  if (before.invalidBorders.length) fail("visual.radius-shadow", before.invalidBorders, "no radius, no drop shadow");
+  await page.close();
+}
+
+async function auditLive(view) {
+  const page = await browser.newPage({ viewport: { width: view.width, height: view.height }, deviceScaleFactor: 1 });
+  await page.goto(liveUrl, { waitUntil: "networkidle" });
+  await page.evaluate(() => document.fonts.ready);
+  await page.waitForTimeout(300);
+  const snapshot = await page.evaluate(() => {
+    const rect = (e) => {
+      const r = e.getBoundingClientRect();
+      return { x: +r.x.toFixed(1), y: +r.y.toFixed(1), w: +r.width.toFixed(1), h: +r.height.toFixed(1) };
+    };
+    const style = (e) => {
+      const s = getComputedStyle(e);
+      return { size: s.fontSize, weight: s.fontWeight, color: s.color, bg: s.backgroundColor, border: s.borderColor, radius: s.borderRadius, padding: s.padding, shadow: s.boxShadow, outline: `${s.outlineWidth} ${s.outlineStyle} ${s.outlineColor}` };
+    };
+    return [...document.querySelectorAll("button,input,select,textarea,[role=tab],[role=combobox],h1,h2")].filter((e) => e.getBoundingClientRect().width > 0).map((e) => ({
+      tag: e.tagName,
+      role: e.getAttribute("role"),
+      text: (e.innerText || e.getAttribute("placeholder") || "").trim().replace(/\s+/g, " ").slice(0, 80),
+      rect: rect(e),
+      style: style(e),
+    }));
+  });
+  results.push({ mode: "live", url: liveUrl, viewport: view.name, controls: snapshot });
+  await page.screenshot({ path: `${out}/live-${view.name}.png`, fullPage: true });
+  await page.close();
+}
+
+try {
+  if (liveUrl) {
+    for (const view of views) await auditLive(view);
+  } else {
+    for (const theme of themes) for (const view of views) await auditFixture(theme, view);
+  }
+} finally {
+  await fs.writeFile(`${out}/measurements.json`, JSON.stringify(results, null, 2));
+  const lines = [];
+  if (check) {
+    if (failures.length === 0) lines.push("ui-audit: PASS (all target invariants)");
+    else {
+      lines.push(`ui-audit: FAIL (${failures.length})`);
+      for (const f of failures) lines.push(`  ✗ ${f.id} [${f.theme}/${f.viewport}] actual=${JSON.stringify(f.actual)} expected=${f.expected}`);
+    }
+  } else {
+    lines.push("ui-audit: report only (pass --check to gate)");
+  }
+  lines.push(`ui-audit: ${out}`);
+  await fs.writeFile(`${out}/report.txt`, lines.join("\n") + "\n");
+  console.log(lines.join("\n"));
+  await browser.close();
+  if (server) await server.close();
+  if (check && failures.length) process.exitCode = 1;
+}
