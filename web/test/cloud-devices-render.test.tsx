@@ -331,7 +331,9 @@ test("my devices: a computer that runs AI shows the badge, where it is, and — 
   assert.ok(online.includes(">can run AI<"), online);
   assert.match(online, /data-testid="name-m-1"[^>]*>studio</, "the name a person knows it by");
   assert.match(online, /<details data-testid="details-m-1"/, "the rest behind 「详情」");
-  assert.ok(/<summary[^>]*>.*m-1.*details.*<\/summary>/s.test(online), "the id is the quiet line that opens them");
+  const summary = online.slice(online.indexOf("<summary"), online.indexOf("</summary>"));
+  assert.ok(!/>m-1</.test(summary), "the id is not shown on the 56px line: it is in the disclosure");
+  assert.match(online, /<details[^>]*>[\s\S]*>m-1<[\s\S]*<\/details>/, "the id is in the disclosure");
   assert.ok(online.includes("ABCD-EFGH-IJKL-MNOP"), "the fingerprint, inside the details");
   assert.match(online, /data-presence="online"/);
   assert.ok(online.includes("tokyo · 42 ms"), "the path and its round trip");
@@ -364,10 +366,10 @@ test("a row's actions are in its 「⋯」 menu, not a row of buttons; a device 
   const host = row({ id: "m-1", name: "studio", kind: "computer", host: true, presence: "online", hasCopy: true });
   const html = list(<DeviceRow view={host} viewerAdmin upgraded writable onOpen={() => undefined} onRemove={() => undefined} onHost={() => undefined} onControl={() => undefined} onResend={() => undefined} onTerminal={() => undefined} />);
   assert.match(html, /data-testid="actions-m-1"[^>]*aria-label="more actions"/);
-  assert.match(html, /data-testid="open-m-1"[^>]*>open/);
+  assert.match(html, /data-testid="open-m-1"[\s\S]*?>open</);
   for (const word of [">remove<", ">who can control it<", ">stop running AI<", ">re-send keys<"]) assert.ok(!html.includes(word), `${word} is in the menu, not on the row`);
   // Offline with a copy: it opens on the copy.
-  assert.match(list(<DeviceRow view={{ ...host, presence: "offline" }} viewerAdmin upgraded writable onOpen={() => undefined} />), /data-testid="open-m-1"[^>]*>read the copy/);
+  assert.match(list(<DeviceRow view={{ ...host, presence: "offline" }} viewerAdmin upgraded writable onOpen={() => undefined} />), /data-testid="open-m-1"[\s\S]*?>read the copy</);
   // In the menu, a destructive one last; one that needs the device online says so while it is not.
   const items = menu(host);
   assert.deepEqual(items.map((i) => i.id), ["terminal-m-1", "rename-m-1", "control-m-1", "host-m-1", "resend-m-1", "remove-m-1"]);
@@ -1266,6 +1268,44 @@ test("a browser or phone goes by what the hub made of its User-Agent — only th
   // This device first, then the device that runs AI, then the other browsers and phones.
   const order = [...page.html.matchAll(/<li data-testid="device-([^"]+)"/g)].map((m) => m[1]);
   assert.deepEqual(order.slice(0, 2), [a.deviceId, "m-1"], order.join(","));
+});
+
+test("the hierarchy of 「我的设备」: a summary line, 16px section titles, 56px rows and space instead of rules", async () => {
+  const { a, props } = await panelAccount();
+  const page = drive(DevicesPanel, props, []);
+  const html = page.html;
+  // Summary first: what the account has, not a generic security sentence.
+  assert.match(html, /data-testid="devices-summary"[^>]*>\d+ devices/);
+  assert.match(html, /data-testid="devices-title"[^>]*text-\[32px\]/);
+  // Section titles are sans 16/24 semibold behind a numbered eyebrow; each has the one rule of its group.
+  const heads = [...html.matchAll(/data-section-head=""[^>]*>[\s\S]*?<h2[^>]*class="([^"]*)"/g)].map((m) => m[1]!);
+  assert.ok(heads.length >= 2, `this device and devices: ${heads.length}`);
+  for (const cls of heads) assert.ok(cls.includes("text-base") && cls.includes("font-semibold"), cls);
+  assert.ok((html.match(/border-b border-border/g) ?? []).length <= 6, "the groups' rules, not a wall of lines");
+  // Rows are one 56px beat, separated by 10px of space, with no rule between them.
+  assert.match(html, /<ul data-testid="device-list"[^>]*class="[^"]*gap-2\.5/);
+  assert.equal((html.match(/\bh-14\b/g) ?? []).length, 4, "this device, the AI computer, the full device and the limited one");
+  for (const row of [...html.matchAll(/<li data-testid="device-[\s\S]*?<\/li>/g)].map((m) => m[0])) {
+    assert.ok(!/\bborder-b\b/.test(row), `no row rules: the gap separates them: ${row.slice(0, 300)}`);
+  }
+  // The current device is visible without colour: an ink edge and aria-current.
+  const self = html.slice(html.indexOf(`data-testid="device-${a.deviceId}"`), html.indexOf(`data-testid="device-${a.deviceId}"`) + 600);
+  assert.match(self, /data-current=""[^>]*aria-current="true"/);
+  assert.match(self, /shadow-\[inset_1px_0_0_var\(--color-fg\)\]/);
+  // Container queries reflow the rows rather than filling 2400px (the usage's own are in cloud-plan).
+  assert.match(html, /@container\/devices/);
+  assert.match(html, /@min-\[44rem\]\/devices:grid-cols/);
+});
+
+test("pending and removed devices keep the 56px beat as their own compact rows, not normal rows plus badges", () => {
+  const pending = list(<DeviceRow view={row({ id: "d-pending", status: "pending" })} viewerAdmin upgraded writable onRemove={() => undefined} />);
+  assert.match(pending, /data-status="pending"[\s\S]*?h-14/);
+  assert.ok(pending.includes(">waiting for approval<"));
+  assert.doesNotMatch(pending, /<details|>this device<|>full device<|>limited device<|>can run AI</);
+  const removed = list(<DeviceRow view={row({ id: "d-gone", status: "removed" })} viewerAdmin upgraded writable onRemove={() => undefined} />);
+  assert.match(removed, /data-status="removed"[\s\S]*?h-14/);
+  assert.ok(removed.includes(">removed<"));
+  assert.doesNotMatch(removed, /<details|data-testid="actions-/);
 });
 
 test("removed devices are folded at the bottom, out of the list; 「添加设备」 asks which kind first", async () => {

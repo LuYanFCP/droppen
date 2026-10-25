@@ -255,7 +255,7 @@ test("a device that runs AI says on its row what it is and how many of its sessi
   });
   const drawRow = (v: DeviceRowView, lng = "en") => draw(<ul><DeviceRow view={v} viewerAdmin upgraded writable onOpen={() => {}} onTerminal={() => {}} onRename={() => {}} /></ul>, lng);
   const online = drawRow(view("online"));
-  assert.match(online, /data-testid="open-m-7"[^>]*>open/, "the button the acceptance harness clicks");
+  assert.match(online, /data-testid="open-m-7"[\s\S]*?>open</, "the button the acceptance harness clicks");
   assert.ok(online.includes("m-7 · Linux") && online.includes(">v0.2.112<") && online.includes(">gpu-node.local<"), "system on the id line, agent and hostname in the details");
   assert.ok(online.includes(">14 sessions<"));
   assert.match(online, /data-activity="working"/);
@@ -268,7 +268,7 @@ test("a device that runs AI says on its row what it is and how many of its sessi
   const offline = drawRow(view("offline"));
   assert.match(offline, /data-testid="copy-as-of"/);
   assert.ok(offline.includes("offline copy · as of "));
-  assert.match(offline, /data-testid="open-m-7"[^>]*>read the copy/);
+  assert.match(offline, /data-testid="open-m-7"[\s\S]*?>read the copy</);
   assert.deepEqual(
     menu(view("offline")).filter((i) => i.blocked).map((i) => [i.id, i.blocked]),
     [

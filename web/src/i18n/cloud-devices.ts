@@ -807,6 +807,13 @@ export const cloudDevicesZhCN: Record<string, string> = {
   "{{host}} lets every device of the account control it: ending the pause gives back only the control listed above.": "{{host}} 放行账户里的每台设备：结束暂停只会恢复上面列出的控制。",
   "Started by a device that is no longer a full device: it never ends by itself — end it here.": "由一台已不再是完整设备的设备开始：它不会自己结束，请在这里结束。",
   "what ending the pause gives back has changed: look at it again": "结束暂停会恢复的控制已经变了：请再看一遍",
+  // The devices page's hierarchy (docs/ui-spec.md §3).
+  "{{n}} devices": "{{n}} 台设备",
+  "{{n}} offline": "{{n}} 台离线",
+  "{{n}} need you": "{{n}} 件需要你",
+  "plan and usage": "套餐与用量",
+  "{{plan}} · {{devices}} of {{deviceMax}} devices · {{hosts}} of {{hostMax}} can run AI": "{{plan}} · {{devices}} / {{deviceMax}} 台设备 · {{hosts}} / {{hostMax}} 台可运行 AI",
+  "no devices yet": "还没有设备",
 };
 
 export const cloudDevicesZhTW: Record<string, string> = {
@@ -1611,6 +1618,13 @@ export const cloudDevicesZhTW: Record<string, string> = {
   "{{host}} lets every device of the account control it: ending the pause gives back only the control listed above.": "{{host}} 放行帳戶裡的每台裝置：結束暫停只會恢復上面列出的控制。",
   "Started by a device that is no longer a full device: it never ends by itself — end it here.": "由一台已不再是完整裝置的裝置開始：它不會自己結束，請在這裡結束。",
   "what ending the pause gives back has changed: look at it again": "結束暫停會恢復的控制已經變了：請再看一遍",
+  // The devices page's hierarchy (docs/ui-spec.md §3).
+  "{{n}} devices": "{{n}} 台裝置",
+  "{{n}} offline": "{{n}} 台離線",
+  "{{n}} need you": "{{n}} 件需要你",
+  "plan and usage": "方案與用量",
+  "{{plan}} · {{devices}} of {{deviceMax}} devices · {{hosts}} of {{hostMax}} can run AI": "{{plan}} · {{devices}} / {{deviceMax}} 台裝置 · {{hosts}} / {{hostMax}} 台可執行 AI",
+  "no devices yet": "還沒有裝置",
 };
 
 export const cloudDevicesJa: Record<string, string> = {
@@ -2415,4 +2429,11 @@ export const cloudDevicesJa: Record<string, string> = {
   "{{host}} lets every device of the account control it: ending the pause gives back only the control listed above.": "{{host}} はアカウントのすべてのデバイスに操作を許可しています：一時停止を終えて戻るのは、上に挙げた操作だけです。",
   "Started by a device that is no longer a full device: it never ends by itself — end it here.": "フルデバイスではなくなったデバイスが始めたものです：自動では終わりません。ここで終えてください。",
   "what ending the pause gives back has changed: look at it again": "一時停止を終えて戻る操作が変わりました：もう一度確認してください",
+  // The devices page's hierarchy (docs/ui-spec.md §3).
+  "{{n}} devices": "{{n}} 台のデバイス",
+  "{{n}} offline": "オフライン {{n}} 台",
+  "{{n}} need you": "対応待ち {{n}} 件",
+  "plan and usage": "プランと使用量",
+  "{{plan}} · {{devices}} of {{deviceMax}} devices · {{hosts}} of {{hostMax}} can run AI": "{{plan}} · デバイス {{devices}} / {{deviceMax}} · AI を実行できるデバイス {{hosts}} / {{hostMax}}",
+  "no devices yet": "デバイスはまだありません",
 };

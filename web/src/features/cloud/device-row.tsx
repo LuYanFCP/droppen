@@ -30,7 +30,6 @@ import type { DeviceAttention } from "@/features/machines/needs-you";
 import { ActivityChipView, StateCountChip, UnreadPill } from "@/features/sessions/attention-badges";
 import { unreadCountOf } from "@/features/sessions/session-attention";
 import { CompatBadge } from "./browser-support";
-import { Presence } from "./machine-name";
 import { pauseHeldText, RenewalLine } from "./renewal";
 
 type SessionSummary = components["schemas"]["SessionSummary"];
@@ -310,37 +309,57 @@ export function RowMenu({ id, items }: { id: string; items: RowMenuItem[] }) {
 
 const badge = "tracking-[0.08em] uppercase";
 
-/** What it is, as badges: this device, the main device, runs AI, a full or a limited device. */
-function RowBadges({ view, warn }: { view: DeviceRowView; warn: ReactNode }) {
+/**
+ * What it is, as at most two badges (docs/ui-spec.md §3): this device, the
+ * main device, runs AI, a full or a limited device. What is not among the two
+ * is said in the disclosure, so a row never turns into a wall of tags.
+ */
+function RowBadges({ view }: { view: DeviceRowView }) {
   const { t } = useTranslation();
-  return (
-    <>
-      {view.self && <Badge variant="outline" className={badge}>{t("this device")}</Badge>}
-      {view.self && compatModeActive() && (
-        <Badge data-testid="compat-mode-row" variant="outline" className={badge}>
+  const badges: ReactNode[] = [];
+  if (view.self) {
+    badges.push(
+      <Badge key="self" variant="outline" className={badge}>
+        {t("this device")}
+      </Badge>,
+    );
+    if (compatModeActive()) {
+      badges.push(
+        <Badge key="compat" data-testid="compat-mode-row" variant="outline" className={badge}>
           <CompatBadge className="uppercase" />
-        </Badge>
-      )}
-      {view.host && (
-        <Badge data-testid="runs-ai" variant="outline" className={badge}>
-          {t("can run AI")}
-        </Badge>
-      )}
-      {view.main && <Badge className={badge}>{t("main device")}</Badge>}
-      {view.full && view.status === "active" && (
-        <Badge data-testid={`full-${view.id}`} title={roleText(view, t) ?? undefined} className={badge}>
-          {t("full device")}
-        </Badge>
-      )}
-      {view.limited && (
-        <Badge data-testid={`limited-${view.id}`} title={roleText(view, t) ?? undefined} className={badge}>
-          {t("limited device")}
-        </Badge>
-      )}
-      {view.stoppedHost && <span className="font-mono text-2xs text-faint">{t("stopped running AI")}</span>}
-      {warn}
-    </>
-  );
+        </Badge>,
+      );
+    }
+  }
+  if (view.host) {
+    badges.push(
+      <Badge key="host" data-testid="runs-ai" variant="outline" className={badge}>
+        {t("can run AI")}
+      </Badge>,
+    );
+  }
+  if (view.main) {
+    badges.push(
+      <Badge key="main" className={badge}>
+        {t("main device")}
+      </Badge>,
+    );
+  }
+  if (view.full && view.status === "active") {
+    badges.push(
+      <Badge key="full" data-testid={`full-${view.id}`} title={roleText(view, t) ?? undefined} className={badge}>
+        {t("full device")}
+      </Badge>,
+    );
+  }
+  if (view.limited) {
+    badges.push(
+      <Badge key="limited" data-testid={`limited-${view.id}`} title={roleText(view, t) ?? undefined} className={badge}>
+        {t("limited device")}
+      </Badge>,
+    );
+  }
+  return <>{badges.slice(0, 2)}</>;
 }
 
 /** What a full or a limited device may do, in words: the badge's tooltip, and said in the details too (a finger does not hover). */
@@ -350,36 +369,44 @@ function roleText(view: DeviceRowView, t: T): string | null {
   return null;
 }
 
-/** Online or not, and since when it was last seen; pending and removed say so instead. */
-function RowStatus({ view }: { view: DeviceRowView }) {
-  const { t } = useTranslation();
-  const { status } = view;
-  const seen =
-    view.lastSeenMs !== null && !view.self && view.presence !== "online" && status !== "removed" ? (
-      <span data-testid={`recent-${view.id}`} className="text-faint" title={formatExactTime(new Date(view.lastSeenMs).toISOString())}>
-        {t("seen {{when}}", { when: formatRelative(new Date(view.lastSeenMs).toISOString()) })}
-      </span>
-    ) : null;
+/**
+ * A state dot and one word — the row's whole status. Last seen, path and the
+ * rest of the state are in the disclosure, so no row grows with its state
+ * (docs/ui-spec.md §3).
+ */
+function StatusWord({ tone, children }: { tone: "ok" | "warn" | "faint" | "muted"; children: ReactNode }) {
   return (
-    <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-2xs">
-      {status === "pending" ? (
-        <span data-signal="pending" className="text-warn-fg">
-          {t("waiting for approval")}
-        </span>
-      ) : status === "removed" ? (
-        <span className="text-faint">{t("removed")}</span>
-      ) : view.presence ? (
-        <Presence presence={view.presence} />
-      ) : null}
-      {view.path && view.presence === "online" && (
-        <span className="text-faint" title={t("path")}>
-          {view.path.relay}
-          {view.path.rttMs !== null ? ` · ${Math.round(view.path.rttMs)} ms` : ""}
-        </span>
+    <span
+      data-signal={tone === "warn" ? "warn" : tone === "faint" ? "offline" : undefined}
+      className={cn(
+        "flex min-w-0 items-center gap-1.5 font-mono text-xs",
+        tone === "ok" ? "text-fg" : tone === "warn" ? "text-warn-fg" : tone === "faint" ? "text-faint" : "text-muted",
       )}
-      {seen}
+    >
+      <span
+        aria-hidden="true"
+        className={cn(
+          "size-[7px] shrink-0",
+          tone === "ok" ? "bg-fg" : tone === "warn" ? "bg-warn" : "shadow-[inset_0_0_0_1.25px_currentColor]",
+        )}
+      />
+      <span className="truncate">{children}</span>
     </span>
   );
+}
+
+/** Online or not; a browser that never dials anything is "signed in". */
+function RowStatus({ view }: { view: DeviceRowView }) {
+  const { t } = useTranslation();
+  const presence = view.presence;
+  if (presence) {
+    return (
+      <span data-presence={presence}>
+        <StatusWord tone={presence === "online" ? "ok" : presence === "offline" ? "faint" : "muted"}>{t(presence)}</StatusWord>
+      </span>
+    );
+  }
+  return <StatusWord tone="muted">{t("signed in")}</StatusWord>;
 }
 
 /** Who may control a host, in words. */
@@ -389,10 +416,24 @@ function acceptText(accept: Accept, t: T): string {
   return t("only your full devices");
 }
 
-/** 「详情」: what a careful look needs — and, for a host, its latest sessions. Open by itself while a re-enroll warning is up. */
-function RowDetails({ view, open, warnings, onOpenSession }: { view: DeviceRowView; open: boolean; warnings?: ReactNode; onOpenSession?: (row: SessionSummary) => void }) {
+/**
+ * The disclosure's body: what a careful look needs — the id and system, its
+ * fingerprint, path and last sighting, what the row's state overflowed, and
+ * for a host its latest sessions. The row's own summary stays one 56px line.
+ */
+function RowDetailsBody({
+  view,
+  warnings,
+  onOpenSession,
+  children,
+}: {
+  view: DeviceRowView;
+  warnings?: ReactNode;
+  onOpenSession?: (row: SessionSummary) => void;
+  children?: ReactNode;
+}) {
   const { t } = useTranslation();
-  const facts: { key: string; label: string; value: string; title?: string }[] = [{ key: "id", label: t("device ID"), value: view.id }];
+  const facts: { key: string; label: string; value: string; title?: string }[] = [];
   facts.push({ key: "fingerprint", label: t("fingerprint"), value: view.fingerprint || "…" });
   const f = view.facts;
   if (f?.hostname) facts.push({ key: "hostname", label: t("hostname"), value: f.hostname });
@@ -404,62 +445,62 @@ function RowDetails({ view, open, warnings, onOpenSession }: { view: DeviceRowVi
   if (view.host && view.accept) facts.push({ key: "control", label: t("who can control it"), value: acceptText(view.accept, t) });
   if (view.host && view.pausedControllers?.length) facts.push({ key: "paused", label: t("paused now"), value: view.pausedControllers.join(", ") });
   const recent = view.recent ?? [];
+  const seen =
+    view.lastSeenMs !== null && !view.self && view.presence !== "online" && view.status !== "removed" ? (
+      <span data-testid={`recent-${view.id}`} className="text-faint" title={formatExactTime(new Date(view.lastSeenMs).toISOString())}>
+        {t("seen {{when}}", { when: formatRelative(new Date(view.lastSeenMs).toISOString()) })}
+      </span>
+    ) : null;
   return (
-    <details data-testid={`details-${view.id}`} open={open || undefined} className="group/details min-w-0">
-      {/* The row's quiet last line — its id, its system — opens the rest. */}
-      <summary className="flex max-w-full min-w-0 cursor-pointer list-none items-center gap-1.5 font-mono text-2xs text-faint select-none hover:text-fg pointer-coarse:py-1.5 [&::-webkit-details-marker]:hidden">
-        <span className="min-w-0 truncate">
-          {view.id}
-          {f?.os ? ` · ${f.os}` : ""}
-        </span>
-        <span className="flex shrink-0 items-center gap-0.5 text-muted group-hover/details:text-fg">
-          <ChevronRight aria-hidden="true" className="size-3 transition-transform group-open/details:rotate-90" />
-          {t("details")}
-        </span>
-      </summary>
-      <div className="flex flex-col gap-2 pt-1.5 pb-0.5">
-        {roleText(view, t) && (
-          <p data-testid={`role-${view.id}`} className="text-2xs leading-4 text-muted">
-            {roleText(view, t)}
-          </p>
-        )}
-        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 font-mono text-2xs">
-          {facts.map((fact) => (
-            <div key={fact.key} className="contents">
-              <dt className="text-faint">{fact.label}</dt>
-              <dd title={fact.title} className={cn("min-w-0 break-words text-fg", (fact.key === "id" || fact.key === "fingerprint") && "tracking-wider select-all")}>
-                {fact.value}
-              </dd>
-            </div>
-          ))}
-        </dl>
-        {warnings}
-        {recent.length > 0 && (
-          <div data-testid={`recent-sessions-${view.id}`} className="flex flex-col">
-            <span className="font-mono text-2xs text-faint">{t("latest sessions")}</span>
-            <ul className="mt-0.5 flex flex-col border-t border-border">
-              {recent.map((row) => (
-                <li key={`${row.source}/${row.id}`} className="border-b border-border">
-                  <button
-                    type="button"
-                    onClick={() => onOpenSession?.(row)}
-                    disabled={!onOpenSession}
-                    className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 py-1 text-left hover:bg-hover pointer-coarse:py-2"
-                  >
-                    <span className={cn("truncate text-xs text-fg", unreadCountOf(row) > 0 && "font-semibold")}>{row.title}</span>
-                    <span className="flex items-center gap-1.5">
-                      <ActivityChipView row={row} />
-                      <UnreadPill count={unreadCountOf(row)} />
-                      <span className="font-mono text-2xs text-faint tabular-nums">{formatRelative(row.updatedAt)}</span>
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
+    <div className="flex flex-col gap-2.5 pt-1 pb-3 pl-7 max-md:pl-0">
+      {/* Its id and system, quietly: the row's one line no longer carries them. */}
+      <p className="min-w-0 truncate font-mono text-xs text-faint">
+        {view.id}
+        {f?.os ? ` · ${f.os}` : ""}
+        {seen ? <span className="ms-2">{seen}</span> : null}
+      </p>
+      {roleText(view, t) && (
+        <p data-testid={`role-${view.id}`} className="text-xs leading-4 text-muted">
+          {roleText(view, t)}
+        </p>
+      )}
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 font-mono text-xs">
+        {facts.map((fact) => (
+          <div key={fact.key} className="contents">
+            <dt className="text-faint">{fact.label}</dt>
+            <dd title={fact.title} className={cn("min-w-0 break-words text-fg", (fact.key === "id" || fact.key === "fingerprint") && "tracking-wider select-all")}>
+              {fact.value}
+            </dd>
           </div>
-        )}
-      </div>
-    </details>
+        ))}
+      </dl>
+      {children}
+      {warnings}
+      {recent.length > 0 && (
+        <div data-testid={`recent-sessions-${view.id}`} className="flex flex-col">
+          <span className="font-mono text-xs text-faint">{t("latest sessions")}</span>
+          <ul className="mt-0.5 flex flex-col">
+            {recent.map((row) => (
+              <li key={`${row.source}/${row.id}`}>
+                <button
+                  type="button"
+                  onClick={() => onOpenSession?.(row)}
+                  disabled={!onOpenSession}
+                  className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 py-1 text-left hover:bg-hover pointer-coarse:py-2"
+                >
+                  <span className={cn("truncate text-xs text-fg", unreadCountOf(row) > 0 && "font-semibold")}>{row.title}</span>
+                  <span className="flex items-center gap-1.5">
+                    <ActivityChipView row={row} />
+                    <UnreadPill count={unreadCountOf(row)} />
+                    <span className="font-mono text-xs text-faint tabular-nums">{formatRelative(row.updatedAt)}</span>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -469,11 +510,11 @@ function SessionCounts({ view }: { view: DeviceRowView }) {
   const a = view.attention;
   const online = view.presence === "online";
   if (!a) {
-    return <span className="font-mono text-2xs text-faint">{view.hasCopy || online ? t("sessions not listed yet") : t("no copy on this device yet: it is made once the device is online")}</span>;
+    return <span className="font-mono text-xs text-faint">{view.hasCopy || online ? t("sessions not listed yet") : t("no copy on this device yet: it is made once the device is online")}</span>;
   }
   return (
     <span data-testid={`sessions-${view.id}`} className="flex flex-wrap items-center gap-1.5">
-      <span className="font-mono text-2xs text-muted">{a.sessions === 1 ? t("1 session") : t("{{n}} sessions", { n: a.sessions })}</span>
+      <span className="font-mono text-xs text-muted">{a.sessions === 1 ? t("1 session") : t("{{n}} sessions", { n: a.sessions })}</span>
       <StateCountChip kind="working" count={a.working} />
       <StateCountChip kind="asking" count={a.asking} />
       <UnreadPill count={a.unread} />
@@ -521,7 +562,7 @@ export function ReEnrollWarning({
   return (
     <>
       {open.length > 0 && (
-        <span data-testid={`re-enroll-${id}`} data-signal="warn" className="flex flex-col items-start gap-0.5 text-2xs leading-4 text-warn-fg">
+        <span data-testid={`re-enroll-${id}`} data-signal="warn" className="flex flex-col items-start gap-0.5 text-xs leading-4 text-warn-fg">
           <span>{t("re-enroll it: rotating its keys does not cut off a device that copied its identity")}</span>
           <span className="text-muted">
             {t("A device that could control it no longer can, and may have copied its identity key. With it, that device can still sign in as this one, and each new content key goes to that identity too. Only a new identity fixes this:")}
@@ -544,7 +585,7 @@ export function ReEnrollWarning({
         </span>
       )}
       {dismissed.length > 0 && (
-        <span data-testid={`re-enroll-dismissed-${id}`} className="flex flex-col items-start gap-0.5 text-2xs leading-4 text-faint">
+        <span data-testid={`re-enroll-dismissed-${id}`} className="flex flex-col items-start gap-0.5 text-xs leading-4 text-faint">
           {dismissed.map((line) => (
             <span key={line.device} className="flex flex-wrap items-baseline gap-x-2">
               <span>{t("not warning about {{device}}: you said it never connected", { device: line.device })}</span>
@@ -564,10 +605,12 @@ export function ReEnrollWarning({
 const ICONS = { computer: Server, phone: Smartphone, browser: Globe, browserOrPhone: MonitorSmartphone } as const;
 
 /**
- * One row of 「我的设备」: what the device is, may do and where it is — and,
- * for a full device looking, what can be changed (its 「⋯」). A row is a card
- * on a phone. `notes`: what only droppen.app says of a host (a chain alarm, an
- * old key, its copy's retention); `children`: whatever is open under it.
+ * One row of 「我的设备」: a fixed 56px line — name, state as a dot and a
+ * word, one action — then a disclosure for what a careful look needs (its id,
+ * system, fingerprint, path, last sighting, the state's overflow), and for a
+ * full device looking, what can be changed (its 「⋯」). `notes`: what only
+ * droppen.app says of a host (a chain alarm, an old key, its copy's
+ * retention); `children`: whatever is open under it.
  */
 export function DeviceRow({
   view,
@@ -641,123 +684,157 @@ export function DeviceRow({
   const openWarnings = !!lines?.some((l) => !l.dismissed);
   const removed = status === "removed";
   const name = deviceName(view, t);
+
+  // What the row's one line leaves out: session counts, the copy's date, a
+  // renewal, a pause, a retired key, notes and how mail went (docs/ui-spec.md §3).
+  const extras = (
+    <>
+      {view.host && status === "active" && <SessionCounts view={view} />}
+      {view.stoppedHost && <span className="font-mono text-xs text-faint">{t("stopped running AI")}</span>}
+      {view.host && view.presence !== "online" && view.copyAsOf !== null && (
+        <span data-testid="copy-as-of" className="font-mono text-xs text-muted">
+          {t("offline copy · as of {{time}}", { time: formatAsOf(view.copyAsOf) })}
+        </span>
+      )}
+      {view.renewal && view.renewal.kind !== "none" && status === "active" && (
+        <RenewalLine
+          id={id}
+          status={view.renewal}
+          viewerAdmin={viewerAdmin}
+          onCode={onRenewCode}
+          onRetry={onRenewRetry}
+          onRemove={onRemove}
+          onAddComputer={onAddComputer}
+          onNarrow={upgraded ? onControl : undefined}
+        />
+      )}
+      {view.pausedWith && view.pausedWith.length > 0 && status === "active" && (
+        <span data-testid={`paused-${id}`} className="text-xs leading-4 text-muted">
+          {t("Control between {{ids}} is paused while their identity keys are renewed.", { ids: view.pausedWith.join(", ") })}
+        </span>
+      )}
+      {status === "active" &&
+        (view.pauses ?? []).map((p) => (
+          <span key={p.ending.edges.map((e) => `${e.host}<${e.id}`).join(",") || id} data-testid={`pause-${id}`} className="flex flex-col items-start gap-0.5 text-xs leading-4 text-muted">
+            {p.ending.orphan && (
+              <span data-testid={`pause-orphan-${id}`}>{t("Started by a device that is no longer a full device: it never ends by itself — end it here.")}</span>
+            )}
+            {p.ending.held.map((h) => (
+              <span key={`${h.host}<${h.id}`} data-testid={`pause-held-${id}-${h.id}`} data-why={h.why} data-signal="warn" className="text-warn-fg">
+                {pauseHeldText(h, t)}
+              </span>
+            ))}
+            {viewerAdmin && onEndPause && (
+              <button type="button" data-testid={`end-pause-${id}`} className="text-muted underline underline-offset-2 hover:text-fg" onClick={() => onEndPause(p.op)}>
+                {t("end pause")}
+              </button>
+            )}
+          </span>
+        ))}
+      {view.retiredLoginMs != null && status === "active" && (
+        <span data-testid={`retired-login-${id}`} className="font-mono text-xs leading-4 text-muted">
+          {t("its old identity key was used to sign in at {{time}}", { time: formatAsOf(view.retiredLoginMs) })}
+        </span>
+      )}
+      {view.isolatedControllers && view.isolatedControllers.length > 0 && status === "active" && (
+        <span data-testid={`isolated-controllers-${id}`} data-signal="warn" className="text-xs leading-4 text-warn-fg">
+          {t("It lets {{ids}} control it, which is isolated: settle it on its row first.", { ids: view.isolatedControllers.join(", ") })}
+        </span>
+      )}
+      {notes}
+      {keys}
+    </>
+  );
+
+  // Pending and removed devices keep the same 56px beat, as their own compact
+  // rows: no badges, no disclosure, no normal row dressed up (§3).
+  if (status !== "active") {
+    return (
+      <li data-testid={`device-${id}`} data-host={view.host ? "" : undefined} data-limited={view.limited ? "" : undefined} data-status={status} className="px-6 max-md:px-4">
+        <div className={cn("flex h-14 min-w-0 items-center gap-3", status === "pending" && "hover:bg-hover")}>
+          <Icon aria-hidden="true" className={cn("size-4 shrink-0", removed ? "text-faint" : "text-muted")} />
+          <span className="flex min-w-0 flex-1 items-center gap-2.5">
+            <span data-testid={`name-${id}`} title={id} className={cn("min-w-0 truncate text-[13px] leading-5 font-medium", removed ? "text-muted" : "text-fg")}>
+              {name}
+            </span>
+            {status === "pending" ? <StatusWord tone="warn">{t("waiting for approval")}</StatusWord> : <StatusWord tone="faint">{t("removed")}</StatusWord>}
+          </span>
+          {status === "pending" && <RowMenu id={id} items={items} />}
+        </div>
+        {children ? <div className="pb-3">{children}</div> : null}
+      </li>
+    );
+  }
+
   return (
     <li
       data-testid={`device-${id}`}
       data-host={view.host ? "" : undefined}
       data-limited={view.limited ? "" : undefined}
       data-status={status}
-      className="border-b border-border max-md:border max-md:border-border"
+      data-current={view.self ? "" : undefined}
+      aria-current={view.self ? "true" : undefined}
+      className="group/row px-6 max-md:px-4"
     >
       {/*
-        Wide: icon · name and what follows · status (12rem) · 「打开」 · 「⋯」, the status and the actions on the name's line.
-        A phone's card: the name's line keeps only 「⋯」, the rest takes the card's whole width, and 「打开」 has its own line under it.
+        One 56px line: icon · name (and at width, two badges) · state dot and
+        word · one 28px action · 「⋯」. Below 44rem of container the badges fold
+        away and the status takes its own line inside the same beat; everything
+        a careful look needs is in the disclosure below.
       */}
-      <div className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1.5 px-6 py-3 max-md:px-3 md:grid-cols-[1rem_minmax(0,1fr)_12rem_6.5rem_1.75rem]">
-        <Icon aria-hidden="true" className={cn("col-start-1 row-start-1 mt-0.5 size-4 shrink-0", removed || view.presence === "offline" ? "text-faint" : "text-muted")} />
-        <span className="col-start-2 row-start-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-          <span data-testid={`name-${id}`} title={id} className={cn("min-w-0 truncate text-[13px] leading-5 font-medium", removed ? "text-muted" : "text-fg")}>
-            {name}
-          </span>
-          <RowBadges
-            view={view}
-            warn={
-              openWarnings ? (
-                <span data-signal="warn" className="inline-flex h-3.5 items-center bg-warn px-1 font-mono text-[10px] leading-none font-semibold text-on-signal">
+      <details data-testid={`details-${id}`} open={openWarnings || undefined} className="group/details min-w-0">
+        <summary
+          className={cn(
+            "grid h-14 min-w-0 cursor-pointer list-none content-center items-center gap-x-3 overflow-hidden select-none hover:bg-hover focus-visible:shadow-[inset_0_0_0_2px_var(--color-fg)] focus-visible:outline-none [&::-webkit-details-marker]:hidden",
+            "grid-cols-[1rem_minmax(0,1fr)_auto_1.75rem] @min-[44rem]/devices:grid-cols-[1rem_minmax(0,1fr)_9rem_auto_1.75rem]",
+            view.self && "shadow-[inset_1px_0_0_var(--color-fg)]",
+          )}
+        >
+          <Icon aria-hidden="true" className={cn("col-start-1 row-span-2 row-start-1 size-4 shrink-0 self-center @min-[44rem]/devices:row-span-1", view.presence === "offline" ? "text-faint" : "text-muted")} />
+          <span className="col-start-2 row-start-1 flex min-w-0 items-center gap-1.5 overflow-hidden">
+            <span data-testid={`name-${id}`} title={id} className="min-w-0 truncate text-sm leading-5 font-medium text-fg">
+              {name}
+            </span>
+            <ChevronRight aria-hidden="true" className="size-3 shrink-0 text-faint transition-transform group-open/details:rotate-90" />
+            <span className="hidden min-w-0 shrink items-center gap-1.5 overflow-hidden @min-[44rem]/devices:inline-flex">
+              <RowBadges view={view} />
+              {openWarnings && (
+                <span data-signal="warn" className="inline-flex h-3.5 shrink-0 items-center bg-warn px-1 font-mono text-[10px] leading-none font-semibold text-on-signal">
                   {t("re-enroll it")}
                 </span>
-              ) : null
-            }
-          />
-        </span>
-        <span className="pt-0.5 max-md:hidden md:col-start-3 md:row-span-2 md:row-start-1">
-          <RowStatus view={view} />
-        </span>
-        {onOpen && view.host && status === "active" && (
-          <Button
-            data-testid={`open-${id}`}
-            onClick={onOpen}
-            className="col-span-2 col-start-2 row-start-3 justify-self-start pointer-coarse:h-9 md:col-span-1 md:col-start-4 md:row-start-1 md:-my-1 md:justify-self-end md:pointer-coarse:-my-2"
-          >
-            {view.presence === "online" || !view.hasCopy ? t("open") : t("read the copy")}
-            <ArrowRight aria-hidden="true" />
-          </Button>
-        )}
-        {/* Taller than the name's line, the actions overhang it rather than push the line under it down. */}
-        <span className="col-start-3 row-start-1 -my-1 flex justify-end pointer-coarse:-my-2 md:col-start-5">
-          <RowMenu id={id} items={items} />
-        </span>
-        <div className="col-span-2 col-start-2 row-start-2 flex min-w-0 flex-col gap-1 md:col-span-1 md:col-start-2">
-          {/* On a phone the status sits in the card, under the name. */}
-          <span className="md:hidden">
+              )}
+            </span>
+          </span>
+          <span className="col-start-2 row-start-2 flex min-w-0 items-center @min-[44rem]/devices:col-start-3 @min-[44rem]/devices:row-start-1">
             <RowStatus view={view} />
           </span>
-          {view.host && status === "active" && <SessionCounts view={view} />}
-          {view.host && view.presence !== "online" && view.copyAsOf !== null && (
-            <span data-testid="copy-as-of" className="font-mono text-2xs text-muted">
-              {t("offline copy · as of {{time}}", { time: formatAsOf(view.copyAsOf) })}
-            </span>
-          )}
-          {view.renewal && view.renewal.kind !== "none" && status === "active" && (
-            <RenewalLine
-              id={id}
-              status={view.renewal}
-              viewerAdmin={viewerAdmin}
-              onCode={onRenewCode}
-              onRetry={onRenewRetry}
-              onRemove={onRemove}
-              onAddComputer={onAddComputer}
-              onNarrow={upgraded ? onControl : undefined}
-            />
-          )}
-          {view.pausedWith && view.pausedWith.length > 0 && status === "active" && (
-            <span data-testid={`paused-${id}`} className="text-2xs leading-4 text-muted">
-              {t("Control between {{ids}} is paused while their identity keys are renewed.", { ids: view.pausedWith.join(", ") })}
-            </span>
-          )}
-          {status === "active" &&
-            (view.pauses ?? []).map((p) => (
-              <span key={p.ending.edges.map((e) => `${e.host}<${e.id}`).join(",") || id} data-testid={`pause-${id}`} className="flex flex-col items-start gap-0.5 text-2xs leading-4 text-muted">
-                {p.ending.orphan && (
-                  <span data-testid={`pause-orphan-${id}`}>{t("Started by a device that is no longer a full device: it never ends by itself — end it here.")}</span>
-                )}
-                {p.ending.held.map((h) => (
-                  <span key={`${h.host}<${h.id}`} data-testid={`pause-held-${id}-${h.id}`} data-why={h.why} data-signal="warn" className="text-warn-fg">
-                    {pauseHeldText(h, t)}
-                  </span>
-                ))}
-                {viewerAdmin && onEndPause && (
-                  <button type="button" data-testid={`end-pause-${id}`} className="text-muted underline underline-offset-2 hover:text-fg" onClick={() => onEndPause(p.op)}>
-                    {t("end pause")}
-                  </button>
-                )}
-              </span>
-            ))}
-          {view.retiredLoginMs != null && status === "active" && (
-            <span data-testid={`retired-login-${id}`} className="font-mono text-2xs leading-4 text-muted">
-              {t("its old identity key was used to sign in at {{time}}", { time: formatAsOf(view.retiredLoginMs) })}
-            </span>
-          )}
-          {view.isolatedControllers && view.isolatedControllers.length > 0 && status === "active" && (
-            <span data-testid={`isolated-controllers-${id}`} data-signal="warn" className="text-2xs leading-4 text-warn-fg">
-              {t("It lets {{ids}} control it, which is isolated: settle it on its row first.", { ids: view.isolatedControllers.join(", ") })}
-            </span>
-          )}
-          {notes}
-          {keys}
-          {removed ? (
-            <span className="truncate font-mono text-2xs text-faint">{id}</span>
-          ) : (
-            <RowDetails
-              view={view}
-              open={openWarnings}
-              onOpenSession={onOpenSession}
-              warnings={lines ? <ReEnrollWarning id={id} lines={lines} onReEnroll={onReEnroll} onDismiss={onDismissReEnroll} onWarnAgain={onWarnAgain} /> : null}
-            />
-          )}
-        </div>
-      </div>
-      {children ? <div className="border-t border-border [&>*:last-child]:border-b-0">{children}</div> : null}
+          <span onClick={(e) => e.stopPropagation()} className="col-start-3 row-span-2 row-start-1 flex items-center justify-end self-center @min-[44rem]/devices:col-start-4 @min-[44rem]/devices:row-span-1">
+            {onOpen && view.host && (
+              <Button
+                data-testid={`open-${id}`}
+                onClick={onOpen}
+                className="h-7 px-2.5 text-xs pointer-coarse:h-9"
+                title={view.presence === "online" || !view.hasCopy ? t("open") : t("read the copy")}
+                aria-label={view.presence === "online" || !view.hasCopy ? t("open") : t("read the copy")}
+              >
+                <span className="hidden @min-[26rem]/devices:inline">{view.presence === "online" || !view.hasCopy ? t("open") : t("read the copy")}</span>
+                <ArrowRight aria-hidden="true" />
+              </Button>
+            )}
+          </span>
+          <span onClick={(e) => e.stopPropagation()} className="col-start-4 row-span-2 row-start-1 flex items-center justify-end self-center @min-[44rem]/devices:col-start-5 @min-[44rem]/devices:row-span-1">
+            <RowMenu id={id} items={items} />
+          </span>
+        </summary>
+        <RowDetailsBody
+          view={view}
+          onOpenSession={onOpenSession}
+          warnings={lines ? <ReEnrollWarning id={id} lines={lines} onReEnroll={onReEnroll} onDismiss={onDismissReEnroll} onWarnAgain={onWarnAgain} /> : null}
+        >
+          {extras}
+        </RowDetailsBody>
+      </details>
+      {children ? <div className="pb-3">{children}</div> : null}
     </li>
   );
 }

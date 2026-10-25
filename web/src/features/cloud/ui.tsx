@@ -18,10 +18,10 @@ import { limitText } from "./plan";
  * The pieces the cloud screens share (sign-in, set-up, recovery, pairing,
  * machines, devices), in the drafting-sheet language: a 56px top bar and a
  * page framed by hairlines with registration marks at its seams — edge to
- * edge below 1280px, then 32px in from the window and centred past 2400px —
- * ink primary buttons, white fields that ink on focus, and colour only for
- * state. Cloud pages use the 36px control size
- * (docs/ui-spec.md §2).
+ * edge below 1280px, then 32px in from the window and a column no wider than
+ * 1200px — ink primary buttons, white fields that ink on focus, and colour
+ * only for state. Cloud pages use the 36px control size
+ * (docs/ui-spec.md §2, §3).
  */
 
 export const field =
@@ -275,18 +275,43 @@ export function retryText(error: unknown): string {
   return i18next.t("too many attempts: try again in {{n}} s", { n: Math.max(1, Math.ceil(ms / 1000)) });
 }
 
+function CloudColumn({ children }: { children: ReactNode }) {
+  return <div className="mx-auto w-full max-w-[1200px] md:border-x md:border-border">{children}</div>;
+}
+
+/**
+ * A page's section title: sans 16px/24, 600, optionally behind a 10px mono
+ * numbered eyebrow, with the one hairline the page spends on it underneath
+ * (docs/ui-spec.md §3). Badges and metadata are never this size.
+ */
+export function SectionHead({ index, title, children, className }: { index?: string; title: string; children?: ReactNode; className?: string }) {
+  return (
+    <div data-section-head="" className={cn("flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-border pb-2", className)}>
+      {index && (
+        <span data-label="" className="label-caps text-[10px] leading-[14px] text-muted">
+          {index}
+        </span>
+      )}
+      <h2 className="text-base leading-6 font-semibold text-fg">{title}</h2>
+      {children}
+    </div>
+  );
+}
+
 /**
  * A whole cloud page: the top bar with the mark, then the framed column. The
  * registration marks sit where the bar's bottom line meets the frame.
  *
  * The bar sticks inside the same scroller as the page, so the scrollbar's
  * gutters move both by the same amount and their frame lines stay one line.
+ * Past 1280px the column stops at about 1200px instead of spreading over the
+ * whole window (docs/ui-spec.md §3).
  */
 export function CloudPage({ children, aside }: { children: ReactNode; aside?: ReactNode }) {
   return (
     <div className="flex h-full w-full flex-col overflow-y-auto bg-bg [scrollbar-gutter:stable_both-edges]">
       <header className="sticky top-0 z-10 h-14 shrink-0 border-b border-border bg-bg xl:px-8">
-        <div className="relative mx-auto flex h-full max-w-[2400px] items-center gap-3 px-6 max-md:px-4 md:border-x md:border-border">
+        <div className="relative mx-auto flex h-full max-w-[1200px] items-center gap-3 px-6 max-md:px-4 md:border-x md:border-border">
           <BrandMark size={20} title="Droppen" />
           <span className="font-mono text-sm font-medium text-fg">Droppen</span>
           <span className="flex-1" />
@@ -296,7 +321,7 @@ export function CloudPage({ children, aside }: { children: ReactNode; aside?: Re
         </div>
       </header>
       <div className="flex flex-1 flex-col xl:px-8">
-        <div className="mx-auto w-full max-w-[2400px] flex-1 md:border-x md:border-border">{children}</div>
+        <CloudColumn>{children}</CloudColumn>
       </div>
     </div>
   );

@@ -156,7 +156,7 @@ export function AccountName({ account, link }: { account: CloudAccount; link: Hu
   const me = useMe(account, link);
   const email = me?.view?.email.address || null;
   return (
-    <span data-testid="account-name" title={account.account} className="truncate font-mono text-2xs text-faint max-md:hidden">
+    <span data-testid="account-name" title={account.account} className="truncate font-mono text-xs text-faint max-md:hidden">
       {email ?? account.account}
     </span>
   );

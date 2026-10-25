@@ -289,10 +289,15 @@ function Meter({ ratio, level, label }: { ratio: number; level: Level; label: st
   );
 }
 
-/** One number of the summary: what it counts, how much, against what limit, and a line under it. */
+/**
+ * One number of the summary: what it counts, how much, against what limit,
+ * and a line under it. Cells are `bg-bg` on the grid's `bg-border`, so the
+ * only rules are the 1px between them — never a frame around the grid
+ * (docs/ui-spec.md §3).
+ */
 function Tile({ testId, label, used, limit, meter, level = "ok", className, children }: { testId: string; label: string; used: ReactNode; limit?: string | null; meter?: number | null; level?: Level; className?: string; children?: ReactNode }) {
   return (
-    <div data-testid={testId} className={cn("flex min-w-0 flex-col gap-1.5 border-r border-b border-border px-6 py-3.5 max-md:px-4", className)}>
+    <div data-testid={testId} className={cn("flex min-w-0 flex-col gap-1.5 bg-bg px-4 py-3", className)}>
       <CapsLabel>{label}</CapsLabel>
       <span className="flex min-w-0 items-baseline gap-1.5 whitespace-nowrap">
         <span
@@ -301,10 +306,27 @@ function Tile({ testId, label, used, limit, meter, level = "ok", className, chil
         >
           {used}
         </span>
-        {limit && <span className="truncate font-mono text-2xs text-muted">/ {limit}</span>}
+        {limit && <span className="truncate font-mono text-xs text-muted">/ {limit}</span>}
       </span>
       {meter != null && <Meter ratio={meter} level={level} label={label} />}
       {children}
+    </div>
+  );
+}
+
+/** A row of the summary's five cells: 5 across, else 3+2, else 2+2+1 — always full, no empty cell. */
+const CELL = "col-span-1 @min-[36rem]/usage:col-span-2 @min-[70rem]/usage:col-span-1";
+const LAST_CELL = "col-span-2 @min-[36rem]/usage:col-span-3 @min-[70rem]/usage:col-span-1";
+const BEFORE_LAST_CELL = "col-span-1 @min-[36rem]/usage:col-span-3 @min-[70rem]/usage:col-span-1";
+
+/** The summary's section title: sans 16/24 over the one hairline, with a 10px numbered eyebrow (docs/ui-spec.md §3). */
+function UsageHead({ title }: { title: string }) {
+  return (
+    <div data-section-head="" className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-border pb-2">
+      <span data-label="" className="label-caps text-[10px] leading-[14px] text-muted">
+        01
+      </span>
+      <h2 className="text-base leading-6 font-semibold text-fg">{title}</h2>
     </div>
   );
 }
@@ -340,12 +362,26 @@ export function UsagePanel({
   const count = (used: number, max: number | null | undefined) => ({ used: String(used), limit: max == null ? t("no limit") : String(max), meter: max != null && max > 0 ? used / max : null, level: countLevel(used, max) });
   const devices = count(plan.usage.devices, devicesMax);
   const hosts = count(hostsUsed, hostsMax);
+  const summary = t("{{plan}} · {{devices}} of {{deviceMax}} devices · {{hosts}} of {{hostMax}} can run AI", {
+    plan: planLabel(plan.id, t),
+    devices: plan.usage.devices,
+    deviceMax: devicesMax ?? "∞",
+    hosts: hostsUsed,
+    hostMax: hostsMax ?? "∞",
+  });
   return (
-    <section data-testid="usage-summary" data-plan={plan.id} className="border-b border-border">
-      <div className="overflow-hidden">
-        <div className="-mr-px -mb-px grid grid-cols-5 max-[1180px]:grid-cols-3 max-md:grid-cols-2">
-          <Tile testId="usage-plan" label={t("plan")} used={<span className="inline-flex h-6 items-center px-1.5 font-mono text-xs tracking-[0.08em] text-fg uppercase shadow-[inset_0_0_0_1px_var(--color-border-strong)]">{planLabel(plan.id, t)}</span>} className="max-md:col-span-2">
-            <span data-testid="plan-limits" className="font-mono text-2xs text-muted">
+    <section data-testid="usage-summary" data-plan={plan.id} className="@container/usage">
+      <div className="flex flex-col gap-4 px-6 pt-1 pb-2 max-md:px-4">
+        <UsageHead title={t("plan and usage")} />
+        {/* One sentence first, then five numbers — not five framed boxes. */}
+        <p data-testid="usage-summary-line" className="text-[13px] leading-5 text-muted">
+          {summary}
+          <span className="text-faint"> · </span>
+          {days === null ? t("offline copies kept without a limit") : t("offline copies kept {{days}} days", { days })}
+        </p>
+        <div className="grid grid-cols-2 gap-px bg-border @min-[36rem]/usage:grid-cols-6 @min-[70rem]/usage:grid-cols-5">
+          <Tile testId="usage-plan" label={t("plan")} used={planLabel(plan.id, t)} className={CELL}>
+            <span data-testid="plan-limits" className="font-mono text-xs text-muted">
               {days === null ? t("offline copies kept without a limit") : t("offline copies kept {{days}} days", { days })}
             </span>
           </Tile>
@@ -356,15 +392,16 @@ export function UsagePanel({
             limit={transfer ? (transfer.included == null ? t("no limit") : formatPlanBytes(transfer.included)) : null}
             meter={transferRatio}
             level={transferLevel}
+            className={CELL}
           >
             {!transfer ? (
-              <span className="font-mono text-2xs text-faint">{t("not reported by Droppen yet")}</span>
+              <span className="font-mono text-xs text-faint">{t("not reported by Droppen yet")}</span>
             ) : transfer.throttled ? (
-              <span data-signal="warn" className="text-2xs leading-4 text-warn-fg">
+              <span data-signal="warn" className="text-xs leading-4 text-warn-fg">
                 {t("used up: relayed connections are slowed until the period ends")}
               </span>
             ) : (
-              <span className="font-mono text-2xs text-muted">
+              <span className="font-mono text-xs text-muted">
                 {resets ? t("through relays · resets {{date}}", { date: formatDate(resets, i18n.language) }) : t("through relays")}
               </span>
             )}
@@ -376,6 +413,7 @@ export function UsagePanel({
             limit={storage.limitBytes === null ? t("no limit") : formatPlanBytes(storage.limitBytes)}
             meter={storage.ratio}
             level={storage.level}
+            className={CELL}
           >
             {(storage.machines.length > 0 || storage.otherBytes > 0) && (
               <button
@@ -384,53 +422,55 @@ export function UsagePanel({
                 aria-expanded={byDevice}
                 aria-controls="storage-machines"
                 onClick={() => setByDevice(!byDevice)}
-                className="flex w-fit items-center gap-1 font-mono text-2xs text-muted hover:text-fg pointer-coarse:py-1.5"
+                className="flex w-fit items-center gap-1 font-mono text-xs text-muted hover:text-fg pointer-coarse:py-1.5"
               >
                 <ChevronRight aria-hidden="true" className={cn("size-3 transition-transform", byDevice && "rotate-90")} />
                 {t("by device")}
               </button>
             )}
           </Tile>
-          <Tile testId="usage-devices" label={t("devices")} used={devices.used} limit={devices.limit} meter={devices.meter} level={devices.level} />
-          <Tile testId="usage-hosts" label={t("devices that can run AI")} used={hosts.used} limit={hosts.limit} meter={hosts.meter} level={hosts.level} />
+          <Tile testId="usage-devices" label={t("devices")} used={devices.used} limit={devices.limit} meter={devices.meter} level={devices.level} className={BEFORE_LAST_CELL} />
+          <Tile testId="usage-hosts" label={t("devices that can run AI")} used={hosts.used} limit={hosts.limit} meter={hosts.meter} level={hosts.level} className={LAST_CELL} />
         </div>
-      </div>
-      {byDevice && (
-        <ul id="storage-machines" data-testid="storage-machines" className="flex max-w-xl flex-col border-t border-border px-6 py-2 max-md:px-4">
-          {storage.machines.map((m) => (
-            <li key={m.id} data-machine={m.id} title={m.id} className="flex items-baseline gap-3 border-b border-border py-1 font-mono text-2xs last:border-b-0">
-              <CopyLabel name={names?.get(m.id) || t("device {{id}}", { id: shortMachineId(m.id) })} />
-              <span className="shrink-0 text-right text-muted tabular-nums">{formatPlanBytes(m.bytes)}</span>
-            </li>
-          ))}
-          {storage.otherBytes > 0 && (
-            <li className="flex items-baseline gap-3 py-1 font-mono text-2xs">
-              <span className="min-w-0 flex-1 truncate text-muted">{t("Account keys")}</span>
-              <span className="shrink-0 text-right text-muted tabular-nums">{formatPlanBytes(storage.otherBytes)}</span>
-            </li>
-          )}
-        </ul>
-      )}
-      <div className="flex flex-col gap-1 border-t border-border px-6 py-2.5 max-md:px-4">
-        {storage.level === "high" && (
-          <p data-testid="storage-high" data-signal="warn" className="text-xs leading-5 text-warn-fg">
-            {t("Cloud storage {{used}} used: the oldest session copies are cleaned up first", { used: formatStoragePair(storage.usedBytes, storage.limitBytes) })}
-          </p>
+        {byDevice && (
+          <ul id="storage-machines" data-testid="storage-machines" className="flex max-w-xl flex-col gap-1 py-1">
+            {storage.machines.map((m) => (
+              <li key={m.id} data-machine={m.id} title={m.id} className="flex items-baseline gap-3 py-0.5 font-mono text-xs">
+                <CopyLabel name={names?.get(m.id) || t("device {{id}}", { id: shortMachineId(m.id) })} />
+                <span className="shrink-0 text-right text-muted tabular-nums">{formatPlanBytes(m.bytes)}</span>
+              </li>
+            ))}
+            {storage.otherBytes > 0 && (
+              <li className="flex items-baseline gap-3 py-0.5 font-mono text-xs">
+                <span className="min-w-0 flex-1 truncate text-muted">{t("Account keys")}</span>
+                <span className="shrink-0 text-right text-muted tabular-nums">{formatPlanBytes(storage.otherBytes)}</span>
+              </li>
+            )}
+          </ul>
         )}
-        {storage.level === "full" && (
-          <p data-testid="storage-full-line" data-signal="failed" className="text-xs leading-5 text-danger">
-            {storageFullText(storage.lastWriteMs, t)}
-          </p>
-        )}
-        {downgradeOf(plan, now) && (
-          <p data-testid="plan-downgrade-line" data-signal="warn" className="text-xs leading-5 text-warn-fg">
-            <DowngradeText plan={plan} now={now} />
-          </p>
-        )}
-        {days !== null && (
-          <p data-testid="retention-note" className="text-2xs leading-4 text-muted">
-            {t("A device offline for more than {{days}} days has its offline copy in the cloud deleted; what is on the device is not affected.", { days })}
-          </p>
+        {(storage.level === "high" || storage.level === "full" || downgradeOf(plan, now) || days !== null) && (
+          <div className="flex flex-col gap-1">
+            {storage.level === "high" && (
+              <p data-testid="storage-high" data-signal="warn" className="text-xs leading-5 text-warn-fg">
+                {t("Cloud storage {{used}} used: the oldest session copies are cleaned up first", { used: formatStoragePair(storage.usedBytes, storage.limitBytes) })}
+              </p>
+            )}
+            {storage.level === "full" && (
+              <p data-testid="storage-full-line" data-signal="failed" className="text-xs leading-5 text-danger">
+                {storageFullText(storage.lastWriteMs, t)}
+              </p>
+            )}
+            {downgradeOf(plan, now) && (
+              <p data-testid="plan-downgrade-line" data-signal="warn" className="text-xs leading-5 text-warn-fg">
+                <DowngradeText plan={plan} now={now} />
+              </p>
+            )}
+            {days !== null && (
+              <p data-testid="retention-note" className="text-xs leading-4 text-muted">
+                {t("A device offline for more than {{days}} days has its offline copy in the cloud deleted; what is on the device is not affected.", { days })}
+              </p>
+            )}
+          </div>
         )}
       </div>
     </section>
