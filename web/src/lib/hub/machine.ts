@@ -76,6 +76,7 @@ import {
   STREAMS_FEATURE,
   utf8,
 } from "@/lib/e2e";
+import { RELAY_SILENT_MS } from "@/lib/e2e/path";
 import { type DirectEnv, DirectHistory, DirectPaths } from "@/lib/transport/p2p";
 import type { Pipe, PipeKind, PipeMessage, PipeMeta, PipeOpener } from "@/lib/transport/tunnel";
 import { HUB_NO_CHANNELS, LINK_LOST } from "./link";
@@ -827,8 +828,19 @@ export class MachineChannel implements PipeOpener {
         for (const f of queue.drain()) take(f);
         routeTo = take;
         let direct: DirectPaths | null = null;
+        let relayFailing = false;
         driver.onpaths = (stats) => {
           if (this.driver === driver) this.setPaths(stats);
+          // A carrier path with a probe unanswered for two probe intervals is
+          // gone. Until this, only the number shown rose (the probe's age)
+          // while the channel stalled until the relay link's own 60 s silence.
+          // Wake the carrier with its short deadline too: a dead relay link
+          // must be replaced before the next channel tries to use it.
+          if (!relayFailing && !driver.isClosed && stats.relayRttMs !== null && stats.relayRttMs >= RELAY_SILENT_MS) {
+            relayFailing = true;
+            relayLink?.wake();
+            driver.close(4000, "the relay path stopped answering");
+          }
         };
         const offGoaway = relayLink?.onGoaway(({ retryMs }) => {
           // The relay is draining: move before it closes.

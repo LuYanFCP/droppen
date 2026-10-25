@@ -102,6 +102,8 @@ class Paths {
   lastDirectProgressMs: number;
   nextDirectProbeMs: number;
   nextRelayProbeMs: number;
+  /** When `tick` last ran: a long gap means this page's timers were held, not that the peer went silent. */
+  lastTickMs: number;
   events: PathEvent[] = [];
   readonly counts = { relayRttMs: null as number | null, directRttMs: null as number | null, ups: 0, downs: 0 };
 
@@ -114,6 +116,7 @@ class Paths {
     this.nextDirectProbeMs = nowMs;
     // The first hub probe goes out at once, so the indicator has a number.
     this.nextRelayProbeMs = nowMs;
+    this.lastTickMs = nowMs;
   }
 
   nonce(): number {
@@ -151,6 +154,16 @@ class Paths {
     if (oldest === null) return;
     const age = nowMs - oldest;
     if (this.counts.relayRttMs === null || age > this.counts.relayRttMs) this.counts.relayRttMs = age;
+  }
+
+  /**
+   * This page's timers were held (a background tab, a phone asleep): the
+   * probes sent before the pause were not answered because nothing was read,
+   * not because the path died. Forget them; the tick that noticed sends a
+   * fresh one, which the watchdog can judge on its own.
+   */
+  forgetProbesAfterPause(): void {
+    for (const [nonce, [via]] of this.probes) if (via === "relay") this.probes.delete(nonce);
   }
 
   /** Remember when a probe left (and on which path). */
@@ -407,6 +420,11 @@ export class Session {
   tick(nowMs: number): void {
     const p = this.paths;
     if (!p) return;
+    // A gap of several probe intervals means this page was away, not that the
+    // peer went quiet: do not age the probes nobody was there to read.
+    const paused = nowMs - p.lastTickMs > 3 * RELAY_PROBE_MS;
+    p.lastTickMs = nowMs;
+    if (paused) p.forgetProbesAfterPause();
     if (p.direct) {
       const silent = nowMs - p.lastDirectRxMs > DIRECT_TIMEOUT_MS;
       const unackedAt = p.unackedDeadlineMs();
