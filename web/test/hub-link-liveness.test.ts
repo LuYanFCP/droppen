@@ -86,7 +86,7 @@ class HubSocket {
 
 async function linkWith(
   t: { after(fn: () => void): void },
-  opts: { heartbeatMs: number; silenceMs: number; stableMs?: number; now?: () => number; random?: () => number },
+  opts: { heartbeatMs: number; silenceMs: number; stableMs?: number; probeMs?: number; now?: () => number; random?: () => number },
   configure: (socket: HubSocket) => void = () => undefined,
 ) {
   const sockets: HubSocket[] = [];
@@ -171,6 +171,28 @@ test("a hub that signs the page in and then says nothing is retried ever less of
   assert.ok(gaps[1]! > gaps[0]! * 1.5 && gaps[2]! > gaps[1]! * 1.5, `the waits grow: ${gaps.map(Math.round).join(", ")} ms`);
 });
 
+test("a connection that only looks open is replaced within the wake probe, not at the next interval", async (t) => {
+  // A heartbeat long enough that nothing but the probe can replace it: on a
+  // phone, this is the difference between about two seconds and a whole
+  // interval of a connection that is already dead.
+  const { link, sockets } = await linkWith(t, { heartbeatMs: 10_000, silenceMs: 60_000, probeMs: 30 });
+  sockets[0]!.answering = false;
+  const woke = Date.now();
+  link.wake();
+  await until(() => sockets.length === 2 && link.state === "open", "replaced by the wake probe", 1_500);
+  assert.ok(Date.now() - woke < 1_000, "replaced on the probe's deadline, not an interval later");
+  assert.equal(sockets[0]!.closed, 4000, "the silent socket is closed on the way out");
+  assert.equal(link.state, "open", "and the next one is signed in");
+});
+
+test("a connection that answers the wake probe is kept", async (t) => {
+  const { link, sockets } = await linkWith(t, { heartbeatMs: 10_000, silenceMs: 60_000, probeMs: 30 });
+  link.wake();
+  await sleep(200);
+  assert.equal(sockets.length, 1, "it answered: it lived through the pause");
+  assert.equal(link.state, "open");
+});
+
 test("after waking, a connection that does not answer is replaced one interval later, not after a whole silence", async (t) => {
   let offset = 0;
   const heartbeatMs = 40;
@@ -191,7 +213,7 @@ test("after waking, a connection that does not answer is replaced one interval l
 test("what the hub says of the machines is fresh once said on this connection, and in doubt after a pause until the connection answers", async (t) => {
   let offset = 0;
   const heartbeatMs = 40;
-  const { link, sockets } = await linkWith(t, { heartbeatMs, silenceMs: 400, now: () => Date.now() + offset }, (s) => (s.presenceAfterWelcome = true));
+  const { link, sockets } = await linkWith(t, { heartbeatMs, silenceMs: 400, probeMs: 20, now: () => Date.now() + offset }, (s) => (s.presenceAfterWelcome = true));
   assert.equal(link.presenceFresh, false, "signed in, but the hub has not said where the machines are yet");
   assert.equal(await link.waitPresence(1_000), true);
   assert.deepEqual(link.presence.get("m-1")?.via, [{ relay: "r-1", rttMs: null }]);
@@ -267,6 +289,62 @@ class RelaySocket {
 
   close(): void {}
 }
+
+test("a relay carrying a channel that only looks open is let go within the wake probe", async (t) => {
+  const sockets: RelaySocket[] = [];
+  const keys = await generateDeviceKeys();
+  const link = new RelayLink({
+    relay: "r-1",
+    origin: "wss://relay.test",
+    account: "a-1",
+    deviceId: "d-1",
+    signKey: keys.sign.privateKey,
+    ticket: async () => "ticket",
+    makeSocket: () => {
+      const s = new RelaySocket();
+      sockets.push(s);
+      return s;
+    },
+    heartbeatMs: 10_000,
+    silenceMs: 60_000,
+    probeMs: 30,
+  });
+  t.after(() => link.close());
+  await link.open(5_000);
+  link.reserve(() => undefined);
+  sockets[0]!.answering = false;
+  const woke = Date.now();
+  link.wake();
+  await until(() => link.state === "closed", "dropped by the wake probe", 1_500);
+  assert.ok(Date.now() - woke < 1_000, "dropped on the probe's deadline, not a whole silence");
+});
+
+test("a relay that answers the wake probe is kept", async (t) => {
+  const sockets: RelaySocket[] = [];
+  const keys = await generateDeviceKeys();
+  const link = new RelayLink({
+    relay: "r-1",
+    origin: "wss://relay.test",
+    account: "a-1",
+    deviceId: "d-1",
+    signKey: keys.sign.privateKey,
+    ticket: async () => "ticket",
+    makeSocket: () => {
+      const s = new RelaySocket();
+      sockets.push(s);
+      return s;
+    },
+    heartbeatMs: 10_000,
+    silenceMs: 60_000,
+    probeMs: 30,
+  });
+  t.after(() => link.close());
+  await link.open(5_000);
+  link.reserve(() => undefined);
+  link.wake();
+  await sleep(200);
+  assert.equal(link.state, "open", "it answered the probe");
+});
 
 test("the relay link, too, gives a late beat another interval, and drops an unanswering relay one interval after waking", async (t) => {
   let offset = 0;

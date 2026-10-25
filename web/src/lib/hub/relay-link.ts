@@ -28,6 +28,13 @@ const ROUTED = new Set<Frame["type"]>(["data", "credit", "close"]);
 const HEARTBEAT_MS = 20_000;
 /** Silence after which the relay is presumed gone (the channel layer notices sooner on its own). */
 const SILENCE_MS = 60_000;
+/**
+ * How long a wake-up ping (`wake`) has to be answered before the connection is
+ * let go. A phone's pause can leave a socket that looks open and carries
+ * nothing; waiting the whole {@link SILENCE_MS} is what made a return to the
+ * app cost tens of seconds.
+ */
+export const WAKE_PROBE_MS = 2_000;
 
 interface SocketLike {
   binaryType: string;
@@ -54,6 +61,8 @@ export interface RelayLinkOptions {
   /** 20 s and 60 s unless a test says otherwise. */
   heartbeatMs?: number;
   silenceMs?: number;
+  /** How long the wake-up ping waits for an answer; {@link WAKE_PROBE_MS} unless a test says otherwise. */
+  probeMs?: number;
 }
 
 type Listener<T> = (value: T) => void;
@@ -77,6 +86,9 @@ export class RelayLink {
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private lastHeard = 0;
   private lastBeat = 0;
+  /** The wake-up ping sent on coming back: unless answered, let the connection go. */
+  private probeTimer: ReturnType<typeof setTimeout> | null = null;
+  private probeAnswered = false;
   private readonly routes = new Map<number, (frame: Frame) => void>();
   private readonly stateListeners = new Set<Listener<RelayLinkState>>();
   private readonly presenceListeners = new Set<Listener<Map<string, PresenceState>>>();
@@ -150,7 +162,10 @@ export class RelayLink {
    * The page is back (in view, online again): one carrying no channel and
    * not heard from for a beat is let go at once — the page may have slept
    * through its death, and the next channel would wait on it for nothing,
-   * where a new one costs a sign-in; any other is checked now (a beat).
+   * where a new one costs a sign-in; any other is checked now, and let go
+   * too unless it answers within {@link WAKE_PROBE_MS}: a beat alone would
+   * let a socket that died in the pause stand for a whole silence, which is
+   * what every return to the app cost on a phone.
    */
   wake(): void {
     if (this.state !== "open") return;
@@ -158,7 +173,27 @@ export class RelayLink {
       this.close();
       return;
     }
+    if (this.probeTimer) return;
     this.beat();
+    if (this.state !== "open") return;
+    this.probeAnswered = false;
+    this.probeTimer = setTimeout(() => {
+      this.probeTimer = null;
+      if (this.state !== "open" || this.probeAnswered) return;
+      const socket = this.socket;
+      this.drop(4410, "the relay did not answer the wake-up ping");
+      try {
+        socket?.close(1000, "silent");
+      } catch {
+        // already gone
+      }
+    }, this.opts.probeMs ?? WAKE_PROBE_MS);
+  }
+
+  /** The connection answered: no probe is pending. */
+  private answered(): void {
+    if (this.probeTimer) clearTimeout(this.probeTimer);
+    this.probeTimer = null;
   }
 
   close(): void {
@@ -217,6 +252,8 @@ export class RelayLink {
       socket.onmessage = (ev) => {
         if (this.socket !== socket) return;
         this.lastHeard = this.now();
+        this.probeAnswered = true;
+        this.answered();
         if (typeof ev.data === "string") {
           void this.onText(socket, ev.data, () => {
             if (settled) return;
@@ -339,6 +376,7 @@ export class RelayLink {
   private drop(code: number, reason: string): void {
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = null;
+    this.answered();
     if (this.socket) {
       this.socket.onmessage = null;
       this.socket.onclose = null;
