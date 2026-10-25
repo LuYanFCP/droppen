@@ -8,10 +8,12 @@ import { RELEASES_URL } from "./get-droppen";
  * The download buttons' files (`lib/hub/releases.ts`): the latest release as
  * this page's hub names it, read once per page load. A button with its file
  * is a plain link to it, which downloads in place, with the version and the
- * size beside it; without it (no answer yet, or none: a hub without the
- * route, a 503, a network failure) it is a link to the release page, in a
- * new tab. Shared by the home page's hero (`hero-get.tsx`), the download
- * page (`download.tsx`) and the add-device guide.
+ * size beside it — through the hub's counted `/dl/<platform>` when the hub
+ * names one (`ReleaseFile.href`), else straight to GitHub; without it (no
+ * answer yet, or none: a hub without the route, a 503, a network failure)
+ * it is a link to the release page, in a new tab. Shared by the home page's
+ * hero (`hero-get.tsx`), the download page (`download.tsx`) and the
+ * add-device guide.
  */
 
 let asked: Promise<LatestRelease | null> | null = null;
@@ -45,9 +47,19 @@ export function useLatestRelease(given?: LatestRelease | null): LatestRelease | 
   return given !== undefined ? given : release;
 }
 
-/** A download button's link: the file itself (in place), else the release page (a new tab). */
+/** Whether a file's link is the hub's counted `/dl/<platform>`, not the file on GitHub. */
+export function countedLink(file: ReleaseFile): boolean {
+  return file.href !== file.url;
+}
+
+/**
+ * A download button's link: the file itself (in place; through the hub's
+ * `/dl/` when it counts, `nofollow` so that crawlers leave the count alone,
+ * as `/robots.txt` asks too), else the release page (a new tab).
+ */
 export function fileLink(file: ReleaseFile | undefined): { href: string; target?: string; rel?: string } {
-  return file ? { href: file.url } : { href: RELEASES_URL, target: "_blank", rel: "noopener noreferrer" };
+  if (!file) return { href: RELEASES_URL, target: "_blank", rel: "noopener noreferrer" };
+  return countedLink(file) ? { href: file.href, rel: "nofollow" } : { href: file.href };
 }
 
 /** `v0.2.129 · 48 MB`: the version and size of the file a button downloads. */
@@ -86,7 +98,12 @@ export function LinuxTarballs({
       {files.map((file, i) => (
         <span key={file.name}>
           {i > 0 && " · "}
-          <a href={file.url} data-testid={`${testId}-file`} className="text-muted underline underline-offset-4 [overflow-wrap:anywhere] hover:text-fg">
+          <a
+            href={file.href}
+            data-testid={`${testId}-file`}
+            className="text-muted underline underline-offset-4 [overflow-wrap:anywhere] hover:text-fg"
+            rel={countedLink(file) ? "nofollow" : undefined}
+          >
             {file.name}
           </a>{" "}
           ({formatSize(file.size)})
