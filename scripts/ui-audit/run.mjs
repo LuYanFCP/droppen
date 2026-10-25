@@ -139,13 +139,24 @@ async function measure(page) {
       effort: { style: style(effort) },
       input: { rect: rect(input), style: style(input) },
       activeTab: { rect: rect(activeTab), style: style(activeTab), focus: activeTab?.matches(":focus-visible") ?? null },
+      pageBg: getComputedStyle(document.body).backgroundColor,
+      triggerAttrs: trigger ? Object.fromEntries([...trigger.attributes].map((a) => [a.name, a.value])) : null,
+      chevronClass: trigger?.querySelector("svg")?.getAttribute("class") ?? null,
       invalidBorders: borders,
     };
   });
 }
 
 async function auditFixture(theme, view) {
-  const page = await browser.newPage({ viewport: { width: view.width, height: view.height }, deviceScaleFactor: 1 });
+  const page = await browser.newPage({
+    viewport: { width: view.width, height: view.height },
+    deviceScaleFactor: 1,
+    // A phone is a coarse pointer, not just a narrow window: the spec's
+    // touch sizes key off `pointer: coarse`, which a 390px desktop context
+    // does not match.
+    hasTouch: view.name === "mobile",
+    isMobile: view.name === "mobile",
+  });
   await page.goto(`${base}ui-audit/index.html?theme=${theme}`);
   await page.evaluate(() => document.fonts.ready);
   await page.waitForTimeout(200);
@@ -192,12 +203,19 @@ async function auditFixture(theme, view) {
     const selected = options.find((o) => o.hasAttribute("data-selected"));
     const normal = options.find((o) => !o.hasAttribute("data-selected") && !o.hasAttribute("data-highlighted"));
     const chevron = document.querySelector('[data-audit-row="model"] button svg');
+    // The rotation lives on the icon's wrapper (`[&>svg]:size-…`), not on the
+    // lucide `<svg>` itself.
+    const chevronIcon = chevron?.parentElement;
+    const trigger = document.querySelector('[data-audit-row="model"] button');
     return {
       list: { rect: rect(list), style: style(list), text: (list?.innerText ?? "").trim() },
       options: options.map((o) => ({ text: o.textContent?.trim(), rect: rect(o), style: style(o) })),
       selected: selected ? { style: style(selected), check: !!selected.querySelector("svg") } : null,
       normal: normal ? { style: style(normal) } : null,
-      chevron: chevron ? { transform: getComputedStyle(chevron).transform } : null,
+      // Tailwind v4 turns `rotate-180` into the individual `rotate` property,
+      // so `transform` stays "none" on a rotated element.
+      chevron: chevron && chevronIcon ? { transform: getComputedStyle(chevronIcon).transform, rotate: getComputedStyle(chevronIcon).rotate, class: chevronIcon.getAttribute("class") } : null,
+      triggerAttrs: trigger ? Object.fromEntries([...trigger.attributes].map((a) => [a.name, a.value])) : null,
     };
   });
   await page.screenshot({ path: `${out}/select-open-${theme}-${view.name}.png` });
@@ -228,7 +246,12 @@ async function auditFixture(theme, view) {
   const rowH = desktop ? 32 : 44;
   const focusVisible = (f) => f.style !== "none" && parseFloat(f.width) >= 2 && f.color !== "rgba(0, 0, 0, 0)";
   if (!focusVisible(inputFocus)) fail("focus.input", inputFocus, "2px visible outline");
-  const tabRingVisible = tabFocus.style !== "none" && parseFloat(tabFocus.width) >= 2 && tabFocus.color !== tabFocus.bg;
+  // A ring outside the element sits on the page, not on the element's own
+  // ink fill: compare it against the page background when it is offset out.
+  const tabRingVisible =
+    tabFocus.style !== "none" &&
+    parseFloat(tabFocus.width) >= 2 &&
+    (parseFloat(tabFocus.offset) >= 0 ? tabFocus.color !== before.pageBg : tabFocus.color !== tabFocus.bg);
   if (!tabRingVisible) fail("focus.tab", tabFocus, "visible ring outside the ink fill");
   if (before.trigger.rect.h < fieldH) fail("size.trigger", before.trigger.rect.h, `>= ${fieldH}px`);
   if (before.input.rect.h < fieldH) fail("size.input", before.input.rect.h, `>= ${fieldH}px`);
@@ -239,8 +262,10 @@ async function auditFixture(theme, view) {
     const spread = Math.max(...widths) - Math.min(...widths);
     if (spread > 1) fail("layout.control-widths", widths, "one control column, spread <= 1px");
   }
-  if (baseBorder === hoverBorder) fail("select.hover", hoverBorder, "a border change on hover");
-  if (!open.chevron || open.chevron.transform === "none" || !/matrix\(-1/.test(open.chevron.transform)) fail("select.chevron", open.chevron?.transform, "rotated ~180deg while open");
+  // A coarse pointer has no hover: the phone's state is open/pressed instead.
+  if (desktop && baseBorder === hoverBorder) fail("select.hover", hoverBorder, "a border change on hover");
+  const chevronTurned = open.chevron && (open.chevron.rotate === "180deg" || /matrix\(-1/.test(open.chevron.transform));
+  if (!chevronTurned) fail("select.chevron", open.chevron, "rotated ~180deg while open");
   if (!open.options.length) fail("select.options", 0, "at least one option");
   const itemH = open.options[0]?.rect.h ?? 0;
   if (itemH < rowH) fail("select.row-height", itemH, `>= ${rowH}px`);

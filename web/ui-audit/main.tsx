@@ -6,8 +6,8 @@
  *
  * `web/src/index.css` excludes this directory from Tailwind's scan
  * (`@source not`), so nothing here can change the production stylesheet. That
- * also means every class below must already occur in `web/src`; use the same
- * strings the real page uses.
+ * also means every class below must already occur in `web/src`; the layout
+ * strings are imported from the settings skeleton for exactly that reason.
  */
 import "@/index.css";
 import { createRoot } from "react-dom/client";
@@ -15,22 +15,19 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SelectField } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
+import { PREFERENCE_ROW, ROW_HINT, ROW_LABEL, SECTION_TITLE } from "@/features/settings/layout";
 
 const query = new URLSearchParams(location.search);
 document.documentElement.classList.toggle("dark", query.get("theme") === "dark");
 
-// The same string as `features/settings/settings-view.tsx`.
-const preferenceRow =
-  "flex max-w-xl flex-col items-start gap-2 @min-[36rem]/settings:flex-row @min-[36rem]/settings:items-center @min-[36rem]/settings:justify-between @min-[36rem]/settings:gap-4";
-
 function Row({ id, label, hint, children }: { id: string; label: string; hint: string; children: React.ReactNode }) {
   return (
-    <div data-audit-row={id} className={preferenceRow}>
-      <div data-audit-label>
-        <div className="text-xs">{label}</div>
-        <div className="text-2xs text-faint">{hint}</div>
+    <div data-audit-row={id} className={`${PREFERENCE_ROW} mt-3`}>
+      <div>
+        <div className={ROW_LABEL}>{label}</div>
+        <div className={ROW_HINT}>{hint}</div>
       </div>
-      <div data-audit-control className="max-w-full shrink-0">
+      <div data-audit-control className="w-full">
         {children}
       </div>
     </div>
@@ -57,49 +54,42 @@ function App() {
     <div className="@container/settings mx-auto max-w-3xl p-4">
       <header className="mb-3 flex h-8 items-center border-b border-border px-4 text-[13px] font-semibold">Settings</header>
       <section className="border-b border-border p-3">
-        <h2
-          data-label=""
-          className="label-caps -mx-3 -mt-3 mb-3 flex h-9 items-center border-b border-border px-3 text-2xs text-fg"
-        >
+        <h2 data-label="" className={SECTION_TITLE}>
           Preferences
         </h2>
         <Row id="grouping" label="Session list grouping" hint="Group sessions by project directory">
           <Tabs value="flat" onValueChange={() => undefined}>
-            <TabsList className="w-40">
+            <TabsList className="w-full">
               <TabsTab value="flat">Flat</TabsTab>
               <TabsTab value="directory">Directory</TabsTab>
             </TabsList>
           </Tabs>
         </Row>
-        <div className="mt-3" />
         <Row id="language" label="Language" hint="Auto follows the browser language">
-          <Tabs value="en" onValueChange={() => undefined}>
-            <TabsList className="w-72 max-w-full">
-              <TabsTab value="auto">Auto</TabsTab>
-              <TabsTab value="en">EN</TabsTab>
-              <TabsTab value="zh-CN">简体</TabsTab>
-              <TabsTab value="zh-TW">繁體</TabsTab>
-              <TabsTab value="ja">日本語</TabsTab>
-            </TabsList>
-          </Tabs>
+          <SelectField
+            value="en"
+            options={[
+              { value: "auto", label: "Auto" },
+              { value: "en", label: "EN" },
+              { value: "zh-CN", label: "简体" },
+              { value: "zh-TW", label: "繁體" },
+              { value: "ja", label: "日本語" },
+            ]}
+            onValueChange={() => undefined}
+          />
         </Row>
-        <div className="mt-3" />
         <Row id="model" label="Model" hint="Which model the agent uses">
           <SelectField value="claude-opus" options={models} onValueChange={() => undefined} />
         </Row>
-        <div className="mt-3" />
         <Row id="effort" label="Effort" hint="How long the agent may think">
           <SelectField value="high" options={efforts} onValueChange={() => undefined} />
         </Row>
-        <div className="mt-3" />
         <Row id="empty" label="Account" hint="No account is connected yet">
           <SelectField value="" options={[]} onValueChange={() => undefined} />
         </Row>
-        <div className="mt-3" />
         <Row id="name" label="Display name" hint="Shown to the other devices">
           <Input defaultValue="kilerd's Mac mini" />
         </Row>
-        <div className="mt-3" />
         <Row id="actions" label="Connection" hint="Check the link to the hub">
           <div className="flex gap-1.5">
             <Button variant="secondary">Test</Button>
