@@ -356,6 +356,30 @@ test("probes measure each path and keep the direct one alive", async () => {
   assert.notEqual(p.a.nextDeadlineMs(), null);
 });
 
+test("a page that slept through its timers does not read its old probes as a silent path", async () => {
+  const p = await Pair.create();
+  await openStream(p);
+  // A probe answered in 3 ms before the page went away.
+  p.a.tick(p.now);
+  await p.sendAll();
+  p.now = 3;
+  await p.drain(0, "relay");
+  await p.sendAll();
+  await p.drain(1, "relay");
+  assert.equal(p.a.stats().relayRttMs, 3);
+  // Ten minutes asleep: the probe sent before the pause was never read.
+  p.now = 10 * 60_000;
+  p.a.tick(p.now);
+  assert.equal(p.a.stats().relayRttMs, 3, "the sleep is not the path's silence");
+  // The fresh probe is measured on its own.
+  await p.sendAll();
+  p.now += 3;
+  await p.drain(0, "relay");
+  await p.sendAll();
+  await p.drain(1, "relay");
+  assert.equal(p.a.stats().relayRttMs, 3, "measured afresh after the pause");
+});
+
 test("a hub path that stops answering its probes shows ever slower, never its last good round trip", async () => {
   const p = await Pair.create();
   await openStream(p);

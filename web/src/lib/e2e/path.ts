@@ -61,6 +61,14 @@ export const DIRECT_TIMEOUT_MS = 3_500;
 export const UNACKED_TIMEOUT_MS = 1_500;
 /** The hub path is probed this often for its round-trip time (for display). */
 export const RELAY_PROBE_MS = 5_000;
+/**
+ * A relay path whose oldest probe has gone unanswered this long is treated as
+ * gone and the channel is replaced. Without it the path only raised the round
+ * trip it showed (the probe's age) until the relay link's own 60 s silence,
+ * so a dead peer kept a "20005 ms" indicator and a stalled channel for most
+ * of a minute.
+ */
+export const RELAY_SILENT_MS = 2 * RELAY_PROBE_MS;
 
 /** The longest SDP a signal carries. */
 export const MAX_SDP = 16 * 1024;
