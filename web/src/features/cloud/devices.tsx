@@ -648,7 +648,10 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
           </SectionHead>
         </div>
         {current.length > 0 ? (
-          <ul data-testid="device-list" className="mt-4 flex flex-col gap-2.5 px-6 max-md:px-4">
+          <ul
+            data-testid="device-list"
+            className="mt-4 grid grid-cols-1 gap-2.5 px-6 max-md:px-4 @min-[44rem]/devices:grid-cols-[repeat(auto-fill,minmax(20rem,1fr))] @min-[44rem]/devices:gap-3"
+          >
             {current.map(row)}
           </ul>
         ) : (
@@ -721,7 +724,9 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
             <ChevronRight aria-hidden="true" className="size-3 transition-transform group-open/removed:rotate-90" />
             <span className="text-[13px] leading-5 font-medium">{t("removed devices ({{n}})", { n: removed.length })}</span>
           </summary>
-          <ul className="mt-2 flex flex-col gap-2.5 px-6 max-md:px-4">{removed.map(row)}</ul>
+          <ul className="mt-2 grid grid-cols-1 gap-2.5 px-6 max-md:px-4 @min-[44rem]/devices:grid-cols-[repeat(auto-fill,minmax(20rem,1fr))] @min-[44rem]/devices:gap-3">
+            {removed.map(row)}
+          </ul>
         </details>
       )}
       </div>
