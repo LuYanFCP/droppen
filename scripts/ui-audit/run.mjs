@@ -18,6 +18,7 @@
  *   --theme <t>        light | dark | both (default both)
  *   --viewport <v>     desktop | mobile | both (default both)
  *   --channel <name>   Playwright browser channel, e.g. chrome (default: bundled Chromium)
+ *   --fixture <f>      settings | devices | both (default both)
  *   --url <url>        skip the fixture and audit a running page
  *   --check            exit 1 if any target invariant fails
  */
@@ -54,6 +55,9 @@ const views =
 const channel = flag("channel", process.env.UI_AUDIT_CHANNEL ?? "");
 const liveUrl = flag("url", "");
 const check = has("check");
+const which = flag("fixture", "both");
+const runSettings = which !== "devices";
+const runDevices = which !== "settings";
 
 await fs.mkdir(out, { recursive: true });
 
@@ -155,7 +159,7 @@ async function measure(page) {
   });
 }
 
-async function auditFixture(theme, view) {
+async function auditSettings(theme, view) {
   const page = await browser.newPage({
     viewport: { width: view.width, height: view.height },
     deviceScaleFactor: 1,
@@ -165,7 +169,7 @@ async function auditFixture(theme, view) {
     hasTouch: view.name === "mobile",
     isMobile: view.name === "mobile",
   });
-  await page.goto(`${base}ui-audit/index.html?theme=${theme}`);
+  await page.goto(`${base}ui-audit/index.html?fixture=settings&theme=${theme}`);
   await page.evaluate(() => document.fonts.ready);
   await page.waitForTimeout(200);
 
@@ -344,11 +348,93 @@ async function auditLive(view) {
   await page.close();
 }
 
+async function auditDevices(theme, view) {
+  const page = await browser.newPage({
+    viewport: { width: view.width, height: view.height },
+    deviceScaleFactor: 1,
+    hasTouch: view.name === "mobile",
+    isMobile: view.name === "mobile",
+  });
+  await page.goto(`${base}ui-audit/index.html?fixture=devices&theme=${theme}`);
+  await page.evaluate(() => document.fonts.ready);
+  await page.waitForTimeout(250);
+
+  const snapshot = () =>
+    page.evaluate(() => {
+      const rect = (e) => {
+        if (!e) return null;
+        const r = e.getBoundingClientRect();
+        return { x: +r.x.toFixed(1), y: +r.y.toFixed(1), w: +r.width.toFixed(1), h: +r.height.toFixed(1) };
+      };
+      const cs = (e) => (e ? getComputedStyle(e) : null);
+      const list = document.querySelector('[data-testid="device-list"]');
+      const card = document.querySelector('li[data-testid^="device-"]');
+      const summary = card?.querySelector("summary");
+      const name = card?.querySelector('[data-testid^="name-"]');
+      return {
+        list: { rect: rect(list), columns: cs(list)?.gridTemplateColumns ?? "", gap: cs(list)?.gap ?? "" },
+        count: document.querySelectorAll('li[data-testid^="device-"]').length,
+        card: card
+          ? {
+              rect: rect(card),
+              borderW: cs(card).borderTopWidth,
+              border: cs(card).borderTopColor,
+              padding: cs(card).padding,
+              radius: cs(card).borderRadius,
+              bg: cs(card).backgroundColor,
+            }
+          : null,
+        summary: summary ? { rect: rect(summary), bg: cs(summary).backgroundColor } : null,
+        name: name ? { decoration: cs(name).textDecorationLine } : null,
+        pageBg: cs(document.body).backgroundColor,
+        root: (() => {
+          const r = document.querySelector("[data-fixture-root]");
+          const s = r ? getComputedStyle(r) : null;
+          return r ? { w: r.getBoundingClientRect().width, type: s.containerType, name: s.containerName } : null;
+        })(),
+        cardClass: card?.className ?? null,
+      };
+    });
+
+  const before = await snapshot();
+  await page.screenshot({ path: `${out}/devices-${theme}-${view.name}.png` });
+  await page.locator('li[data-testid^="device-"] summary').first().hover();
+  await page.waitForTimeout(200);
+  const hover = await snapshot();
+  await page.screenshot({ path: `${out}/devices-hover-${theme}-${view.name}.png` });
+  results.push({ mode: "devices", theme, viewport: view.name, before, hover });
+
+  const fail = (id, actual, expected) => failures.push({ theme, viewport: view.name, fixture: "devices", id, actual, expected });
+  const desktop = view.name === "desktop";
+  const columns = before.list.columns.split(/\s+/).filter(Boolean).length;
+  if (!before.card || before.count < 2) fail("devices.cards", before.count, "the five fixture devices");
+  if (desktop) {
+    if (columns < 2) fail("devices.columns", before.list.columns, ">= 2 card columns");
+    if (before.card?.borderW !== "1px") fail("devices.card-frame", before.card?.borderW, "a 1px card frame");
+    if (before.card?.padding !== "16px") fail("devices.card-padding", before.card?.padding, "16px");
+    if (parseFloat(before.card?.radius ?? "1") !== 0) fail("devices.card-radius", before.card?.radius, "0");
+    if ((before.card?.rect.h ?? 0) < 88) fail("devices.card-height", before.card?.rect.h, ">= 88px");
+    if (before.card?.border === hover.card?.border) fail("devices.hover-frame", hover.card?.border, "a border change on hover");
+    if (hover.summary?.bg !== before.summary?.bg) fail("devices.hover-fill", hover.summary?.bg, "no row-wide fill on hover");
+    if (hover.name?.decoration !== "underline") fail("devices.hover-name", hover.name?.decoration, "an underlined name on hover");
+  } else {
+    if (columns !== 1) fail("devices.mobile-columns", before.list.columns, "one column");
+    if (before.card?.borderW !== "0px") fail("devices.mobile-row", before.card?.borderW, "no card frame below 44rem");
+    if (Math.round(before.summary?.rect.h ?? 0) !== 56) fail("devices.mobile-row-height", before.summary?.rect.h, "56px");
+  }
+  await page.close();
+}
+
 try {
   if (liveUrl) {
     for (const view of views) await auditLive(view);
   } else {
-    for (const theme of themes) for (const view of views) await auditFixture(theme, view);
+    for (const theme of themes) {
+      for (const view of views) {
+        if (runSettings) await auditSettings(theme, view);
+        if (runDevices) await auditDevices(theme, view);
+      }
+    }
   }
 } finally {
   await fs.writeFile(`${out}/measurements.json`, JSON.stringify(results, null, 2));

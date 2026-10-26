@@ -33,7 +33,8 @@ phones override form text to 16px.
 ## If the fixture does not cover the surface
 
 Extend `web/ui-audit/main.tsx` first: import the real component(s) and copy the
-real composition and class strings from the page. Add `data-audit-row` for a
+real composition and class strings from the page. Today it has `settings` and
+`devices` fixtures; run both (the default) unless the change is scoped to one. Add `data-audit-row` for a
 row the checker should measure. The fixture is excluded from the production
 Tailwind scan (`@source not` in `web/src/index.css`), so every class must
 already occur in `web/src`.
