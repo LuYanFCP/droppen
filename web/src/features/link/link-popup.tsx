@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import { Check, Loader2 } from "lucide-react";
+import { CHECKBOX_INPUT, CHECKBOX_LABEL, CheckboxMark } from "@/components/ui/checkbox";
+import { cn } from "@/lib/cn";
 import { base32, formatEnrollCode, fromHex, hex, type KeyStore, sealLinkReturn, utf8 } from "@/lib/e2e";
 import type { CloudAccount } from "@/lib/hub/account";
 import { chainV3Writable } from "@/lib/hub/api";
@@ -481,9 +483,16 @@ export function LinkFlow({ account, link }: { account: CloudAccount; link: HubLi
               <p data-signal="failed" className="text-xs text-danger" data-testid="link-warning">
                 {t("This address does not look like Droppen on a device of your own.")}
               </p>
-              <label className="flex items-center gap-2 text-xs text-fg">
-                <input type="checkbox" checked={confirmHost} onChange={(e) => setConfirmHost(e.target.checked)} data-testid="link-confirm-host" />
-                {t("I confirm {{host}} is my own device", { host })}
+              <label className={cn(CHECKBOX_LABEL, "items-center text-xs text-fg")}>
+                <input
+                  type="checkbox"
+                  className={CHECKBOX_INPUT}
+                  checked={confirmHost}
+                  onChange={(e) => setConfirmHost(e.target.checked)}
+                  data-testid="link-confirm-host"
+                />
+                <CheckboxMark />
+                <span className="min-w-0">{t("I confirm {{host}} is my own device", { host })}</span>
               </label>
             </Note>
           )}

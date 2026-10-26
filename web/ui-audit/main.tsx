@@ -12,8 +12,10 @@
 import "@/index.css";
 import { createRoot } from "react-dom/client";
 import { Button } from "@/components/ui/button";
+import { CHECKBOX_INPUT, CHECKBOX_LABEL, CheckboxMark } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { SelectField } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
 import { PREFERENCE_ROW, ROW_HINT, ROW_LABEL, SECTION_TITLE } from "@/features/settings/layout";
 
@@ -89,6 +91,16 @@ function App() {
         </Row>
         <Row id="name" label="Display name" hint="Shown to the other devices">
           <Input defaultValue="kilerd's Mac mini" />
+        </Row>
+        <Row id="switch" label="Push notifications" hint="Ping this device when a turn finishes">
+          <Switch on label="Push notifications" labelHidden onChange={() => undefined} />
+        </Row>
+        <Row id="checkbox" label="Remove the device" hint="It loses access at once">
+          <label className={CHECKBOX_LABEL}>
+            <input type="checkbox" className={CHECKBOX_INPUT} defaultChecked />
+            <CheckboxMark />
+            <span className="min-w-0">also rotate the content keys</span>
+          </label>
         </Row>
         <Row id="actions" label="Connection" hint="Check the link to the hub">
           <div className="flex gap-1.5">

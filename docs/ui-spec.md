@@ -39,6 +39,8 @@ composer 的附加文件/拍照与 ghost 选项为 24px，主发送按钮为 26p
 
 圆角一律为 0：控件、弹窗、菜单、分段、chip、未读数、图片缩略图都是直角；只有状态点和 radio 指示是圆形。按钮四种：primary（`bg-fg text-bg`）、secondary（`border-strong` 描边）、ghost（无框，muted → fg）、danger（`danger` 文字 + 描边）；不再使用 accent 15% / 25% 着色按钮。输入背景 `bg`，边框 `border`，焦点时边框变 `fg`；键盘焦点另加 2px `fg` 的 `focus-visible` 外框。
 
+开关与勾选框各只有一种实现：`components/ui/switch` 与 `components/ui/checkbox`，不允许把原生 checkbox 的默认外观留在页面上。开关是 24×14px 的方轨（选中墨底、未选 `border-strong`）加 8px 方点，整行 28px、触屏 36px；勾选框是 14px 方框（触屏 16px），选中墨底 + 10px 勾，键盘焦点在方框外画 2px 墨环。开关用于立刻生效的 on/off；勾选框用于表单里的选择与多选。radio 仍按各自的组语义使用，形状统一为墨色圆点 + 1px 方框。
+
 ## 3. 间距与容器
 
 - 细小图标/控件 gap 为 4px，常规同行 6–8px，设置标签与控件的宽屏间隔 16px。

@@ -44,7 +44,9 @@ import type { CloudAccount } from "@/lib/hub/account";
 import { type AccountPasskey, HubApiError, PASSWORD_MIN_CHARS, type Proof, type Reauth, type SignInMethods } from "@/lib/hub/api";
 import type { HubLink } from "@/lib/hub/link";
 import { fromBase64Url, pageCredentials, passkeyAdd, passkeyCancelled, passkeyPrf, passkeyReauth, signalUnknownCredential } from "@/lib/hub/passkey";
-import { AccountNotices, PendingRecoveryBanner, SquareSwitch, useAccountVersion } from "./devices";
+import { CHECKBOX_INPUT, CHECKBOX_LABEL, CheckboxMark } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
+import { AccountNotices, PendingRecoveryBanner, useAccountVersion } from "./devices";
 import { VerifyEmailBanner } from "./email-verify";
 import { askRemoval, takeAskedRemoval } from "./devices-route";
 import { AccountName, openMyDevices } from "./my-devices";
@@ -664,9 +666,10 @@ function AddPasskey({
           <span className="text-2xs text-muted">{t("name (optional)")}</span>
           <input className={field} value={label} maxLength={64} placeholder={t("e.g. iPhone, 1Password")} onChange={(e) => setLabel(e.target.value)} />
         </label>
-        <label className={cn("flex items-start gap-2", !v3 && "opacity-60")}>
-          <input type="checkbox" className="mt-0.5 accent-fg" checked={join} disabled={!v3} onChange={(e) => setJoin(e.target.checked)} />
-          <span className="flex flex-col gap-0.5">
+        <label className={cn(CHECKBOX_LABEL, "text-xs", !v3 && "cursor-not-allowed opacity-60")}>
+          <input type="checkbox" className={CHECKBOX_INPUT} checked={join} disabled={!v3} onChange={(e) => setJoin(e.target.checked)} />
+          <CheckboxMark />
+          <span className="flex min-w-0 flex-col gap-0.5">
             <span className="text-xs font-medium text-fg">{t("new devices can join with it")}</span>
             <span className="text-xs leading-5 text-muted">
               {v3
@@ -791,7 +794,7 @@ function PasskeyRow({
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 max-md:pl-6.5">
           {/* The switch's words stay on a phone too (a bare switch says nothing there): the label clicks it. */}
           <label className={cn("flex cursor-pointer items-center pr-1.5 font-mono text-2xs", switchHeld ? "cursor-not-allowed text-faint" : "text-muted hover:text-fg")} title={joinBlocked ?? undefined}>
-            <SquareSwitch on={slot !== null} blocked={switchHeld} title={joinBlocked ?? undefined} label={t("new devices can join with it")} labelHidden testId="join-switch" onChange={(on) => void toggleJoin(on)} />
+            <Switch on={slot !== null} blocked={switchHeld} title={joinBlocked ?? undefined} label={t("new devices can join with it")} labelHidden testId="join-switch" onChange={(on) => void toggleJoin(on)} />
             <span>{t("new devices can join with it")}</span>
           </label>
           {manager && !renaming && !removing && (

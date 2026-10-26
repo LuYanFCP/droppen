@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import type { components } from "@/api/schema";
 import { useFeedSettings } from "@/app/global-feed";
 import { Combobox } from "@/components/ui/combobox";
+import { CHECKBOX_INPUT, CHECKBOX_LABEL, CheckboxMark } from "@/components/ui/checkbox";
 import { SelectField } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
@@ -629,14 +630,10 @@ function TaskForm({ initial, onDone }: { initial?: ScheduledTask; onDone: () => 
         </label>
       </div>
 
-      <label className="flex items-start gap-1.5">
-        <input
-          type="checkbox"
-          checked={skipIfBusy}
-          onChange={(e) => setSkipIfBusy(e.target.checked)}
-          className="mt-0.5 size-3 accent-accent"
-        />
-        <span className="text-xs text-muted">
+      <label className={cn(CHECKBOX_LABEL, "text-xs")}>
+        <input type="checkbox" className={CHECKBOX_INPUT} checked={skipIfBusy} onChange={(e) => setSkipIfBusy(e.target.checked)} />
+        <CheckboxMark />
+        <span className="min-w-0 text-xs text-muted">
           {t(
             "Skip a run while the session the previous one started is still working, instead of stacking a second session on top of it.",
           )}

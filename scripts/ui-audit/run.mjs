@@ -139,6 +139,14 @@ async function measure(page) {
       effort: { style: style(effort) },
       input: { rect: rect(input), style: style(input) },
       activeTab: { rect: rect(activeTab), style: style(activeTab), focus: activeTab?.matches(":focus-visible") ?? null },
+      switchTrack: rect(document.querySelector("[data-audit-switch-track]")),
+      switchButton: rect(document.querySelector("[data-audit-switch]")),
+      checkboxBox: rect(document.querySelector("[data-audit-checkbox]")),
+      checkboxBoxStyle: style(document.querySelector("[data-audit-checkbox]")),
+      checkboxCheck: (() => {
+        const svg = document.querySelector("[data-audit-checkbox] svg");
+        return svg ? { opacity: getComputedStyle(svg).opacity, color: getComputedStyle(svg).color } : null;
+      })(),
       pageBg: getComputedStyle(document.body).backgroundColor,
       triggerAttrs: trigger ? Object.fromEntries([...trigger.attributes].map((a) => [a.name, a.value])) : null,
       chevronClass: trigger?.querySelector("svg")?.getAttribute("class") ?? null,
@@ -173,6 +181,19 @@ async function auditFixture(theme, view) {
     const e = document.querySelector('[data-audit-row="grouping"] [data-active]');
     const s = getComputedStyle(e);
     return { focusVisible: e.matches(":focus-visible"), width: s.outlineWidth, style: s.outlineStyle, color: s.outlineColor, offset: s.outlineOffset, bg: s.backgroundColor };
+  });
+  await page.locator('[data-audit-row="checkbox"] input').focus();
+  const checkboxFocus = await page.evaluate(() => {
+    const input = document.querySelector('[data-audit-row="checkbox"] input');
+    const box = input?.nextElementSibling;
+    const s = box ? getComputedStyle(box) : null;
+    return {
+      focusVisible: input?.matches(":focus-visible") ?? null,
+      width: s?.outlineWidth ?? null,
+      style: s?.outlineStyle ?? null,
+      color: s?.outlineColor ?? null,
+      offset: s?.outlineOffset ?? null,
+    };
   });
 
   const before = await measure(page);
@@ -236,7 +257,7 @@ async function auditFixture(theme, view) {
 
   await page.screenshot({ path: `${out}/settings-${theme}-${view.name}.png` });
 
-  const record = { mode: "fixture", theme, viewport: view.name, inputFocus, tabFocus, before, select: { baseBorder, hoverBorder, open }, empty };
+  const record = { mode: "fixture", theme, viewport: view.name, inputFocus, tabFocus, checkboxFocus, before, select: { baseBorder, hoverBorder, open }, empty };
   results.push(record);
 
   // ---- target invariants (docs/ui-spec.md) ----
@@ -253,6 +274,21 @@ async function auditFixture(theme, view) {
     parseFloat(tabFocus.width) >= 2 &&
     (parseFloat(tabFocus.offset) >= 0 ? tabFocus.color !== before.pageBg : tabFocus.color !== tabFocus.bg);
   if (!tabRingVisible) fail("focus.tab", tabFocus, "visible ring outside the ink fill");
+  const switchTrack = before.switchTrack;
+  if (!switchTrack || Math.round(switchTrack.w) !== 24 || Math.round(switchTrack.h) !== 14) {
+    fail("choice.switch-track", switchTrack, "24 x 14 px");
+  }
+  if (!desktop && (!before.switchButton || before.switchButton.h < 36)) fail("choice.switch-touch", before.switchButton?.h, ">= 36px on a coarse pointer");
+  const wantBox = desktop ? 14 : 16;
+  if (!before.checkboxBox || before.checkboxBox.w < wantBox - 1 || before.checkboxBox.h < wantBox - 1) {
+    fail("choice.checkbox", before.checkboxBox, `${wantBox} x ${wantBox} px`);
+  }
+  if (!before.checkboxBoxStyle || before.checkboxBoxStyle.bg === "rgba(0, 0, 0, 0)" || before.checkboxCheck?.opacity !== "1") {
+    fail("choice.checkbox-checked", { bg: before.checkboxBoxStyle?.bg, check: before.checkboxCheck }, "an ink box with a visible check when chosen");
+  }
+  if (checkboxFocus.focusVisible && (checkboxFocus.style === "none" || parseFloat(checkboxFocus.width) < 2 || checkboxFocus.color === before.pageBg)) {
+    fail("choice.checkbox-focus", checkboxFocus, "a visible 2px ring on the box");
+  }
   if (before.trigger.rect.h < fieldH) fail("size.trigger", before.trigger.rect.h, `>= ${fieldH}px`);
   if (before.input.rect.h < fieldH) fail("size.input", before.input.rect.h, `>= ${fieldH}px`);
   if (parseFloat(before.effort.style.size) < 13) fail("type.value", before.effort.style.size, ">= 13px");

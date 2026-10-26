@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { components } from "@/api/schema";
 import { Badge } from "@/components/ui/badge";
+import { CHECKBOX_INPUT, CHECKBOX_LABEL, CheckboxMark } from "@/components/ui/checkbox";
 import { SelectField } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
@@ -303,17 +304,18 @@ function AccountRow({
       <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1">
         {accountRotationToggleShown(account) && (
           <label
-            className="mr-1 flex shrink-0 cursor-pointer items-center gap-1.5"
+            className={cn(CHECKBOX_LABEL, "mr-1 shrink-0 items-center text-xs", rotate.isPending && "cursor-not-allowed opacity-60")}
             title={t("in the pool, a session moves to another pool account when its account hits a limit, and sessions from other pool accounts may move here; off keeps this account out in both directions")}
           >
             <input
               type="checkbox"
+              className={CHECKBOX_INPUT}
               checked={rotating ?? false}
               disabled={rotate.isPending}
               onChange={(e) => rotate.mutate(e.target.checked)}
-              className="size-3 accent-accent"
             />
-            <span className="text-xs text-muted">{t("auto-rotation")}</span>
+            <CheckboxMark />
+            <span className="min-w-0 text-xs text-muted">{t("auto-rotation")}</span>
           </label>
         )}
         {/*

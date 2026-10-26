@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { CHECKBOX_INPUT, CHECKBOX_LABEL, CheckboxMark } from "@/components/ui/checkbox";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { compatModeActive, forgetCompatConsent } from "@/lib/e2e/compat";
 import { MINIMUM_BROWSERS } from "@/lib/e2e/support";
@@ -97,15 +98,16 @@ export function UnsupportedBrowserScreen({
                 "Or use this browser in compatibility mode: the same encryption, done in JavaScript. What changes: the JavaScript curve arithmetic is not hardened against side channels as the browser's own is; one more library is loaded into the page; and this device's private keys are plain bytes in the page's memory instead of keys the browser holds, so malicious code that gets into the page could copy them.",
               )}
             </p>
-            <label className="flex cursor-pointer items-start gap-2">
+            <label className={cn(CHECKBOX_LABEL, "items-center text-xs text-fg")}>
               <input
                 type="checkbox"
+                className={CHECKBOX_INPUT}
                 data-testid="compat-understood"
-                className="mt-0.5 accent-fg"
                 checked={understood}
                 onChange={(e) => setUnderstood(e.target.checked)}
               />
-              <span className="text-xs text-fg">{t("I understand the risk")}</span>
+              <CheckboxMark />
+              <span className="min-w-0 text-xs text-fg">{t("I understand the risk")}</span>
             </label>
             <div className="flex flex-wrap items-center gap-2">
               <button type="button" data-testid="compat-trust" className={danger} disabled={!understood} onClick={onTrust}>

@@ -18,7 +18,8 @@ import { cloudKey, failure, useLinkFlow } from "./link-flow";
 import type { OpenerState } from "./opener";
 import { BrowserSignInWaiting, startDroppenSignIn } from "./browser-sign-in";
 import { useApi, useMachine } from "@/lib/machines/context";
-import { SquareSwitch } from "@/features/cloud/devices";
+import { CHECKBOX_INPUT, CHECKBOX_LABEL, CheckboxMark } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 
 /*
  * The Droppen half of Settings → Access, on the computer's own page (never on
@@ -249,9 +250,10 @@ export function DroppenSection({ embedded = false }: { embedded?: boolean } = {}
             ) : (
               <div className="flex flex-col gap-2">
                 {status.state === "linked" && (
-                  <label className="flex items-center gap-2 text-2xs text-muted">
-                    <input type="checkbox" checked={deleteCopies} onChange={(e) => setDeleteCopies(e.target.checked)} />
-                    {t("also delete its encrypted copy on droppen.app")}
+                  <label className={cn(CHECKBOX_LABEL, "items-center text-2xs text-muted")}>
+                    <input type="checkbox" className={CHECKBOX_INPUT} checked={deleteCopies} onChange={(e) => setDeleteCopies(e.target.checked)} />
+                    <CheckboxMark />
+                    <span className="min-w-0">{t("also delete its encrypted copy on droppen.app")}</span>
                   </label>
                 )}
                 <div className="flex items-center gap-2">
@@ -358,7 +360,7 @@ export function RemoteAccess({
             {account.owner ? (
               <span className="font-mono text-xs text-muted">{t("signed this device in: always sees them")}</span>
             ) : (
-              <SquareSwitch
+              <Switch
                 on={account.remote}
                 blocked={busy}
                 label={t("sees your other devices")}
