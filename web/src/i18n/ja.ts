@@ -526,6 +526,8 @@ export const ja: Record<string, string> = {
     "結果もなく、見ているものもありません — このサブエージェントがどう終わったかは不明です",
   /* a session's subagents, in the list and on their own page */
   "{{n}} subagents": "サブエージェント {{n}} 件",
+  "show {{n}} subagents": "サブエージェント {{n}} 件を表示",
+  "hide {{n}} subagents": "サブエージェント {{n}} 件を隠す",
   "{{n}} subagents working": "サブエージェント {{n}} 件が作業中",
   "{{n}} subagents asking you": "サブエージェント {{n}} 件が質問中",
   "{{n}} subagents unread": "サブエージェント {{n}} 件が未読",

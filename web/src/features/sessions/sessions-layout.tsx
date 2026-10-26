@@ -135,6 +135,7 @@ const SessionRow = memo(function SessionRow({
 }) {
   const { t } = useTranslation();
   const children = session.children ?? [];
+  const foldable = children.length > 0 && !!expandKey && !!onToggleChildren;
   return (
     <ContextMenu>
       <ContextMenuTrigger
@@ -152,12 +153,23 @@ const SessionRow = memo(function SessionRow({
             {/* The strongest state, on the edge: a long list can be scanned for
                 colour before a single word of it is read. */}
             <EdgeBar state={attentionState(session)} />
+            {/* The trunk its subagents hang off, from under its chevron down. */}
+            {foldable && isOpen && <TreeLine x={treeLineX(nested, 1)} top="title" />}
             <div className="flex items-center gap-1.5">
+              {foldable && (
+                <TreeChevron
+                  isOpen={isOpen}
+                  label={t(isOpen ? "hide {{n}} subagents" : "show {{n}} subagents", { n: childTally(children).total })}
+                  onToggle={() => onToggleChildren(expandKey, readOnly)}
+                />
+              )}
               {session.pinned && <span title={t("pinned session")} aria-label={t("pinned session")}><Pin className="size-3 shrink-0 text-fg" /></span>}
               <span className={cn("min-w-0 flex-1 truncate text-[13px] leading-4.5 text-fg max-md:text-sm max-md:leading-5", unreadCountOf(session) > 0 && "font-semibold")}>{session.title}</span>
               <StatusBadge session={session} unread={unreadCountOf(session)} />
             </div>
-            <div className="mt-0.5 flex items-center gap-1.5">
+            {/* Under a chevron, the meta line starts where the title does, which
+                leaves the column below the chevron to the trunk. */}
+            <div className={cn("mt-0.5 flex items-center gap-1.5", foldable && "pl-[18px]")}>
               {device && (
                 <span data-row-device={machine} className="max-w-[45%] shrink-0 truncate font-mono text-2xs text-muted">
                   {device}
@@ -165,13 +177,7 @@ const SessionRow = memo(function SessionRow({
               )}
               <SourceIcon source={session.source} className="text-muted" />
               {dirLabel && <span className="truncate font-mono text-2xs text-faint">{dirLabel}</span>}
-              {children.length > 0 && expandKey && onToggleChildren && (
-                <SubagentToggle
-                  list={children}
-                  isOpen={isOpen}
-                  onToggle={() => onToggleChildren(expandKey, readOnly)}
-                />
-              )}
+              {children.length > 0 && <SubagentCount list={children} isOpen={isOpen} />}
               <span className="ml-auto shrink-0 font-mono text-2xs text-faint">
                 <RelativeTime iso={session.updatedAt} />
               </span>
@@ -195,21 +201,65 @@ const SessionRow = memo(function SessionRow({
   );
 });
 
+/** How far each level of the tree steps in: a row's chevron sits on the line its own children hang off. */
+const TREE_STEP = 16;
+
 /**
- * The fold of a session's subagents, on its meta line: how many there are and,
- * folded, the loudest of what they are doing — one of them running, asking or
- * unread is otherwise invisible from the list.
- *
- * A button inside the row's link, so it keeps the click to itself.
+ * Where the line of tree level `level` runs (1: the line a session's own
+ * subagents hang off), from the row's left edge. The first runs through the
+ * centre of the session's chevron, which sits at the start of its title.
  */
-function SubagentToggle({ list, isOpen, onToggle }: { list: readonly SessionChild[]; isOpen: boolean; onToggle: () => void }) {
-  const { t } = useTranslation();
-  const tally = useMemo(() => childTally(list), [list]);
-  const label = t("{{n}} subagents", { n: tally.total });
+function treeLineX(nested: boolean, level: number): number {
+  return (nested ? 32 : 12) + 6 + (level - 1) * TREE_STEP;
+}
+
+/**
+ * One stroke of the tree's connectors, in the strong rule colour so the tree
+ * reads as one shape over the rows' own hairlines. A vertical stroke runs from
+ * `top` to `bottom` — each a row's top or bottom edge, its middle, or (`title`)
+ * the middle of a two-line session row's title — and reaches 1px past the
+ * bottom, over the row's own border, so the line does not break between rows.
+ * A horizontal stroke (`across`) is the elbow into a child.
+ */
+function TreeLine({
+  x,
+  top = "edge",
+  bottom = "edge",
+  across,
+}: {
+  x: number;
+  top?: "edge" | "middle" | "title";
+  bottom?: "edge" | "middle";
+  across?: number;
+}) {
+  if (across !== undefined) {
+    return <span aria-hidden="true" data-tree-line="elbow" className="pointer-events-none absolute top-1/2 h-px bg-border-strong" style={{ left: x, width: across }} />;
+  }
+  return (
+    <span
+      aria-hidden="true"
+      data-tree-line=""
+      className={cn(
+        "pointer-events-none absolute w-px bg-border-strong",
+        top === "edge" ? "top-0" : top === "middle" ? "top-1/2" : "top-[17px] max-md:top-[18px]",
+        bottom === "edge" ? "-bottom-px" : "bottom-1/2",
+      )}
+      style={{ left: x }}
+    />
+  );
+}
+
+/**
+ * A row's fold, in front of its title: the tree's own chevron.
+ *
+ * A button inside the row's link, so it keeps the click to itself; its hit
+ * area reaches past the 12px glyph for a finger.
+ */
+function TreeChevron({ isOpen, label, onToggle }: { isOpen: boolean; label: string; onToggle: () => void }) {
   return (
     <button
       type="button"
-      data-subagent-toggle=""
+      data-tree-toggle=""
       aria-expanded={isOpen}
       aria-label={label}
       title={label}
@@ -218,9 +268,24 @@ function SubagentToggle({ list, isOpen, onToggle }: { list: readonly SessionChil
         e.stopPropagation();
         onToggle();
       }}
-      className="relative flex h-4 shrink-0 cursor-pointer items-center gap-1 font-mono text-2xs text-muted tabular-nums after:absolute after:-inset-2 hover:text-fg"
+      className="relative flex size-3 shrink-0 cursor-pointer items-center justify-center text-muted after:absolute after:-inset-2 hover:text-fg"
     >
-      <ChevronRight className={cn("size-3 shrink-0 transition-transform", isOpen && "rotate-90")} />
+      <ChevronRight className={cn("size-3 transition-transform", isOpen && "rotate-90")} />
+    </button>
+  );
+}
+
+/**
+ * How many subagents a session has, on its meta line, and — folded — the
+ * loudest of what they are doing: one of them running, asking or unread is
+ * otherwise invisible from the list. Only says; the chevron folds.
+ */
+function SubagentCount({ list, isOpen }: { list: readonly SessionChild[]; isOpen: boolean }) {
+  const { t } = useTranslation();
+  const tally = useMemo(() => childTally(list), [list]);
+  const label = t("{{n}} subagents", { n: tally.total });
+  return (
+    <span data-subagent-count="" title={label} aria-label={label} className="flex h-4 shrink-0 items-center gap-1 font-mono text-2xs text-muted tabular-nums">
       <Bot className="size-3 shrink-0" />
       {tally.total}
       {!isOpen && tally.working > 0 && <LiveDot className="bg-ok" title={t("{{n}} subagents working", { n: tally.working })} />}
@@ -228,16 +293,15 @@ function SubagentToggle({ list, isOpen, onToggle }: { list: readonly SessionChil
         <span data-signal="warn" className="font-semibold text-warn-fg" title={t("{{n}} subagents asking you", { n: tally.waiting })}>?</span>
       )}
       {!isOpen && tally.unread > 0 && <UnreadMark title={t("{{n}} subagents unread", { n: tally.unread })} />}
-    </button>
+    </span>
   );
 }
 
-/** How far in each level of subagents starts, past the session's own left edge. */
-const CHILD_STEP = 12;
-
 /**
- * One subagent under its session: a single line, stepped in by its depth, with
- * one guide per level so a deep tree can still be read down the left.
+ * One subagent under its session: a single line on the tree, its connector
+ * branching off its parent's line (`├`, or `└` for the last), with the lines
+ * of the levels above running on past it wherever they still have a sibling
+ * to reach.
  *
  * A Codex subagent is a thread of its own and opens as a session; a Claude one
  * lives in its session's directory and opens under it. Either way, its page
@@ -253,6 +317,8 @@ const SessionChildRow = memo(function SessionChildRow({
   onToggle,
   machine,
   remote,
+  last,
+  through,
 }: {
   child: SessionChild;
   root: SessionSummary;
@@ -265,9 +331,13 @@ const SessionChildRow = memo(function SessionChildRow({
   machine?: MachineKey;
   /** Another device's (its fold is not written down). */
   remote: boolean;
+  /** The last of its siblings. */
+  last: boolean;
+  /** Whether each level above it still runs on past it. */
+  through: readonly boolean[];
 }) {
   const { t } = useTranslation();
-  const base = nested ? 32 : 12;
+  const own = treeLineX(nested, depth);
   const link: { to: string; params: Record<string, string> } =
     child.kind === "thread"
       ? { to: "/sessions/$source/$id", params: { source: root.source, id: child.id } }
@@ -282,32 +352,20 @@ const SessionChildRow = memo(function SessionChildRow({
         "relative flex h-7 items-center gap-1.5 border-b border-border pr-2.5 hover:bg-hover max-md:h-9",
         nested && "before:pointer-events-none before:absolute before:inset-y-0 before:left-4 before:w-px before:bg-border",
       )}
-      style={{ paddingLeft: base + depth * CHILD_STEP }}
+      style={{ paddingLeft: own + 10 }}
       activeOptions={{ exact: true }}
       activeProps={{ className: "bg-hover" }}
     >
-      {Array.from({ length: depth }, (_, level) => (
-        <span
-          key={level}
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-y-0 w-px bg-border"
-          style={{ left: base + level * CHILD_STEP + 5 }}
-        />
-      ))}
+      {through.map((runs, level) => (runs ? <TreeLine key={level} x={treeLineX(nested, level + 1)} /> : null))}
+      <TreeLine x={own} bottom={last ? "middle" : "edge"} />
+      <TreeLine x={own} across={9} />
+      {isOpen && child.children.length > 0 && <TreeLine x={treeLineX(nested, depth + 1)} top="middle" />}
       {child.children.length > 0 ? (
-        <button
-          type="button"
-          aria-expanded={isOpen}
-          aria-label={t("{{n}} subagents", { n: child.children.length })}
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onToggle(expandKey, remote);
-          }}
-          className="relative flex size-3 shrink-0 cursor-pointer items-center justify-center text-muted after:absolute after:-inset-2 hover:text-fg"
-        >
-          <ChevronRight className={cn("size-3 transition-transform", isOpen && "rotate-90")} />
-        </button>
+        <TreeChevron
+          isOpen={isOpen}
+          label={t(isOpen ? "hide {{n}} subagents" : "show {{n}} subagents", { n: child.children.length })}
+          onToggle={() => onToggle(expandKey, remote)}
+        />
       ) : (
         <span aria-hidden="true" className="size-3 shrink-0" />
       )}
@@ -774,6 +832,8 @@ function SessionsPanel({ detailOpen, unified, devices }: { detailOpen: boolean; 
                         onToggle={toggleExpanded}
                         machine={row.machine}
                         remote={!!row.machine && row.machine !== machine}
+                        last={row.last}
+                        through={row.through}
                       />
                     ) : (
                       <SessionRow

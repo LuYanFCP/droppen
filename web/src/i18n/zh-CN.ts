@@ -526,6 +526,8 @@ export const zhCN: Record<string, string> = {
     "没有结果，也没人还在看着它 — 这个子代理最后怎么样了，无从得知",
   /* a session's subagents, in the list and on their own page */
   "{{n}} subagents": "{{n}} 个子代理",
+  "show {{n}} subagents": "展开 {{n}} 个子代理",
+  "hide {{n}} subagents": "收起 {{n}} 个子代理",
   "{{n}} subagents working": "{{n}} 个子代理工作中",
   "{{n}} subagents asking you": "{{n}} 个子代理在问你",
   "{{n}} subagents unread": "{{n}} 个子代理未读",

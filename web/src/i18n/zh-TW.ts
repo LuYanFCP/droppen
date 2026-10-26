@@ -526,6 +526,8 @@ export const zhTW: Record<string, string> = {
     "沒有結果，也沒人還在看著它 — 這個子代理最後怎麼樣了，無從得知",
   /* a session's subagents, in the list and on their own page */
   "{{n}} subagents": "{{n}} 個子代理",
+  "show {{n}} subagents": "展開 {{n}} 個子代理",
+  "hide {{n}} subagents": "收起 {{n}} 個子代理",
   "{{n}} subagents working": "{{n}} 個子代理工作中",
   "{{n}} subagents asking you": "{{n}} 個子代理在問你",
   "{{n}} subagents unread": "{{n}} 個子代理未讀",

@@ -310,6 +310,13 @@ test("a session's subagents are listed under it only while it is unfolded, each 
   assert.equal(a2.type === "child" && a2.root.id, "s", "however deep, a row knows its session");
   assert.equal(new Set(deep.rows.map(key)).size, deep.rows.length, "no two rows share a key");
 
+  // What the connectors draw: `├` for a1 (b1 follows), `└` for a2 and b1,
+  // and a1's line running on past a2 to reach b1.
+  assert.deepEqual(
+    deep.rows.filter((r) => r.type === "child").map((r) => (r.type === "child" ? [r.child.id, r.last, r.through] : null)),
+    [["a1", false, []], ["a2", true, [true]], ["b1", true, []]],
+  );
+
   // An unfold under a folded one is kept, not shown.
   const hidden = buildSessionList(input({ sessions, expanded: new Set([expandKey("claude", "s", ["a1"])]) }));
   assert.equal(hidden.rows.length, 2);

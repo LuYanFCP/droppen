@@ -46,6 +46,13 @@ export type SessionListRow =
       expandKey: string;
       isOpen: boolean;
       machine?: MachineKey;
+      /** The last of its siblings: its connector ends here (`└`) rather than running on (`├`). */
+      last: boolean;
+      /**
+       * For each level above it, 1 to `depth - 1`: whether that level's line
+       * runs on past this row — the ancestor there has a sibling still to come.
+       */
+      through: boolean[];
     };
 
 export interface SessionListInput {
@@ -168,13 +175,15 @@ function pushChildren(
   parentKey: string,
   expanded: ReadonlySet<string>,
   machine?: MachineKey,
+  through: readonly boolean[] = [],
 ): void {
-  for (const child of children) {
+  children.forEach((child, at) => {
     const key = `${parentKey}/${child.id}`;
     const isOpen = expanded.has(key);
-    rows.push({ type: "child", child, root, depth, expandKey: key, isOpen, ...(machine ? { machine } : {}) });
-    if (isOpen) pushChildren(rows, root, child.children, depth + 1, key, expanded, machine);
-  }
+    const last = at === children.length - 1;
+    rows.push({ type: "child", child, root, depth, expandKey: key, isOpen, last, through: [...through], ...(machine ? { machine } : {}) });
+    if (isOpen) pushChildren(rows, root, child.children, depth + 1, key, expanded, machine, [...through, !last]);
+  });
 }
 
 /**
