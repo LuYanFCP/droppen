@@ -386,6 +386,13 @@ async function auditDevices(theme, view) {
           : null,
         summary: summary ? { rect: rect(summary), bg: cs(summary).backgroundColor } : null,
         name: name ? { decoration: cs(name).textDecorationLine } : null,
+        cards: [...document.querySelectorAll('li[data-testid^="device-"]')].map((c) => rect(c)),
+        overflow: {
+          doc: document.documentElement.scrollWidth,
+          win: window.innerWidth,
+          listScroll: list?.scrollWidth ?? 0,
+          listClient: list?.clientWidth ?? 0,
+        },
         pageBg: cs(document.body).backgroundColor,
         root: (() => {
           const r = document.querySelector("[data-fixture-root]");
@@ -414,10 +421,18 @@ async function auditDevices(theme, view) {
     if (before.card?.padding !== "16px") fail("devices.card-padding", before.card?.padding, "16px");
     if (parseFloat(before.card?.radius ?? "1") !== 0) fail("devices.card-radius", before.card?.radius, "0");
     if ((before.card?.rect.h ?? 0) < 88) fail("devices.card-height", before.card?.rect.h, ">= 88px");
+    if (!(before.cards[0]?.h > before.cards[1]?.h)) {
+      fail("devices.card-self-start", before.cards.slice(0, 3), "a taller card does not stretch its row");
+    }
+    if (before.cards[0]?.y !== before.cards[1]?.y) fail("devices.card-top", before.cards.slice(0, 2), "cards in a row start together");
     if (before.card?.border === hover.card?.border) fail("devices.hover-frame", hover.card?.border, "a border change on hover");
     if (hover.summary?.bg !== before.summary?.bg) fail("devices.hover-fill", hover.summary?.bg, "no row-wide fill on hover");
     if (hover.name?.decoration !== "underline") fail("devices.hover-name", hover.name?.decoration, "an underlined name on hover");
-  } else {
+  }
+  if (before.overflow.doc > before.overflow.win + 1 || before.overflow.listScroll > before.overflow.listClient + 1) {
+    fail("devices.overflow", before.overflow, "no horizontal overflow");
+  }
+  if (!desktop) {
     if (columns !== 1) fail("devices.mobile-columns", before.list.columns, "one column");
     if (before.card?.borderW !== "0px") fail("devices.mobile-row", before.card?.borderW, "no card frame below 44rem");
     if (Math.round(before.summary?.rect.h ?? 0) !== 56) fail("devices.mobile-row-height", before.summary?.rect.h, "56px");
