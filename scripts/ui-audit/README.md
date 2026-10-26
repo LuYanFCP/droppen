@@ -15,13 +15,15 @@ override form text to 16px). Every claim below is a computed value or a
 ```sh
 pnpm install --frozen-lockfile
 pnpm --filter @remote-hand/e2e exec playwright install chromium   # once
-pnpm ui-audit                     # report + screenshots
+pnpm ui-audit                     # report + screenshots (both fixtures)
 pnpm ui-audit --check             # fail on a spec violation (the gate)
+pnpm ui-audit --fixture devices   # only the devices page
 ```
 
 Options:
 
 - `--out <dir>` (default `/tmp/droppen-ui-audit-<date>`)
+- `--fixture settings|devices|both` (default `both`)
 - `--theme light|dark|both`, `--viewport desktop|mobile|both`
 - `--channel chrome` — use a system Chrome instead of the bundled Chromium
 - `--url <url>` — measure a running page instead of the fixture (no target
@@ -29,7 +31,7 @@ Options:
 - `--check` — exit 1 on the first target invariant that fails
 
 Outputs in `--out`: `measurements.json`, `report.txt`, and
-`settings-<theme>-<viewport>.png`, `select-open-…`, `select-empty-…`.
+`settings-<theme>-<viewport>.png`, `select-open-…`, `select-empty-…`, `devices-<theme>-<viewport>.png`, `devices-hover-…`.
 For a UI change, keep the before and after directories and compare the same
 state, theme, viewport and scroll position.
 
@@ -47,15 +49,26 @@ can see:
   sentence;
 - no border radius and no drop shadow on controls.
 
+The `devices` fixture adds: two or more card columns at desktop, one 1px card
+frame, 16px card padding, a card at least 88px tall, a hover that changes the
+frame and underlines the name, no row-wide background fill on hover, and — at
+phone width — one column of 56px rows with no card frame.
+
 The fixture deliberately exercises the target state, so on a revision that
 still has the old controls these checks fail. That is the point: run it before
 and after, and do not merge with a failing check.
 
 ## The fixture
 
-`web/ui-audit/main.tsx` imports the real `SelectField`, `Input`, `Tabs` and
-`Button` and reproduces the settings-row composition. It is not a product page
-and makes no requests.
+`web/ui-audit/main.tsx` has two fixtures:
+
+- `settings` imports the real `SelectField`, `Input`, `Tabs`, `Button`,
+  `Switch` and `Checkbox` and reproduces the settings-row composition.
+- `devices` imports the real `DeviceRow` and `SectionHead` and renders five
+  fixed views (this host, an online host, an offline host with a copy, a
+  browser, one waiting for approval) in the real card grid.
+
+Neither is a product page and neither makes requests.
 
 - `web/src/index.css` excludes it with `@source not "../ui-audit"`: the fixture
   must never change the production stylesheet or its hash. Every class in the
