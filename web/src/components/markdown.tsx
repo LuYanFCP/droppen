@@ -1,4 +1,5 @@
-import { createContext, useContext } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { DownloadLink } from "@/components/host-file";
@@ -109,11 +110,115 @@ const components: React.ComponentProps<typeof ReactMarkdown>["components"] = {
   ),
 };
 
+/**
+ * Whether LaTeX in a message is typeset: the `math` pref of the device whose
+ * transcript this is, provided by the view that read it. Off outside one.
+ */
+export const MathRendering = createContext(false);
+
+type MathKit = typeof import("@/components/markdown-math");
+
+/** Anything that could open a formula: a `$`, `\(` or `\[`. A message without one never loads KaTeX. */
+const MAY_HAVE_MATH = /\$|\\[([]/;
+
+let mathKit: MathKit | undefined;
+let mathLoad: Promise<MathKit | undefined> | undefined;
+
+/**
+ * Set the math kit directly, without the fetch (and its stylesheet), which is
+ * what `loadMath` does once it has both. Exported for the render tests, which
+ * have no bundler to load a chunk or a stylesheet with.
+ */
+export function installMath(kit: MathKit) {
+  mathKit = kit;
+  mathLoad = Promise.resolve(kit);
+}
+
+/**
+ * KaTeX and its stylesheet, fetched once for the page. A failed fetch (a
+ * chunk gone after a deploy, the network down) leaves messages as written and
+ * is tried again by the next message that asks.
+ */
+function loadMath(): Promise<MathKit | undefined> {
+  mathLoad ??= Promise.all([import("@/components/markdown-math"), import("katex/dist/katex.min.css")]).then(
+    ([kit]) => {
+      installMath(kit);
+      return kit;
+    },
+    () => {
+      mathLoad = undefined;
+      return undefined;
+    },
+  );
+  return mathLoad;
+}
+
+/** The math kit when `text` should be typeset and it has loaded; until then, nothing. */
+function useMathKit(text: string): MathKit | undefined {
+  const wanted = useContext(MathRendering) && MAY_HAVE_MATH.test(text);
+  const [kit, setKit] = useState(mathKit);
+  useEffect(() => {
+    if (!wanted || kit) return;
+    let live = true;
+    void loadMath().then((loaded) => {
+      if (live && loaded) setKit(loaded);
+    });
+    return () => {
+      live = false;
+    };
+  }, [wanted, kit]);
+  return wanted ? (kit ?? mathKit) : undefined;
+}
+
+const PLAIN = [remarkGfm];
+
+/**
+ * Copy the TeX of the formula a click (or Enter or Space on a focused one)
+ * landed on, then say so on the formula for a moment. One handler for the
+ * whole message rather than one per formula: the formulas are KaTeX's markup,
+ * drawn from hast, with nowhere to hang their own. Not a click that ends a
+ * text selection: that one is someone selecting.
+ */
+function copyFormula(event: React.MouseEvent | React.KeyboardEvent, copied: string) {
+  const formula = (event.target as Element).closest?.("[data-tex]");
+  if (!(formula instanceof HTMLElement) || !event.currentTarget.contains(formula)) return;
+  if (event.type === "keydown") {
+    const { key } = event as React.KeyboardEvent;
+    if (event.target !== formula || (key !== "Enter" && key !== " ")) return;
+  } else if (window.getSelection()?.toString()) {
+    return;
+  }
+  // A formula in a link's text copies rather than follows the link.
+  event.preventDefault();
+  navigator.clipboard?.writeText(formula.dataset.tex ?? "").then(
+    () => {
+      formula.dataset.copied = copied;
+      setTimeout(() => delete formula.dataset.copied, 1500);
+    },
+    () => {
+      // Clipboard refused (no permission, or not a secure context): nothing
+      // was copied, so nothing says it was.
+    },
+  );
+}
+
 export function Markdown({ text, className }: { text: string; className?: string }) {
+  const { t } = useTranslation();
+  const math = useMathKit(text);
+  const copied = t("copied");
   return (
-    <div className={cn("min-w-0 text-[13px] leading-[21px] break-words max-md:text-sm max-md:leading-[22px]", className)}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={urlTransform}>
-        {text}
+    <div
+      className={cn("min-w-0 text-[13px] leading-[21px] break-words max-md:text-sm max-md:leading-[22px]", className)}
+      onClick={math ? (event) => copyFormula(event, copied) : undefined}
+      onKeyDown={math ? (event) => copyFormula(event, copied) : undefined}
+    >
+      <ReactMarkdown
+        remarkPlugins={math ? [remarkGfm, ...math.remarkPlugins] : PLAIN}
+        rehypePlugins={math ? [[math.rehypeTypeset, { copyTitle: t("click to copy the TeX") }]] : undefined}
+        components={components}
+        urlTransform={urlTransform}
+      >
+        {math ? math.prepareMath(text) : text}
       </ReactMarkdown>
     </div>
   );
