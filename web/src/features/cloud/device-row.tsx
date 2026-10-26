@@ -755,7 +755,7 @@ export function DeviceRow({
         data-host={view.host ? "" : undefined}
         data-limited={view.limited ? "" : undefined}
         data-status={status}
-        className="@min-[44rem]/devices:border @min-[44rem]/devices:border-border @min-[44rem]/devices:p-4"
+        className="min-w-0 self-start @min-[44rem]/devices:border @min-[44rem]/devices:border-border @min-[44rem]/devices:p-4"
       >
         <div className="group/summary flex h-14 min-w-0 items-center gap-3 @min-[44rem]/devices:h-auto @min-[44rem]/devices:min-h-11">
           <Icon aria-hidden="true" className={cn("size-4 shrink-0", removed ? "text-faint" : "text-muted")} />
@@ -788,7 +788,7 @@ export function DeviceRow({
       data-current={view.self ? "" : undefined}
       aria-current={view.self ? "true" : undefined}
       className={cn(
-        "group/row @min-[44rem]/devices:border @min-[44rem]/devices:border-border @min-[44rem]/devices:p-4 @min-[44rem]/devices:hover:border-border-strong",
+        "group/row min-w-0 self-start @min-[44rem]/devices:border @min-[44rem]/devices:border-border @min-[44rem]/devices:p-4 @min-[44rem]/devices:hover:border-border-strong",
         view.self && "@min-[44rem]/devices:shadow-[inset_1px_0_0_var(--color-fg)]",
       )}
     >
