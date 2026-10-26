@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import { Loader2 } from "lucide-react";
+import { CHECKBOX_INPUT, CHECKBOX_LABEL, CheckboxMark } from "@/components/ui/checkbox";
 import { ASSURANCE_AUTO, ASSURANCE_ON_DEVICE, type Assurance } from "@/lib/e2e";
 import { formatAsOf } from "@/lib/format";
 import { type CloudAccount, type PauseEnding, RenewalError } from "@/lib/hub/account";
@@ -492,17 +493,21 @@ export function AlwaysConfirmSetting({
           </span>
         </div>
       )}
-      <label data-testid="always-confirm" className="flex cursor-pointer items-start gap-3">
+      <label
+        data-testid="always-confirm"
+        className={cn(CHECKBOX_LABEL, "items-start gap-3 text-xs", (busy || !chosen) && "cursor-not-allowed opacity-60")}
+      >
         <input
           type="checkbox"
+          className={CHECKBOX_INPUT}
           checked={chosen && account.alwaysAssured}
           disabled={busy || !chosen}
-          className="mt-0.5"
           onChange={(e) => {
             if (e.target.checked) void write(true);
             else setAskingOff(true);
           }}
         />
+        <CheckboxMark />
         <span className="flex min-w-0 flex-col gap-0.5">
           <span className="flex items-center gap-2 font-mono text-xs text-fg">
             {t("Always confirm on the device when renewing an identity key")}
@@ -513,16 +518,17 @@ export function AlwaysConfirmSetting({
           </span>
         </span>
       </label>
-      <label data-testid="local-assured" className="flex cursor-pointer items-start gap-3">
+      <label data-testid="local-assured" className={cn(CHECKBOX_LABEL, "items-start gap-3 text-xs")}>
         <input
           type="checkbox"
+          className={CHECKBOX_INPUT}
           checked={local}
-          className="mt-0.5"
           onChange={(e) => {
             account.setLocalAssured(e.target.checked);
             setLocal(e.target.checked);
           }}
         />
+        <CheckboxMark />
         <span className="flex min-w-0 flex-col gap-0.5">
           <span className="flex items-center gap-2 font-mono text-xs text-fg">
             {t("On this device, only sign renewals confirmed on the device")}

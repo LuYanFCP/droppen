@@ -52,6 +52,8 @@ import { RecoveryWords } from "./recovery";
 import { danger, ErrorLine, errorText, field, Fingerprint, knownText, Note, primary, quiet, secondary, SectionHead, Tabs } from "./ui";
 import { Button } from "@/components/ui/button";
 import { CapsLabel } from "@/components/ui/caps-label";
+import { CHECKBOX_INPUT, CHECKBOX_LABEL, CheckboxMark } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 
 export { DeviceRow, type DeviceRowView, ReEnrollWarning, type RowMenuItem, rowMenuItems } from "./device-row";
 
@@ -140,51 +142,6 @@ export type Section =
 
 /** A time of day ("14:02"), with the date when it is not today. */
 export const asOfTime = formatAsOf;
-
-/**
- * A square on/off switch (the drafting sheet has no round controls). A
- * switch that cannot move is `aria-disabled` rather than disabled, so its
- * tooltip still says why. `labelHidden`: the words beside it say what it is,
- * so its label is for screen readers only.
- */
-export function SquareSwitch({
-  on,
-  blocked,
-  title,
-  label,
-  onChange,
-  testId,
-  labelHidden = false,
-}: {
-  on: boolean;
-  blocked: boolean;
-  title?: string;
-  label: string;
-  onChange: (on: boolean) => void;
-  testId?: string;
-  labelHidden?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      aria-disabled={blocked || undefined}
-      aria-label={label}
-      title={title}
-      data-testid={testId}
-      onClick={() => {
-        if (!blocked) onChange(!on);
-      }}
-      className={cn("flex h-7 shrink-0 items-center gap-2 px-1 font-mono text-2xs pointer-coarse:h-9", blocked ? "cursor-not-allowed text-faint" : "text-muted hover:text-fg")}
-    >
-      <span aria-hidden="true" className={cn("relative inline-flex h-3.5 w-6 shrink-0 border", on ? "border-fg bg-fg" : "border-border-strong bg-bg", blocked && "opacity-40")}>
-        <span className={cn("absolute top-[2px] size-2", on ? "left-[12px] bg-bg" : "left-[2px] bg-faint")} />
-      </span>
-      <span className={labelHidden ? "sr-only" : "max-sm:sr-only"}>{label}</span>
-    </button>
-  );
-}
 
 /** What this browser is, for its own row: a phone or a browser (the hub is not told). */
 function useIsPhone(): boolean {
@@ -1407,9 +1364,10 @@ export function HostControl({
             {candidates.length === 0 && <li className="text-2xs text-faint">{t("no other device to pick")}</li>}
             {candidates.map((c) => (
               <li key={c.id}>
-                <label className="flex items-center gap-2 font-mono text-2xs text-fg">
+                <label className={cn(CHECKBOX_LABEL, "items-center font-mono text-2xs text-fg", !upgraded && "cursor-not-allowed opacity-60")}>
                   <input
                     type="checkbox"
+                    className={CHECKBOX_INPUT}
                     disabled={!upgraded}
                     checked={picked.has(c.id)}
                     onChange={(e) => {
@@ -1419,9 +1377,12 @@ export function HostControl({
                       setPicked(next);
                     }}
                   />
-                  {c.id}
-                  {c.host && <span className="text-faint">· {t("can run AI")}</span>}
-                  {c.limited && <span className="text-faint">· {t("limited device")}</span>}
+                  <CheckboxMark />
+                  <span className="min-w-0">
+                    {c.id}
+                    {c.host && <span className="text-faint">· {t("can run AI")}</span>}
+                    {c.limited && <span className="text-faint">· {t("limited device")}</span>}
+                  </span>
                 </label>
               </li>
             ))}
@@ -1512,7 +1473,7 @@ export function DirectConnectionSetting({ allowed, onChange }: { allowed?: boole
           )}
         </span>
       </div>
-      <SquareSwitch on={on} blocked={false} label={label} labelHidden testId="direct-switch" onChange={(next) => (onChange ? onChange(next) : setHubOnly(!next))} />
+      <Switch on={on} blocked={false} label={label} labelHidden testId="direct-switch" onChange={(next) => (onChange ? onChange(next) : setHubOnly(!next))} />
     </div>
   );
 }
@@ -1560,7 +1521,7 @@ export function RelayStandbySetting({ account, link }: { account: CloudAccount; 
         </span>
         <ErrorLine message={error} />
       </div>
-      <SquareSwitch on={on} blocked={pending !== null} label={label} labelHidden testId="relay-standby-switch" onChange={(next) => void change(next)} />
+      <Switch on={on} blocked={pending !== null} label={label} labelHidden testId="relay-standby-switch" onChange={(next) => void change(next)} />
     </div>
   );
 }
@@ -1756,26 +1717,32 @@ function RemoveDevice({
       )}
       <RenewalsAhead ids={renewing} />
       {rotation !== "none" && (
-        <label className="flex items-start gap-2 text-2xs text-muted">
+        <label className={cn(CHECKBOX_LABEL, rotation !== "choice" && "cursor-not-allowed opacity-60")}>
           <input
             type="checkbox"
+            className={CHECKBOX_INPUT}
             data-testid="rotate-machine-keys"
             checked={rotation !== "choice" || rotateMachineKeys}
             disabled={rotation !== "choice"}
             onChange={(e) => setRotateMachineKeys(e.target.checked)}
-            className="mt-0.5"
           />
-          {rotation === "all"
-            ? t("also rotate the content keys (always, for a device that held the user key)")
-            : rotation === "machine"
-              ? t("also rotate the content keys (always, for a device another device accepts control from)")
-              : t("also rotate the content keys")}
+          <CheckboxMark />
+          <span className="min-w-0">
+            {rotation === "all"
+              ? t("also rotate the content keys (always, for a device that held the user key)")
+              : rotation === "machine"
+                ? t("also rotate the content keys (always, for a device another device accepts control from)")
+                : t("also rotate the content keys")}
+          </span>
         </label>
       )}
       {rotation !== "none" && (rotation !== "choice" || rotateMachineKeys) && (
-        <label className="flex items-start gap-2 text-2xs text-muted">
-          <input type="checkbox" checked={reencrypt} onChange={(e) => setReencrypt(e.target.checked)} className="mt-0.5" />
-          {t("also re-encrypt history: each device that runs AI rebuilds its encrypted copy under the new key and the old one is deleted")}
+        <label className={CHECKBOX_LABEL}>
+          <input type="checkbox" className={CHECKBOX_INPUT} checked={reencrypt} onChange={(e) => setReencrypt(e.target.checked)} />
+          <CheckboxMark />
+          <span className="min-w-0">
+            {t("also re-encrypt history: each device that runs AI rebuilds its encrypted copy under the new key and the old one is deleted")}
+          </span>
         </label>
       )}
       <ErrorLine message={error} />
@@ -2698,9 +2665,19 @@ export function VetoChoice({
       )}
       {plan.trusted.length > 0 && (
         <div className="flex flex-col gap-1 border-t border-border pt-1.5">
-          <label className="flex items-start gap-2 text-fg">
-            <input type="checkbox" data-testid="veto-also-trusted" checked={alsoTrusted} disabled={busy} onChange={(e) => onAlsoTrusted(e.target.checked)} className="mt-0.5" />
-            {t("Also remove what your other devices added while this browser held it back, and what those added:")}
+          <label className={cn(CHECKBOX_LABEL, "text-xs text-fg", busy && "cursor-not-allowed opacity-60")}>
+            <input
+              type="checkbox"
+              className={CHECKBOX_INPUT}
+              data-testid="veto-also-trusted"
+              checked={alsoTrusted}
+              disabled={busy}
+              onChange={(e) => onAlsoTrusted(e.target.checked)}
+            />
+            <CheckboxMark />
+            <span className="min-w-0">
+              {t("Also remove what your other devices added while this browser held it back, and what those added:")}
+            </span>
           </label>
           <ul data-testid="veto-trusted" className="flex flex-col gap-0.5 pl-8">
             {plan.trusted.map((d) => (

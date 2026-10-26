@@ -7,6 +7,7 @@ import type { components } from "@/api/schema";
 import { useFeedSessions, useFeedSettings } from "@/app/global-feed";
 import { SelectField } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
 import { Content, Panel, PanelHeader } from "@/components/panel";
 import { useShowHiddenFiles } from "@/features/files/use-files-prefs";
@@ -49,7 +50,7 @@ type Prefs = components["schemas"]["Prefs"];
 // 16rem label and 14rem control from 36rem up, stacked below it.
 const preferenceRow = PREFERENCE_ROW;
 
-/** A boolean setting: the square switch of the control vocabulary (native checkbox, square, 28px row). */
+/** A boolean setting: the one square switch (`components/ui/switch`), in the settings page's sans label voice. */
 function SettingSwitch({
   on,
   label,
@@ -61,25 +62,7 @@ function SettingSwitch({
   disabled?: boolean;
   onChange: (on: boolean) => void;
 }) {
-  return (
-    <label
-      className={cn(
-        "flex h-7 items-center gap-2 text-xs font-medium",
-        disabled ? "cursor-not-allowed text-faint" : "cursor-pointer text-muted hover:text-fg",
-      )}
-    >
-      <input
-        type="checkbox"
-        role="switch"
-        checked={on}
-        disabled={disabled}
-        aria-label={label}
-        onChange={(event) => onChange(event.target.checked)}
-        className="size-4 shrink-0 accent-fg"
-      />
-      <span>{label}</span>
-    </label>
-  );
+  return <Switch on={on} blocked={disabled} label={label} onChange={onChange} className="font-sans text-xs font-medium" />;
 }
 
 /** Exported for the render tests (`test/cross-device-render.test.tsx`). */
