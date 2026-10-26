@@ -750,11 +750,24 @@ export function DeviceRow({
   // rows: no badges, no disclosure, no normal row dressed up (§3).
   if (status !== "active") {
     return (
-      <li data-testid={`device-${id}`} data-host={view.host ? "" : undefined} data-limited={view.limited ? "" : undefined} data-status={status} className="px-6 max-md:px-4">
-        <div className={cn("flex h-14 min-w-0 items-center gap-3", status === "pending" && "hover:bg-hover")}>
+      <li
+        data-testid={`device-${id}`}
+        data-host={view.host ? "" : undefined}
+        data-limited={view.limited ? "" : undefined}
+        data-status={status}
+        className="@min-[44rem]/devices:border @min-[44rem]/devices:border-border @min-[44rem]/devices:p-4"
+      >
+        <div className="group/summary flex h-14 min-w-0 items-center gap-3 @min-[44rem]/devices:h-auto @min-[44rem]/devices:min-h-11">
           <Icon aria-hidden="true" className={cn("size-4 shrink-0", removed ? "text-faint" : "text-muted")} />
           <span className="flex min-w-0 flex-1 items-center gap-2.5">
-            <span data-testid={`name-${id}`} title={id} className={cn("min-w-0 truncate text-[13px] leading-5 font-medium", removed ? "text-muted" : "text-fg")}>
+            <span
+              data-testid={`name-${id}`}
+              title={id}
+              className={cn(
+                "min-w-0 truncate text-[13px] leading-5 font-medium group-hover/summary:underline group-hover/summary:underline-offset-2",
+                removed ? "text-muted" : "text-fg",
+              )}
+            >
               {name}
             </span>
             {status === "pending" ? <StatusWord tone="warn">{t("waiting for approval")}</StatusWord> : <StatusWord tone="faint">{t("removed")}</StatusWord>}
@@ -774,25 +787,35 @@ export function DeviceRow({
       data-status={status}
       data-current={view.self ? "" : undefined}
       aria-current={view.self ? "true" : undefined}
-      className="group/row px-6 max-md:px-4"
+      className={cn(
+        "group/row @min-[44rem]/devices:border @min-[44rem]/devices:border-border @min-[44rem]/devices:p-4 @min-[44rem]/devices:hover:border-border-strong",
+        view.self && "@min-[44rem]/devices:shadow-[inset_1px_0_0_var(--color-fg)]",
+      )}
     >
       {/*
-        One 56px line: icon · name (and at width, two badges) · state dot and
-        word · one 28px action · 「⋯」. Below 44rem of container the badges fold
-        away and the status takes its own line inside the same beat; everything
-        a careful look needs is in the disclosure below.
+        Below 44rem of container: one 56px line (icon · name · state · action ·
+        「⋯」), rows, badges folded away. From 44rem: a card in the list's
+        auto-fill grid, two lines inside a 1px frame (name/state left, action
+        and 「⋯」 right); everything a careful look needs is in the disclosure
+        below. Hover darkens the card's frame and underlines the name — never
+        a full-width fill.
       */}
       <details data-testid={`details-${id}`} open={openWarnings || undefined} className="group/details min-w-0">
         <summary
           className={cn(
-            "grid h-14 min-w-0 cursor-pointer list-none content-center items-center gap-x-3 overflow-hidden select-none hover:bg-hover focus-visible:shadow-[inset_0_0_0_2px_var(--color-fg)] focus-visible:outline-none [&::-webkit-details-marker]:hidden",
-            "grid-cols-[1rem_minmax(0,1fr)_auto_1.75rem] @min-[44rem]/devices:grid-cols-[1rem_minmax(0,1fr)_9rem_auto_1.75rem]",
-            view.self && "shadow-[inset_1px_0_0_var(--color-fg)]",
+            "group/summary grid h-14 min-w-0 cursor-pointer list-none content-center items-center gap-x-3 overflow-hidden select-none focus-visible:shadow-[inset_0_0_0_2px_var(--color-fg)] focus-visible:outline-none [&::-webkit-details-marker]:hidden",
+            "grid-cols-[1rem_minmax(0,1fr)_auto_1.75rem]",
+            "@min-[44rem]/devices:h-auto @min-[44rem]/devices:min-h-[5.5rem] @min-[44rem]/devices:content-start @min-[44rem]/devices:grid-cols-[1rem_minmax(0,1fr)_auto] @min-[44rem]/devices:grid-rows-[auto_auto] @min-[44rem]/devices:gap-y-2",
+            view.self && "shadow-[inset_1px_0_0_var(--color-fg)] @min-[44rem]/devices:shadow-none",
           )}
         >
           <Icon aria-hidden="true" className={cn("col-start-1 row-span-2 row-start-1 size-4 shrink-0 self-center @min-[44rem]/devices:row-span-1", view.presence === "offline" ? "text-faint" : "text-muted")} />
           <span className="col-start-2 row-start-1 flex min-w-0 items-center gap-1.5 overflow-hidden">
-            <span data-testid={`name-${id}`} title={id} className="min-w-0 truncate text-sm leading-5 font-medium text-fg">
+            <span
+              data-testid={`name-${id}`}
+              title={id}
+              className="min-w-0 truncate text-sm leading-5 font-medium text-fg group-hover/summary:underline group-hover/summary:underline-offset-2"
+            >
               {name}
             </span>
             <ChevronRight aria-hidden="true" className="size-3 shrink-0 text-faint transition-transform group-open/details:rotate-90" />
@@ -805,15 +828,18 @@ export function DeviceRow({
               )}
             </span>
           </span>
-          <span className="col-start-2 row-start-2 flex min-w-0 items-center @min-[44rem]/devices:col-start-3 @min-[44rem]/devices:row-start-1">
+          <span className="col-start-2 row-start-2 flex min-w-0 items-center">
             <RowStatus view={view} />
           </span>
-          <span onClick={(e) => e.stopPropagation()} className="col-start-3 row-span-2 row-start-1 flex items-center justify-end self-center @min-[44rem]/devices:col-start-4 @min-[44rem]/devices:row-span-1">
+          <span
+            onClick={(e) => e.stopPropagation()}
+            className="col-start-3 row-span-2 row-start-1 flex items-center justify-end self-center @min-[44rem]/devices:col-start-3 @min-[44rem]/devices:row-span-1 @min-[44rem]/devices:row-start-2 @min-[44rem]/devices:self-end"
+          >
             {onOpen && view.host && (
               <Button
                 data-testid={`open-${id}`}
                 onClick={onOpen}
-                className="h-7 px-2.5 text-xs pointer-coarse:h-9"
+                className="h-7 px-2.5 text-xs pointer-coarse:h-9 group-hover/summary:border-fg"
                 title={view.presence === "online" || !view.hasCopy ? t("open") : t("read the copy")}
                 aria-label={view.presence === "online" || !view.hasCopy ? t("open") : t("read the copy")}
               >
@@ -822,7 +848,10 @@ export function DeviceRow({
               </Button>
             )}
           </span>
-          <span onClick={(e) => e.stopPropagation()} className="col-start-4 row-span-2 row-start-1 flex items-center justify-end self-center @min-[44rem]/devices:col-start-5 @min-[44rem]/devices:row-span-1">
+          <span
+            onClick={(e) => e.stopPropagation()}
+            className="col-start-4 row-span-2 row-start-1 flex items-center justify-end self-center @min-[44rem]/devices:col-start-3 @min-[44rem]/devices:row-span-1 @min-[44rem]/devices:row-start-1 @min-[44rem]/devices:self-start"
+          >
             <RowMenu id={id} items={items} />
           </span>
         </summary>

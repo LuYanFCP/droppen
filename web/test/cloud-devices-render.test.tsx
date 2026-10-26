@@ -362,6 +362,17 @@ test("my devices: a computer that runs AI shows the badge, where it is, and — 
   assert.equal(item(menu(row({ id: "m-2", kind: "computer", stoppedHost: true })), "host-m-2")?.label, "run AI again");
 });
 
+test("at a wide container a device is a framed card, and hover marks the frame and the name, never a full-row fill", () => {
+  const html = list(<DeviceRow view={row({ id: "m-1", kind: "computer", host: true, presence: "online" })} viewerAdmin upgraded writable />);
+  assert.match(html, /@min-\[44rem\]\/devices:border/);
+  assert.match(html, /@min-\[44rem\]\/devices:p-4/);
+  assert.match(html, /@min-\[44rem\]\/devices:hover:border-border-strong/);
+  assert.match(html, /group-hover\/summary:underline/);
+  const summary = html.slice(html.indexOf("<summary"), html.indexOf("</summary>"));
+  assert.ok(!summary.includes("hover:bg-hover"), "hover does not paint the 1101px row");
+  assert.match(html, /grid-cols-\[1rem_minmax\(0,1fr\)_auto\]/, "icon, name and one action column");
+});
+
 test("a row's actions are in its 「⋯」 menu, not a row of buttons; a device that runs AI keeps 「打开」 at hand", () => {
   const host = row({ id: "m-1", name: "studio", kind: "computer", host: true, presence: "online", hasCopy: true });
   const html = list(<DeviceRow view={host} viewerAdmin upgraded writable onOpen={() => undefined} onRemove={() => undefined} onHost={() => undefined} onControl={() => undefined} onResend={() => undefined} onTerminal={() => undefined} />);
