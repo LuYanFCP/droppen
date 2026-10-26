@@ -88,25 +88,26 @@
   color-scheme: light;
 }
 
-/* The dark sheet is graphite, not the void: #0f1115 keeps a trace of blue so
-   the surface reads as a material under the ink, and so the hairlines and the
-   raised wells have somewhere to sit. Pure (or 10/255) black turns every large
-   area into a hole and makes 18:1 body text halo on OLED; this lands at ~16:1
-   with a softer white. `faint` is lifted to 5.07:1 against `bg` because it is
-   used at 11px; the old 6f6f6f sat at 3.94:1. The ramp keeps `panel` = `bg`,
-   `accent` = `fg`, and colour only for state, as in light. */
+/* The dark sheet is a lifted graphite, not the void: #1a1e23 is a cool neutral
+   with room for a base well (#23282f), a hover (#2b3138) and two hairlines
+   (#343b43, #626b76) above it, so large areas read as material instead of a
+   hole. The ramp is adapted from AnyStorage's dark theme (canvas/base/surface
+   at roughly 30%, 26%, 35% lightness) without its shadows or rounded cards:
+   `panel` stays `bg`, `accent` stays `fg`, colour only for state. Body text is
+   14.0:1, muted 7.4:1 and 11px `faint` 5.4:1 against `bg`; border-strong is
+   3.1:1. The terminal keeps its own deeper #0f1115. */
 .dark {
   color-scheme: dark;
 
-  --color-bg: #0f1115;
-  --color-panel: #0f1115;
-  --color-raised: #161920;
-  --color-hover: #1e222a;
-  --color-border: #2b313a;
-  --color-border-strong: #5c6470;
+  --color-bg: #1a1e23;
+  --color-panel: #1a1e23;
+  --color-raised: #23282f;
+  --color-hover: #2b3138;
+  --color-border: #343b43;
+  --color-border-strong: #626b76;
   --color-fg: #e9ebee;
-  --color-muted: #a4abb5;
-  --color-faint: #7d8590;
+  --color-muted: #a6adb7;
+  --color-faint: #8b939e;
   --color-mark: #e9ebee;
   --color-accent: #e9ebee;
   --color-ok: #3ed273;
@@ -117,8 +118,8 @@
   --color-key-secret: #fb923c;
   --color-key-derived: #c084fc;
   --color-key-public: #34d399;
-  --color-claude: #a4abb5;
-  --color-codex: #a4abb5;
+  --color-claude: #a6adb7;
+  --color-codex: #a6adb7;
 }
 
 /* Keyboard focus is ink, never blue, and always visible: a 2px outline from
