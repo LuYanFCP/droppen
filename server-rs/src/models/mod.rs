@@ -316,8 +316,7 @@ pub async fn list_models(State(state): State<AppState>, ApiQuery(query): ApiQuer
     let (models, source) = match query.source {
         Source::Codex => codex_models(&paths.codex_models_cache()).await,
         Source::Claude => claude_models(&state, query.account_id.as_deref()).await,
-        // Bub chooses its model from its own configuration.
-        Source::Bub => (Vec::new(), ModelListSource::Fallback),
+        Source::Bub => acp_models(&state, query.source).await,
     };
     Json(ModelList { models, source })
 }
@@ -329,9 +328,48 @@ pub(crate) async fn model_ids(state: &AppState, source: Source, account_id: Opti
     let (models, _) = match source {
         Source::Codex => codex_models(&state.paths.codex_models_cache()).await,
         Source::Claude => claude_models(state, account_id).await,
-        Source::Bub => (Vec::new(), ModelListSource::Fallback),
+        Source::Bub => acp_models(state, source).await,
     };
     models.into_iter().map(|model| model.id).collect()
+}
+
+/// An ACP agent's list: the values of its `model` option, each with the
+/// ladder of its `thought_level` option, as the agent itself publishes them
+/// ([`crate::inject::InjectionRegistry::acp_options`]).
+///
+/// The agent's list is the whole list: there is no static guess to fall back
+/// on, so an agent that cannot be asked yields no models, which hides the
+/// pickers, and a `fallback` source, which says why.
+async fn acp_models(state: &AppState, source: Source) -> (Vec<ModelInfo>, ModelListSource) {
+    use crate::acp::{category, option_for};
+    let Some(agent) = crate::inject::acp::agent(source) else {
+        return (Vec::new(), ModelListSource::Fallback);
+    };
+    let options = match state.drive.injections.acp_options(agent).await {
+        Ok(options) => options,
+        Err(error) => {
+            tracing::info!(agent = agent.name, %error, "cannot read the agent's models");
+            return (Vec::new(), ModelListSource::Fallback);
+        }
+    };
+    let effort = option_for(&options, category::THOUGHT_LEVEL);
+    let efforts = effort.map(|effort| effort.values().iter().map(|value| value.value.clone()).collect::<Vec<_>>());
+    let default_effort = effort.and_then(|effort| effort.current_value.clone());
+    let models = option_for(&options, category::MODEL)
+        .map(|model| {
+            model
+                .values()
+                .iter()
+                .map(|value| ModelInfo {
+                    id: value.value.clone(),
+                    label: Nullable((!value.name.is_empty() && value.name != value.value).then(|| value.name.clone())),
+                    efforts: Nullable(efforts.clone()),
+                    default_effort: Nullable(default_effort.clone()),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (models, ModelListSource::Cache)
 }
 
 /// The Claude list for one login: the local one, or a stored account's.

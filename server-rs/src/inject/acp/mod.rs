@@ -14,6 +14,11 @@
 //! * `session/prompt` per message, answered with a stop reason when the turn
 //!   ends, with the turn itself streamed as `session/update` notifications in
 //!   between;
+//! * `session/set_config_option` before a turn whose message picked another
+//!   model or effort than the session has: the agent publishes both as
+//!   configuration options (categories `model` and `thought_level`), and
+//!   [`InjectionRegistry::acp_options`] reads them for the composer before any
+//!   session exists, by opening one in a scratch directory and closing it;
 //! * `session/cancel` to stop a turn.
 //!
 //! What the agent says is written down as it arrives, in the transcript
@@ -46,6 +51,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use super::*;
+use crate::acp::{category, option_for, ConfigOption};
 use crate::sessions::acp_transcript::{has_conversation, record, transcript_path, Translator};
 use client::Client;
 use conn::Conn;
@@ -107,20 +113,24 @@ fn prompt_text(text: &str, images: &[String], files: &[String]) -> String {
 }
 
 fn message(text: &str, options: &SendOptions) -> Message {
+    let picked = |value: &Option<String>| value.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
     Message {
         id: options.message_id.clone().unwrap_or_else(new_uuid),
         text: text.to_string(),
         prompt: prompt_text(text, &options.images, &options.files),
         images: options.images.clone(),
         files: options.files.clone(),
+        model: picked(&options.model),
+        effort: picked(&options.effort),
     }
 }
 
 /// Refuse what an ACP session cannot do differently per message.
 ///
-/// An ACP agent's model and reasoning effort come from its own configuration,
-/// and it has no accounts here and no permission modes; a request that names
-/// any of them is refused rather than quietly run on something else.
+/// An ACP agent has no accounts here and no permission modes; a request that
+/// names either is refused rather than quietly run on something else. Its
+/// model and effort are its own configuration options, checked against what
+/// it publishes ([`check_choice`]).
 fn check_options(agent: &AcpAgent, options: &SendOptions) -> Result<(), InjectError> {
     let name = agent.name;
     if options.account.named().is_some() || matches!(options.account, AccountChoice::Rule(_)) {
@@ -129,11 +139,6 @@ fn check_options(agent: &AcpAgent, options: &SendOptions) -> Result<(), InjectEr
         )));
     }
     let named = |value: &Option<String>| value.as_deref().is_some_and(|value| !value.trim().is_empty());
-    if named(&options.model) || named(&options.effort) {
-        return Err(InjectError::message(format!(
-            "{name} takes its model and reasoning effort from its own configuration"
-        )));
-    }
     if named(&options.permission) {
         return Err(InjectError::message(format!("{name} has no permission modes to choose between")));
     }
@@ -145,7 +150,141 @@ fn check_options(agent: &AcpAgent, options: &SendOptions) -> Result<(), InjectEr
     Ok(())
 }
 
+/// Refuse a model or effort the agent does not offer, when what it offers is
+/// known; with nothing known yet, the agent itself answers when it is set.
+fn check_choice(agent: &AcpAgent, offered: &[ConfigOption], model: Option<&str>, effort: Option<&str>) -> Result<(), InjectError> {
+    if offered.is_empty() {
+        return Ok(());
+    }
+    for (category, what, wanted) in [(category::MODEL, "model", model), (category::THOUGHT_LEVEL, "effort", effort)] {
+        let Some(wanted) = wanted else { continue };
+        match option_for(offered, category) {
+            None => return Err(InjectError::message(format!("{} offers no {what} to choose", agent.name))),
+            Some(option) if !option.accepts(wanted) => {
+                return Err(InjectError::message(format!("{} has no {what} \"{wanted}\"", agent.name)));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// An agent process, started and connected, before any session is open.
+struct Started {
+    child: tokio::process::Child,
+    stderr: StderrTail,
+    client: Arc<Client>,
+    conn: Conn,
+}
+
+/// Start `agent` in `workdir` and connect to it.
+async fn start(agent: &AcpAgent, paths: &Paths, workdir: &Path) -> Result<Started, InjectError> {
+    let launch = (agent.launch)(paths);
+    let mut child = tokio::process::Command::new(&launch.program)
+        .args(&launch.args)
+        .current_dir(workdir)
+        .env_clear()
+        .envs(&launch.env)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| {
+            InjectError::message(format!(
+                "cannot start {} ({}): {error}. {}",
+                agent.name,
+                launch.program.display(),
+                agent.install_hint
+            ))
+        })?;
+    let stderr = StderrTail::follow(child.stderr.take().expect("piped stderr"));
+    let client = Client::new(workdir.to_path_buf(), launch.env.clone());
+    let conn = Conn::start(
+        child.stdin.take().expect("piped stdin"),
+        child.stdout.take().expect("piped stdout"),
+        client.clone(),
+    )
+    .await?;
+    Ok(Started { child, stderr, client, conn })
+}
+
+impl Started {
+    /// End a process that did not get as far as a driver, and say why.
+    async fn fail(mut self, registry: &InjectionRegistry, name: &str, reason: String) -> InjectError {
+        self.client.kill_all();
+        let _ = self.child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
+        let tail = self.stderr.text();
+        let said = if tail.is_empty() { reason } else { format!("{reason}\n{tail}") };
+        InjectError::message(registry.redact(&format!("cannot start {name}: {said}")))
+    }
+}
+
 impl InjectionRegistry {
+    /// The configuration options `agent` offers, for the composer: the model
+    /// list and the effort ladder.
+    ///
+    /// Remembered per agent once read — from a probe, or from a session the
+    /// agent created since — and forgotten when its settings change. Only a
+    /// fresh session's options are remembered: their current values are the
+    /// agent's defaults, which a switched session's are not. With
+    /// nothing remembered, a probe opens a session in a scratch directory,
+    /// reads its options and closes it, so it leaves no conversation behind.
+    pub async fn acp_options(self: &Arc<Self>, agent: &'static AcpAgent) -> Result<Vec<ConfigOption>, InjectError> {
+        if let Some(options) = self.acp_options.lock().unwrap().get(&agent.source) {
+            return Ok(options.clone());
+        }
+        // One probe at a time: a page that asks twice gets the first answer.
+        let _probing = self.acp_probe.lock().await;
+        if let Some(options) = self.acp_options.lock().unwrap().get(&agent.source) {
+            return Ok(options.clone());
+        }
+        let scratch = std::env::temp_dir().join(format!("droppen-acp-probe-{}", new_uuid()));
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .map_err(|error| InjectError::Internal(error.to_string()))?;
+        let probed = self.probe(agent, &scratch).await;
+        let _ = tokio::fs::remove_dir_all(&scratch).await;
+        let options = probed?;
+        self.remember_acp_options(agent.source, &options);
+        Ok(options)
+    }
+
+    async fn probe(&self, agent: &'static AcpAgent, scratch: &Path) -> Result<Vec<ConfigOption>, InjectError> {
+        let mut started = start(agent, &self.paths, scratch).await?;
+        let opened = tokio::time::timeout(START_TIMEOUT, started.conn.open(None, scratch)).await;
+        let opened = match opened {
+            Ok(Ok(opened)) => opened,
+            failed => {
+                let reason = match failed {
+                    Ok(Err(error)) => error.to_string(),
+                    _ => format!("{} did not open a session in time", agent.name),
+                };
+                return Err(started.fail(self, agent.name, reason).await);
+            }
+        };
+        started.conn.close_session(&opened.id).await;
+        started.conn.close().await;
+        if tokio::time::timeout(Duration::from_secs(10), started.child.wait()).await.is_err() {
+            let _ = started.child.start_kill();
+        }
+        Ok(opened.options)
+    }
+
+    /// What `source` offers, as a fresh session reports it.
+    pub(super) fn remember_acp_options(&self, source: Source, options: &[ConfigOption]) {
+        if !options.is_empty() {
+            self.acp_options.lock().unwrap().insert(source, options.to_vec());
+        }
+    }
+
+    /// Forget what `source` offers: its settings changed, so the next start
+    /// may run a different configuration.
+    pub fn forget_acp_options(&self, source: Source) {
+        self.acp_options.lock().unwrap().remove(&source);
+    }
+
     pub(super) fn acp_handle(&self, source: Source, id: &str) -> Option<Handle> {
         self.acp_servers.lock().unwrap().get(&self.key_of(source, id)).cloned()
     }
@@ -169,6 +308,14 @@ impl InjectionRegistry {
                 .filter(Handle::alive)
                 .map(|handle| (id.to_string(), handle))
         });
+        // Checked before anything starts, against the session's own options
+        // when it is running and what the agent last offered otherwise: a
+        // refused pick must not leave a new, empty session behind.
+        let offered = match &running {
+            Some((_, handle)) => handle.options(),
+            None => self.acp_options.lock().unwrap().get(&agent.source).cloned().unwrap_or_default(),
+        };
+        check_choice(agent, &offered, message.model.as_deref(), message.effort.as_deref())?;
         let (id, handle) = match running {
             Some(running) => running,
             None => self.acp_spawn(agent, id, cwd).await?,
@@ -227,53 +374,25 @@ impl InjectionRegistry {
             None => None,
         };
         let workdir = claude_workdir(&self.paths, recorded.flatten().as_deref().or(cwd));
-        let launch = (agent.launch)(&self.paths);
-        let mut child = tokio::process::Command::new(&launch.program)
-            .args(&launch.args)
-            .current_dir(&workdir)
-            .env_clear()
-            .envs(&launch.env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|error| {
-                InjectError::message(format!(
-                    "cannot start {name} ({}): {error}. {}",
-                    launch.program.display(),
-                    agent.install_hint
-                ))
-            })?;
-        let stderr = StderrTail::follow(child.stderr.take().expect("piped stderr"));
-        let client = Client::new(workdir.clone(), launch.env.clone());
-        let started = Conn::start(
-            child.stdin.take().expect("piped stdin"),
-            child.stdout.take().expect("piped stdout"),
-            client.clone(),
-        );
-
-        let opened = tokio::time::timeout(START_TIMEOUT, async {
-            let mut conn = started.await?;
-            let opened = conn.open(id, &workdir).await?;
-            Ok::<_, InjectError>((conn, opened))
-        })
-        .await;
-        let (conn, (id, replayed)) = match opened {
+        let mut started = start(agent, &self.paths, &workdir).await?;
+        let opened = match tokio::time::timeout(START_TIMEOUT, started.conn.open(id, &workdir)).await {
             Ok(Ok(opened)) => opened,
             failed => {
                 let reason = match failed {
                     Ok(Err(error)) => error.to_string(),
                     _ => format!("{name} did not open the session in time"),
                 };
-                client.kill_all();
-                let _ = child.start_kill();
-                let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-                let tail = stderr.text();
-                let said = if tail.is_empty() { reason } else { format!("{reason}\n{tail}") };
-                return Err(InjectError::message(self.redact(&format!("cannot start {name}: {said}"))));
+                return Err(started.fail(self, name, reason).await);
             }
         };
+        let new = id.is_none();
+        let id = opened.id;
+        // A new session's options say what a fresh one starts on — the
+        // defaults the composer offers. A reopened one's say what *it* was
+        // switched to, which is nobody else's default.
+        if new {
+            self.remember_acp_options(agent.source, &opened.options);
+        }
 
         let file = transcript_path(&self.paths, agent.source, &id);
         tokio::fs::create_dir_all(self.paths.acp_sessions(agent.source))
@@ -293,7 +412,7 @@ impl InjectionRegistry {
         // wrote down.
         if !has_conversation(&file).await {
             let mut translator = Translator::default();
-            let mut records: Vec<Value> = replayed.iter().flat_map(|update| translator.replayed(update)).collect();
+            let mut records: Vec<Value> = opened.replay.iter().flat_map(|update| translator.replayed(update)).collect();
             records.extend(translator.flush());
             transcript.append(&records).await;
         }
@@ -301,6 +420,7 @@ impl InjectionRegistry {
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = Handle::new(tx);
         self.acp_servers.lock().unwrap().insert(self.key_of(agent.source, &id), handle.clone());
+        let Started { child, stderr, client, conn } = started;
         let driver = Driver {
             registry: self.clone(),
             agent,
@@ -311,10 +431,11 @@ impl InjectionRegistry {
             stderr,
             transcript,
             translator: Translator::default(),
-            state: State::default(),
+            state: State::with_options(opened.options),
             shared: handle.shared(),
             rx,
             interrupted: false,
+            recorded_choice: None,
         };
         tokio::spawn(driver.run());
         Ok((id, handle))
@@ -362,10 +483,6 @@ mod tests {
                 ..SendOptions::default()
             },
             SendOptions {
-                model: Some("gpt-5".into()),
-                ..SendOptions::default()
-            },
-            SendOptions {
                 chat: true,
                 ..SendOptions::default()
             },
@@ -373,6 +490,28 @@ mod tests {
             let error = check_options(agent, &refused).expect_err("refused");
             assert!(error.to_string().contains("Bub"), "the refusal names the agent: {error}");
         }
+    }
+
+    #[test]
+    fn a_model_or_effort_is_checked_against_what_the_agent_offers() {
+        let agent = &crate::bub::AGENT;
+        let offered = crate::acp::config_options(&json!({"configOptions": [
+            {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "a:x",
+             "options": [{"value": "a:x", "name": "X"}, {"value": "a:y", "name": "Y"}]},
+            {"id": "reasoning_effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": "auto",
+             "options": [{"value": "auto", "name": "Auto"}, {"value": "high", "name": "High"}]},
+        ]}));
+        assert!(check_choice(agent, &offered, Some("a:y"), Some("high")).is_ok());
+        assert!(check_choice(agent, &offered, None, None).is_ok());
+        assert!(check_choice(agent, &offered, Some("a:z"), None).is_err());
+        assert!(check_choice(agent, &offered, None, Some("ultra")).is_err());
+        assert!(
+            check_choice(agent, &[], Some("anything"), Some("goes")).is_ok(),
+            "unknown yet: the agent answers"
+        );
+        let model_only = &offered[..1];
+        let refused = check_choice(agent, model_only, None, Some("high")).expect_err("no effort to choose");
+        assert!(refused.to_string().contains("offers no effort"), "{refused}");
     }
 
     #[test]

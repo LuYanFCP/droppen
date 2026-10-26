@@ -2,9 +2,12 @@
 """A bounded, local stand-in for `bub acp`; never talks to a real model.
 
 Speaks the part of ACP Droppen uses: initialize, session/new, session/load,
-session/prompt and session/cancel. Everything it is asked is appended to
-`bub-calls.jsonl` in its working directory, so a test can read what it was
-sent. A prompt containing "wait" holds its turn open until it is cancelled.
+session/set_config_option, session/close, session/prompt and session/cancel.
+Its sessions offer a model and a reasoning effort as configuration options,
+as Bub's do. Everything it is asked is appended to `bub-calls.jsonl` in its
+working directory — or to `$FAKE_BUB_LOG`, which a probe's scratch directory
+needs — so a test can read what it was sent. A prompt containing "wait" holds
+its turn open until it is cancelled.
 """
 import json
 import os
@@ -20,9 +23,25 @@ if sys.argv[1:] != ["acp"]:
 print("bub: loading plugins", flush=True)
 
 cwd = Path.cwd()
-calls = cwd / "bub-calls.jsonl"
+calls = Path(os.environ["FAKE_BUB_LOG"]) if os.environ.get("FAKE_BUB_LOG") else cwd / "bub-calls.jsonl"
 lock = threading.Lock()
 waiting = {}
+
+MODELS = [("fake:small", "Small"), ("openrouter:vendor/big", "Big")]
+EFFORTS = ["auto", "low", "high"]
+# Each session's model and effort, as set_config_option leaves them.
+runtime = {}
+
+
+def config_options(session):
+    current = runtime.setdefault(session, {"model": MODELS[0][0], "reasoning_effort": "auto"})
+    return [
+        {"id": "model", "name": "Model", "category": "model", "type": "select",
+         "currentValue": current["model"], "options": [{"value": v, "name": n} for v, n in MODELS]},
+        {"id": "reasoning_effort", "name": "Reasoning effort", "category": "thought_level", "type": "select",
+         "currentValue": current["reasoning_effort"], "options": [{"value": v, "name": v.title()} for v in EFFORTS]},
+        {"id": "fast", "name": "Fast", "type": "boolean", "currentValue": False},
+    ]
 
 
 def log(entry):
@@ -82,14 +101,29 @@ for raw in sys.stdin:
         if done:
             done.set()
     elif method == "initialize":
-        answer(request, {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}})
+        answer(request, {"protocolVersion": 1, "agentCapabilities": {
+            "loadSession": True, "sessionCapabilities": {"close": {}}}})
     elif method == "session/new":
-        answer(request, {"sessionId": "f00dfeed0123456789abcdef01234567"})
+        session = "f00dfeed0123456789abcdef01234567"
+        runtime.pop(session, None)
+        answer(request, {"sessionId": session, "configOptions": config_options(session)})
+    elif method == "session/set_config_option":
+        session, config, value = params["sessionId"], params["configId"], params["value"]
+        allowed = {"model": [v for v, _ in MODELS], "reasoning_effort": EFFORTS}.get(config)
+        if allowed is None or value not in allowed:
+            emit({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32602, "message": f"invalid {config}: {value}"}})
+        else:
+            config_options(session)
+            runtime[session][config] = value
+            answer(request, {"configOptions": config_options(session)})
+    elif method == "session/close":
+        runtime.pop(params["sessionId"], None)
+        answer(request, {})
     elif method == "session/load":
         session = params["sessionId"]
         update(session, chunk("user_message_chunk", "an old question"))
         update(session, chunk("agent_message_chunk", "an old answer"))
-        answer(request, {})
+        answer(request, {"configOptions": config_options(session)})
     elif method == "session/prompt":
         threading.Thread(target=run_turn, args=(request,), daemon=True).start()
     elif "id" in request:

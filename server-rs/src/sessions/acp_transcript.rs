@@ -26,6 +26,8 @@
 //!   `status` and `output`.
 //! * `compact` — the agent handed its context off to a fresh one.
 //! * `usage` — the context window reading: `used` of `size` tokens.
+//! * `config` — the `model` and `effort` the session runs on from here, written
+//!   when they change.
 //! * `turn_end` — `stopReason`, as ACP spells it; `error` — `message`.
 //!
 //! Every session in an agent's directory was started by this server instance,
@@ -284,7 +286,7 @@ fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<TranscriptItem> 
             }
             // Bookkeeping, not conversation: an agent reports its context usage in
             // the middle of a streamed answer, and it must not split one.
-            "session" | "usage" => {}
+            "session" | "usage" | "config" => {}
             other => {
                 close_run(&mut run, &mut items);
                 match other {
@@ -427,6 +429,22 @@ pub fn spoken_texts(entry: &Map<String, Value>) -> Vec<String> {
         .filter(|text| !text.is_empty())
         .map(|text| vec![text.to_string()])
         .unwrap_or_default()
+}
+
+/// The model and effort the session last ran on: its newest `config` record.
+pub async fn read_cli_choice(file_path: &Path) -> Option<super::CliChoice> {
+    let lines = read_tail_lines(file_path, HEAD_BYTES as u64).await.ok()?;
+    lines.iter().rev().filter_map(|line| try_parse(line)).find_map(|entry| {
+        if entry.get("type").and_then(Value::as_str) != Some("config") {
+            return None;
+        }
+        let field = |key: &str| entry.get(key).and_then(Value::as_str).map(str::to_owned);
+        Some(super::CliChoice {
+            model: Nullable(field("model")),
+            effort: Nullable(field("effort")),
+            at: Nullable(field("timestamp")),
+        })
+    })
 }
 
 /// Whether a transcript records any conversation at all.

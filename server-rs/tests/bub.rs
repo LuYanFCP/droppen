@@ -285,3 +285,148 @@ async fn what_bub_cannot_do_is_refused_before_it_starts() {
     assert_eq!(status, 400);
     server.stop().await;
 }
+
+#[tokio::test]
+async fn models_and_efforts_come_from_the_agent_and_are_set_before_the_turn() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let program = install_fake(home.path());
+    let workdir = home.path().join("work");
+    std::fs::create_dir_all(&workdir).expect("workdir");
+    // A probe runs in a scratch directory that is gone afterwards, so the
+    // stand-in logs where the test can read it.
+    let log = home.path().join("probe-calls.jsonl");
+    let server = TestServer::start_at(home.path(), None).await;
+    let (status, body) = server
+        .json(
+            "PUT",
+            "/api/bub/settings",
+            &json!({"command": program.to_string_lossy(), "env": format!("FAKE_BUB_LOG={}", log.display())}),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let log_calls = || -> Vec<String> {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<Value>(line).expect("call")["method"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect()
+    };
+
+    // The list is the agent's own, read by a probe that leaves no session behind.
+    let models = server.get_json("/api/models?source=bub").await;
+    assert_eq!(models["source"], "cache", "{models:#}");
+    let ids: Vec<&str> = models["models"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["fake:small", "openrouter:vendor/big"]);
+    assert_eq!(models["models"][1]["label"], "Big");
+    assert_eq!(models["models"][0]["efforts"], json!(["auto", "low", "high"]));
+    assert_eq!(models["models"][0]["defaultEffort"], "auto");
+    assert_eq!(
+        log_calls(),
+        vec!["initialize", "session/new", "session/close"],
+        "the probe closes what it opened"
+    );
+
+    // Asked again, it is remembered rather than probed.
+    server.get_json("/api/models?source=bub").await;
+    assert_eq!(log_calls().iter().filter(|m| *m == "initialize").count(), 1);
+
+    // A start that picks both sets both, before the turn.
+    let (status, body) = server
+        .json(
+            "POST",
+            "/api/sessions/new",
+            &json!({"source": "bub", "cwd": workdir, "text": "hi", "model": "openrouter:vendor/big", "effort": "high"}),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let id = serde_json::from_str::<Value>(&body).expect("json")["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    let detail = wait_for(&server, &id, "the first turn", finished).await;
+    assert_eq!(detail["injection"]["state"], "ok", "{detail:#}");
+    assert_eq!(detail["cliChoice"]["model"], "openrouter:vendor/big");
+    assert_eq!(detail["cliChoice"]["effort"], "high");
+    let turn: Vec<(String, String)> = log_calls()
+        .into_iter()
+        .skip(3)
+        .zip(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .skip(3)
+                .map(|line| {
+                    let call: Value = serde_json::from_str(line).unwrap();
+                    call["params"]["configId"].as_str().unwrap_or_default().to_string()
+                })
+                .collect::<Vec<_>>(),
+        )
+        .collect();
+    let methods: Vec<&str> = turn.iter().map(|(method, _)| method.as_str()).collect();
+    assert_eq!(
+        methods,
+        vec![
+            "initialize",
+            "session/new",
+            "session/set_config_option",
+            "session/set_config_option",
+            "session/prompt"
+        ]
+    );
+    assert_eq!((turn[2].1.as_str(), turn[3].1.as_str()), ("model", "reasoning_effort"));
+
+    // Only what changed is set again.
+    let before = log_calls().len();
+    server
+        .json(
+            "POST",
+            &format!("/api/sessions/bub/{id}/message"),
+            &json!({"text": "again", "model": "openrouter:vendor/big", "effort": "low"}),
+        )
+        .await;
+    let detail = wait_for(&server, &id, "the second turn", |d| texts(d).len() >= 4 && finished(d)).await;
+    assert_eq!(detail["cliChoice"]["effort"], "low");
+    assert_eq!(log_calls()[before..], ["session/set_config_option", "session/prompt"]);
+    // A switched session is nobody else's default: a new one still starts on the agent's.
+    let models = server.get_json("/api/models?source=bub").await;
+    assert_eq!(models["models"][0]["defaultEffort"], "auto", "{models:#}");
+
+    // What the agent does not offer is refused before anything is sent.
+    let before = log_calls().len();
+    let (status, body) = server
+        .json(
+            "POST",
+            &format!("/api/sessions/bub/{id}/message"),
+            &json!({"text": "x", "model": "not-a-model"}),
+        )
+        .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(body.contains("not-a-model"), "{body}");
+    let (status, body) = server
+        .json(
+            "POST",
+            &format!("/api/sessions/bub/{id}/message"),
+            &json!({"text": "x", "permission": "auto"}),
+        )
+        .await;
+    assert_ne!(status, 200, "{body}");
+    assert_eq!(log_calls().len(), before);
+
+    // New settings may mean another configuration: the next list is probed afresh.
+    server
+        .json(
+            "PUT",
+            "/api/bub/settings",
+            &json!({"command": program.to_string_lossy(), "env": format!("FAKE_BUB_LOG={}\nFAKE_BUB_MARK=changed", log.display())}),
+        )
+        .await;
+    let initializes = log_calls().iter().filter(|m| *m == "initialize").count();
+    server.get_json("/api/models?source=bub").await;
+    assert_eq!(log_calls().iter().filter(|m| *m == "initialize").count(), initializes + 1);
+    server.stop().await;
+}

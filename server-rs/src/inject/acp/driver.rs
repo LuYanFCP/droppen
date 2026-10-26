@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::client::Client;
 use super::conn::{Conn, Event};
 use super::AcpAgent;
+use crate::acp::{category, option_for, ConfigOption, SessionUpdate};
 use crate::inject::{InjectError, InjectionRegistry, Phase, QueueOutcome, ResidentState, Sent};
 use crate::sessions::acp_transcript::{record, Translator};
 use crate::sessions::{iso8601, Injection, InjectionRunState};
@@ -35,6 +36,15 @@ pub(super) struct State {
     queue: VecDeque<Message>,
     /// The last turn this driver ran, as the session row reports it.
     injection: Option<Injection>,
+    /// The session's configuration options as they stand: what its model and
+    /// effort are, and may be set to.
+    options: Vec<ConfigOption>,
+}
+
+impl State {
+    pub(super) fn with_options(options: Vec<ConfigOption>) -> Self {
+        Self { options, ..Self::default() }
+    }
 }
 
 /// One message on its way to the agent.
@@ -47,6 +57,10 @@ pub(super) struct Message {
     pub(super) prompt: String,
     pub(super) images: Vec<String>,
     pub(super) files: Vec<String>,
+    /// The model the turn is to run on, when the user picked one.
+    pub(super) model: Option<String>,
+    /// The effort it is to run at, when the user picked one.
+    pub(super) effort: Option<String>,
 }
 
 /// What the send path and the routes hold on to.
@@ -63,6 +77,11 @@ impl Handle {
 
     pub(super) fn shared(&self) -> Arc<Mutex<State>> {
         self.shared.clone()
+    }
+
+    /// The session's configuration options as they stand.
+    pub(super) fn options(&self) -> Vec<ConfigOption> {
+        self.shared.lock().unwrap().options.clone()
     }
 
     pub(in crate::inject) fn alive(&self) -> bool {
@@ -211,6 +230,9 @@ pub(super) struct Driver {
     pub(super) rx: mpsc::UnboundedReceiver<Cmd>,
     /// A cancel was sent for the turn in flight.
     pub(super) interrupted: bool,
+    /// The model and effort the transcript last recorded the session running
+    /// on, so a `config` record is written only when they change.
+    pub(super) recorded_choice: Option<(Option<String>, Option<String>)>,
 }
 
 impl Driver {
@@ -235,6 +257,10 @@ impl Driver {
                 event = self.conn.events.recv() => match event {
                     Some(Event::Update(notification)) => {
                         if notification.session_id == self.id {
+                            if let SessionUpdate::ConfigOptionUpdate(update) = &notification.update {
+                                self.options_changed(update.options());
+                                self.publish();
+                            }
                             let records = self.translator.update(&notification.update);
                             if !records.is_empty() {
                                 self.transcript.append(&records).await;
@@ -326,9 +352,27 @@ impl Driver {
                 json!({"text": message.text, "images": message.images, "files": message.files}),
             )])
             .await;
+        if let Err(reason) = self.configure(&message).await {
+            // The turn never starts: the session would have run on a model or
+            // at an effort nobody asked for.
+            self.registry
+                .note_receipt(self.agent.source, &self.id, &message.id, crate::inject::receipts::ReceiptStatus::Failed);
+            let message = self.registry.redact(&reason);
+            self.transcript.append(&[record("error", json!({ "message": message }))]).await;
+            self.start_turn();
+            self.end_turn(Some(message), false);
+            return Ok(());
+        }
+        self.record_choice().await;
         self.conn.prompt(&self.id, message.prompt).await?;
         self.registry
             .note_receipt(self.agent.source, &self.id, &message.id, crate::inject::receipts::ReceiptStatus::Sent);
+        self.start_turn();
+        Ok(())
+    }
+
+    /// Mark a turn as started, on the row and in the mirror.
+    fn start_turn(&mut self) {
         let now = iso8601(SystemTime::now());
         self.interrupted = false;
         self.state.active = true;
@@ -341,7 +385,62 @@ impl Driver {
             finished_at: crate::openapi_ext::Nullable(None),
         });
         self.publish();
+    }
+
+    /// Set the session's model and effort to what the message picked, where
+    /// they differ: one `session/set_config_option` each.
+    async fn configure(&mut self, message: &Message) -> Result<(), String> {
+        let name = self.agent.name;
+        let picks = [
+            (category::MODEL, "model", message.model.as_deref()),
+            (category::THOUGHT_LEVEL, "effort", message.effort.as_deref()),
+        ];
+        for (category, what, wanted) in picks {
+            let Some(wanted) = wanted else { continue };
+            let Some(option) = option_for(&self.state.options, category).cloned() else {
+                return Err(format!("{name} offers no {what} to choose"));
+            };
+            if option.current_value.as_deref() == Some(wanted) {
+                continue;
+            }
+            if !option.accepts(wanted) {
+                return Err(format!("{name} has no {what} \"{wanted}\""));
+            }
+            let options = self
+                .conn
+                .set_config_option(&self.id, &option.id, wanted)
+                .await
+                .map_err(|error| format!("{name} did not switch its {what} to {wanted}: {error}"))?;
+            if options.is_empty() {
+                // An agent that answers without the list: the value it took.
+                if let Some(changed) = self.state.options.iter_mut().find(|candidate| candidate.id == option.id) {
+                    changed.current_value = Some(wanted.to_string());
+                }
+            } else {
+                self.options_changed(options);
+            }
+        }
+        self.publish();
         Ok(())
+    }
+
+    /// The session's options as the agent now reports them.
+    fn options_changed(&mut self, options: Vec<ConfigOption>) {
+        self.state.options = options;
+    }
+
+    /// Write down which model and effort the session runs on, when that is
+    /// news: what the composer shows for a session it reopens.
+    async fn record_choice(&mut self) {
+        let current = |category: &str| option_for(&self.state.options, category).and_then(|option| option.current_value.clone());
+        let choice = (current(category::MODEL), current(category::THOUGHT_LEVEL));
+        if choice == (None, None) || self.recorded_choice.as_ref() == Some(&choice) {
+            return;
+        }
+        self.transcript
+            .append(&[record("config", json!({"model": choice.0, "effort": choice.1}))])
+            .await;
+        self.recorded_choice = Some(choice);
     }
 
     /// The turn in flight ended: say how, in the transcript and on the row.

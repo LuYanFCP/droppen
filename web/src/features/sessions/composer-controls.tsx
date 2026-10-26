@@ -36,6 +36,9 @@ type Source = components["schemas"]["Source"];
  */
 export type CliSource = "claude" | "codex";
 
+/** What the composer holds while an agent's model list is unknown: nothing to send. */
+const NO_MODEL: ModelInfo = { id: "", label: null, efforts: [], defaultEffort: null };
+
 /** Every effort each CLI accepts, for models that publish no list of their own. */
 export const EFFORT_FALLBACK: Record<"claude" | "codex", string[]> = {
   claude: ["low", "medium", "high", "xhigh", "max"],
@@ -439,7 +442,6 @@ export function useComposerChoice(
   // account-free: sending a meaningless id would split one cache entry in two.
   const modelAccount = source === "claude" ? (accountId ?? null) : null;
   const { data: modelData, isError: modelsFailed } = useQuery({
-    enabled: !bub,
     // The account is in the key, not just the query: two accounts publish two
     // lists, and one served out of the other's entry is the bug this fixes.
     queryKey: mq(machine, "models", source, modelAccount),
@@ -449,18 +451,22 @@ export function useComposerChoice(
       })).data,
     staleTime: 5 * 60_000,
   });
-  const catalog = modelData?.models.length ? modelData.models : MODEL_FALLBACK[cli];
+  // An ACP agent's list is the agent's own (its `model` option); there is no
+  // static guess to fall back on, and no list means no pickers at all.
+  const catalog = modelData?.models.length ? modelData.models : bub ? [] : MODEL_FALLBACK[cli];
   // Whether the list on offer describes this machine's CLI or is a static guess.
   // A pending query answers "no": a warning that flashes on every mount is noise
   // about a condition that has not been established yet.
   // `account_env` is as real a list as the cache — it is the model the
   // account's own env block names — so only the static guess is flagged.
   const modelsAreFallback = modelData ? modelData.source === "fallback" : modelsFailed;
-  const {
-    options: models,
-    active: activeModel,
-    custom: modelIsCustom,
-  } = resolveModel(catalog, startingModel(pick("model"), startModel), cli);
+  const resolved = catalog.length
+    ? resolveModel(catalog, startingModel(pick("model"), startModel), cli)
+    : { options: [], active: NO_MODEL, custom: false };
+  // An ACP agent takes only what it published: a stored pick it no longer
+  // offers falls back to its first model rather than becoming a typed-in one.
+  const { options: models, active: activeModel, custom: modelIsCustom } =
+    bub && resolved.custom ? { options: catalog, active: catalog[0]!, custom: false } : resolved;
   const effortOptions = effortsOf(activeModel, cli);
   const storedEffort = pick("effort") ?? "";
   // Null for a model with no ladder, and for a stored rung the current model
@@ -492,16 +498,18 @@ export function useComposerChoice(
   };
 
   if (bub) {
+    // No permission modes, and nothing at all while the agent's list is
+    // unknown: an empty choice is "send none", which the composers leave out
+    // of the request.
     return {
-      models: [],
-      activeModel: { id: "", label: null, efforts: [], defaultEffort: null } satisfies ModelInfo,
+      models,
+      activeModel,
       customModel: null,
-      effortOptions: [],
-      activeEffort: null,
+      effortOptions: models.length ? effortOptions : [],
+      activeEffort: models.length ? activeEffort : null,
       modelsAreFallback: false,
-      pickModel: () => {},
-      setEffort: () => {},
-      // Empty is "send none": the composers leave an empty choice out of the request.
+      pickModel: models.length ? pickModel : () => {},
+      setEffort: (v: string) => save.mutate({ effort: v }),
       activePermission: "",
       setPermission: () => {},
     };
@@ -541,6 +549,7 @@ export function ModelSelect({
   ghost = false,
   className,
   leading,
+  allowCustom = true,
 }: {
   models: ModelInfo[];
   /** The active id; `""` selects `leading`, where a form offers one. */
@@ -553,6 +562,8 @@ export function ModelSelect({
   className?: string;
   /** An entry before the models, e.g. a form's "CLI default". */
   leading?: { value: string; label: string };
+  /** Offer the box a model id can be typed into; off for an agent that takes only what it lists. */
+  allowCustom?: boolean;
 }) {
   const { t } = useTranslation();
   // Null while the box is closed; the draft while it is open, which is why ""
@@ -611,7 +622,8 @@ export function ModelSelect({
     );
   }
 
-  const options = modelOptions(models, customId, { custom: t("custom…"), marker: t("custom") });
+  const listed = modelOptions(models, customId, { custom: t("custom…"), marker: t("custom") });
+  const options = allowCustom ? listed : listed.filter((option) => option.value !== CUSTOM_MODEL);
   return (
     <ComposerSelect
       ghost={ghost}
@@ -657,11 +669,20 @@ export function ComposerChoiceChips({
   account?: ReactNode;
 }) {
   const { t } = useTranslation();
-  // Bub's model, effort and permissions are its own configuration's.
-  if (source === "bub") return null;
+  // An ACP agent (Bub) offers its own models and efforts, and no permission
+  // modes; with its list unknown there is nothing to pick at all.
+  const acp = source === "bub";
+  if (acp && choice.models.length === 0) return null;
   return (
     <>
-      <ModelSelect ghost models={choice.models} value={choice.activeModel.id} customId={choice.customModel} onChange={choice.pickModel} />
+      <ModelSelect
+        ghost
+        models={choice.models}
+        value={choice.activeModel.id}
+        customId={choice.customModel}
+        onChange={choice.pickModel}
+        allowCustom={!acp}
+      />
       <ModelSourceHint fallback={choice.modelsAreFallback} />
       {/* Absent, not disabled, for a model that takes no effort: an empty
           control in a toolbar reads as something that failed to load. */}
@@ -669,7 +690,7 @@ export function ComposerChoiceChips({
         <ComposerSelect ghost label={t("effort")} value={choice.activeEffort} options={choice.effortOptions} onChange={choice.setEffort} />
       )}
       {account}
-      {permission && (
+      {permission && !acp && (
         <ComposerSelect
           ghost
           label={t("permission")}

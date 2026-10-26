@@ -7167,6 +7167,8 @@ mod tests {
             server: crate::sessions::ServerId::local(&paths),
             codex_servers: Mutex::new(HashMap::new()),
             acp_servers: Mutex::new(HashMap::new()),
+            acp_options: Mutex::new(HashMap::new()),
+            acp_probe: tokio::sync::Mutex::new(()),
             runs: Mutex::new(HashMap::new()),
             residents: Mutex::new(HashMap::new()),
             spawn_gate: tokio::sync::Mutex::new(()),

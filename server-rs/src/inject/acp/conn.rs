@@ -28,7 +28,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::client::Client;
 use super::{absolute, InjectError, Replay};
-use crate::acp::{PromptResponse, SessionNotification, PROTOCOL_VERSION};
+use crate::acp::{config_options, ConfigOption, PromptResponse, SessionNotification, PROTOCOL_VERSION};
 
 /// How long a write to the agent's stdin may block.
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -73,11 +73,23 @@ struct Pending {
     prompt: Option<String>,
 }
 
+/// A session [`Conn::open`] created or reopened.
+pub(super) struct Opened {
+    /// Its id.
+    pub(super) id: String,
+    /// The history the agent replayed while reopening it.
+    pub(super) replay: Replay,
+    /// Its configuration options as they stand.
+    pub(super) options: Vec<ConfigOption>,
+}
+
 /// One agent's connection.
 pub(super) struct Conn {
     writer: Writer,
     pending: Arc<Mutex<Pending>>,
     next: AtomicU64,
+    /// The agent can close a session (`session/close`).
+    can_close: bool,
     /// What the agent says; see [`Event`].
     pub(super) events: mpsc::UnboundedReceiver<Event>,
 }
@@ -106,6 +118,7 @@ impl Conn {
             writer,
             pending,
             next: AtomicU64::new(0),
+            can_close: false,
             events,
         })
     }
@@ -134,9 +147,8 @@ impl Conn {
         }
     }
 
-    /// Initialize, then create or reopen the session: its id, and whatever
-    /// history the agent replayed while reopening it.
-    pub(super) async fn open(&mut self, id: Option<&str>, workdir: &Path) -> Result<(String, Replay), InjectError> {
+    /// Initialize, then create or reopen the session.
+    pub(super) async fn open(&mut self, id: Option<&str>, workdir: &Path) -> Result<Opened, InjectError> {
         let init = self
             .call(
                 "initialize",
@@ -147,6 +159,7 @@ impl Conn {
                 }),
             )
             .await?;
+        self.can_close = init["agentCapabilities"]["sessionCapabilities"]["close"].is_object();
         let cwd = absolute(workdir);
         match id {
             None => {
@@ -155,13 +168,17 @@ impl Conn {
                     .as_str()
                     .filter(|id| crate::sessions::acp_transcript::valid_id(id))
                     .ok_or_else(|| InjectError::message("the agent returned no usable session id"))?;
-                Ok((id.to_string(), Vec::new()))
+                Ok(Opened {
+                    id: id.to_string(),
+                    replay: Vec::new(),
+                    options: config_options(&created),
+                })
             }
             Some(id) => {
                 if init["agentCapabilities"]["loadSession"] != json!(true) {
                     return Err(InjectError::message("this agent cannot reopen a session"));
                 }
-                self.call("session/load", json!({"sessionId": id, "cwd": cwd, "mcpServers": []})).await?;
+                let loaded = self.call("session/load", json!({"sessionId": id, "cwd": cwd, "mcpServers": []})).await?;
                 // Every update the replay sent was read before the answer
                 // that ended it, so it is already on the channel.
                 let mut replayed = Vec::new();
@@ -172,7 +189,32 @@ impl Conn {
                         _ => {}
                     }
                 }
-                Ok((id.to_string(), replayed))
+                Ok(Opened {
+                    id: id.to_string(),
+                    replay: replayed,
+                    options: config_options(&loaded),
+                })
+            }
+        }
+    }
+
+    /// Set one configuration option; the session's options as they now stand.
+    pub(super) async fn set_config_option(&self, id: &str, config_id: &str, value: &str) -> Result<Vec<ConfigOption>, InjectError> {
+        let answer = self
+            .call(
+                "session/set_config_option",
+                json!({"sessionId": id, "configId": config_id, "value": value}),
+            )
+            .await?;
+        Ok(config_options(&answer))
+    }
+
+    /// Forget a session, where the agent can: what a probe opened only to read
+    /// its options is not a conversation anybody should find later.
+    pub(super) async fn close_session(&self, id: &str) {
+        if self.can_close {
+            if let Err(error) = self.call("session/close", json!({ "sessionId": id })).await {
+                tracing::debug!(%error, "the agent did not close a probe session");
             }
         }
     }

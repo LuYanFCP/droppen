@@ -422,8 +422,8 @@ pub async fn load_session_state(drive: &Arc<Drive>, source: Source, id: &str) ->
     let cli_choice = match source {
         Source::Claude => claude::read_cli_choice(Path::new(&summary.file_path)).await,
         Source::Codex => codex::read_codex_cli_choice(Path::new(&summary.file_path)).await,
-        // Bub owns its model choice; nothing in its transcript records it.
-        Source::Bub => None,
+        // The `config` record the driver writes when the choice changes.
+        Source::Bub => crate::sessions::acp_transcript::read_cli_choice(Path::new(&summary.file_path)).await,
     };
     let context = match source {
         Source::Claude => crate::sessions::context::read_claude_context(Path::new(&summary.file_path)).await,

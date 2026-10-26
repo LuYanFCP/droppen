@@ -175,9 +175,10 @@ pub async fn bub_settings(State(state): State<AppState>) -> Json<BubSettings> {
 /// running keeps what it was started with.
 #[api(id = "update_bub_settings", group = "bub", summary = "Update the Bub settings")]
 pub async fn update_bub_settings(State(state): State<AppState>, ApiJson(body): ApiJson<BubSettingsUpdate>) -> Result<Json<BubSettings>, ApiError> {
-    update(&state.paths, &body)
-        .map(|stored| Json(stored.info()))
-        .map_err(ApiError::bad_request)
+    let stored = update(&state.paths, &body).map_err(ApiError::bad_request)?;
+    // Another executable or environment may offer other models.
+    state.drive.injections.forget_acp_options(Source::Bub);
+    Ok(Json(stored.info()))
 }
 
 /// Register this module's routes.

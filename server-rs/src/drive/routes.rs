@@ -450,7 +450,12 @@ pub(crate) fn validate_text(text: &str) -> Result<(), String> {
 }
 
 /// Every bound the request schema puts on a send body, as one `400`.
+///
+/// An ACP agent's model ids are held to its own rule
+/// ([`crate::drive::composer_prefs::model_rule`]), and to its own list when
+/// the message is delivered.
 fn validate_body(
+    source: Source,
     text: &str,
     model: Option<&str>,
     effort: Option<&str>,
@@ -458,7 +463,14 @@ fn validate_body(
     account_id: &Option<Option<String>>,
 ) -> Result<(), ApiError> {
     validate_text(text).map_err(ApiError::bad_request)?;
-    validate_flags(model, effort, permission).map_err(ApiError::bad_request)?;
+    let (pattern, max_length) = crate::drive::composer_prefs::model_rule(source);
+    let model_ok = model.is_none_or(|model| {
+        model.chars().count() <= max_length && regex::Regex::new(pattern).expect("valid model pattern").is_match(model)
+    });
+    if !model_ok {
+        return Err(ApiError::bad_request("invalid model"));
+    }
+    validate_flags(None, effort, permission).map_err(ApiError::bad_request)?;
     // `accountId: z.string().uuid().nullable().optional()` — a malformed id is
     // a bad request; a well-formed one that names nothing is a 409 further down.
     if let Some(Some(id)) = account_id {
@@ -485,6 +497,7 @@ fn send_options(model: Option<String>, effort: Option<String>, permission: Optio
 #[api(id = "new_session", group = "sessions", summary = "Start a new session")]
 pub async fn new_session(State(state): State<AppState>, ApiJson(body): ApiJson<NewSession>) -> Result<Json<NewSessionResult>, ApiError> {
     validate_body(
+        body.source,
         &body.text,
         body.model.as_deref(),
         body.effort.as_deref(),
@@ -581,6 +594,7 @@ pub async fn send_message(
     // (`@hono/zod-validator` answers `c.json(result, 400)`), so it is one here.
     // Before the claim, because none of it depends on anything that changes.
     validate_body(
+        source,
         &body.text,
         body.model.as_deref(),
         body.effort.as_deref(),

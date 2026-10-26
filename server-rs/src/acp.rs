@@ -47,6 +47,9 @@ pub enum SessionUpdate {
     ToolCallUpdate(ToolCallUpdate),
     /// How full the context window is.
     UsageUpdate(UsageUpdate),
+    /// The session's configuration options changed: a model switch can bring
+    /// a different set of efforts with it.
+    ConfigOptionUpdate(ConfigOptionUpdate),
     /// Anything else: plans, mode and command lists, session info.
     #[serde(other)]
     Other,
@@ -192,6 +195,128 @@ pub struct UsageUpdate {
     pub size: u64,
 }
 
+/// `config_option_update`: the session's options as they now stand.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigOptionUpdate {
+    /// Every option, not only the ones that changed; read one by one by
+    /// [`ConfigOptionUpdate::options`], so a kind this build skips does not
+    /// cost the rest.
+    #[serde(default)]
+    pub config_options: Vec<Value>,
+}
+
+impl ConfigOptionUpdate {
+    /// The options this build reads.
+    pub fn options(&self) -> Vec<ConfigOption> {
+        self.config_options
+            .iter()
+            .filter_map(|option| serde_json::from_value(option.clone()).ok())
+            .collect()
+    }
+}
+
+/// What a configuration option is for. ACP names a few categories; an agent
+/// may use others, and they are kept as they were spelled.
+pub mod category {
+    /// The model the session runs on.
+    pub const MODEL: &str = "model";
+    /// How hard the model thinks: Droppen's "effort".
+    pub const THOUGHT_LEVEL: &str = "thought_level";
+}
+
+/// One of a session's configuration options, as `session/new`,
+/// `session/load`, `session/set_config_option` and `config_option_update`
+/// report it. Only selects are kept: a boolean option has nothing the composer
+/// offers.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigOption {
+    /// What `session/set_config_option` names it by.
+    pub id: String,
+    /// What the user calls it.
+    #[serde(default)]
+    pub name: String,
+    /// What it is for: [`category::MODEL`], [`category::THOUGHT_LEVEL`], …
+    #[serde(default)]
+    pub category: Option<String>,
+    /// `select`, or a kind this build does not offer.
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    /// The value in force.
+    #[serde(default)]
+    pub current_value: Option<String>,
+    /// What it may be set to, flat or in groups.
+    #[serde(default)]
+    pub options: Option<SelectOptions>,
+}
+
+/// A select's values: a flat list, or a list of named groups.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum SelectOptions {
+    /// One flat list.
+    Flat(Vec<SelectValue>),
+    /// Named groups of values.
+    Grouped(Vec<SelectGroup>),
+}
+
+/// One group of a select's values.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SelectGroup {
+    /// The values in the group.
+    pub options: Vec<SelectValue>,
+}
+
+/// One value a select may take.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SelectValue {
+    /// What is sent.
+    pub value: String,
+    /// What is shown.
+    #[serde(default)]
+    pub name: String,
+}
+
+impl ConfigOption {
+    /// Whether this is the option for `category`, by its category or, for an
+    /// agent that names none, by the id ACP's examples use.
+    pub fn is(&self, wanted: &str) -> bool {
+        match self.category.as_deref() {
+            Some(category) => category == wanted,
+            None => self.id == wanted || (wanted == category::THOUGHT_LEVEL && self.id == "reasoning_effort"),
+        }
+    }
+
+    /// Every value it may take, groups flattened, in the order given.
+    pub fn values(&self) -> Vec<&SelectValue> {
+        match &self.options {
+            Some(SelectOptions::Flat(values)) => values.iter().collect(),
+            Some(SelectOptions::Grouped(groups)) => groups.iter().flat_map(|group| group.options.iter()).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Whether `value` is one it may take.
+    pub fn accepts(&self, value: &str) -> bool {
+        self.values().iter().any(|candidate| candidate.value == value)
+    }
+}
+
+/// The select for `category` among `options`, if the agent offers one.
+pub fn option_for<'a>(options: &'a [ConfigOption], category: &str) -> Option<&'a ConfigOption> {
+    options.iter().find(|option| option.kind == "select" && option.is(category))
+}
+
+/// Read the `configOptions` of an answer, leniently: one this build cannot
+/// read is skipped, not the whole list.
+pub fn config_options(answer: &Value) -> Vec<ConfigOption> {
+    answer["configOptions"]
+        .as_array()
+        .map(|options| options.iter().filter_map(|option| serde_json::from_value(option.clone()).ok()).collect())
+        .unwrap_or_default()
+}
+
 /// The answer to `session/prompt`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -309,6 +434,31 @@ mod tests {
         assert_eq!(call.kind, ToolKind::Other);
         let stop: PromptResponse = serde_json::from_value(json!({"stopReason": "something_new", "usage": {}})).unwrap();
         assert_eq!(stop.stop_reason, StopReason::Other);
+    }
+
+    #[test]
+    fn configuration_options_are_read_flat_or_grouped() {
+        let answer = json!({"configOptions": [
+            {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "a:x",
+             "options": [{"value": "a:x", "name": "X"}, {"value": "openrouter:b/y", "name": "Y"}]},
+            {"id": "reasoning_effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": "auto",
+             "options": [{"group": "g", "name": "G", "options": [{"value": "auto", "name": "Auto"}, {"value": "high", "name": "High"}]}]},
+            {"id": "fast", "name": "Fast", "type": "boolean", "currentValue": false},
+            {"not": "an option"},
+        ]});
+        let options = config_options(&answer);
+        assert_eq!(options.len(), 2, "the boolean and the unreadable one are skipped: {options:?}");
+        let model = option_for(&options, category::MODEL).expect("a model option");
+        assert!(model.accepts("openrouter:b/y"));
+        let effort = option_for(&options, category::THOUGHT_LEVEL).expect("an effort option");
+        assert_eq!(effort.values().iter().map(|v| v.value.as_str()).collect::<Vec<_>>(), vec!["auto", "high"]);
+        assert_eq!(effort.current_value.as_deref(), Some("auto"));
+        let update: SessionUpdate =
+            serde_json::from_value(json!({"sessionUpdate": "config_option_update", "configOptions": answer["configOptions"]})).unwrap();
+        let SessionUpdate::ConfigOptionUpdate(update) = update else {
+            panic!("a config option update")
+        };
+        assert_eq!(update.options(), options, "the same lenient reading");
     }
 
     #[test]

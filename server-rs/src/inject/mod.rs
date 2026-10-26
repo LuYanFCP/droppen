@@ -1157,6 +1157,11 @@ pub struct InjectionRegistry {
     /// The agent process behind each ACP session, keyed [`Self::key_of`];
     /// see [`acp`].
     acp_servers: Mutex<HashMap<String, acp::Handle>>,
+    /// What each ACP agent last said it offers: its model list and effort
+    /// ladder, for the composer; see [`InjectionRegistry::acp_options`].
+    acp_options: Mutex<HashMap<Source, Vec<crate::acp::ConfigOption>>>,
+    /// Serializes probes, so a page asking twice starts one agent, not two.
+    acp_probe: tokio::sync::Mutex<()>,
     runs: Mutex<HashMap<String, Arc<Run>>>,
     /// The resident claude behind each session, keyed by session id alone —
     /// there is no codex resident, so the source is not part of the key.
@@ -1333,6 +1338,8 @@ impl InjectionRegistry {
             server: ServerId::local(&paths),
             codex_servers: Mutex::new(HashMap::new()),
             acp_servers: Mutex::new(HashMap::new()),
+            acp_options: Mutex::new(HashMap::new()),
+            acp_probe: tokio::sync::Mutex::new(()),
             runs: Mutex::new(HashMap::new()),
             residents: Mutex::new(HashMap::new()),
             spawn_gate: tokio::sync::Mutex::new(()),
