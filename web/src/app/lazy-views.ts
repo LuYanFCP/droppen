@@ -22,6 +22,7 @@ const files = () => import("@/features/files/files-view");
 
 export const SessionDetail = lazyRouteComponent(sessionDetail, "SessionDetail");
 export const SessionDetailInner = lazyRouteComponent(sessionDetail, "SessionDetailInner");
+export const SubagentDetail = lazyRouteComponent(() => import("@/features/sessions/subagent-view"), "SubagentDetail");
 export const NewSessionRoute = lazyRouteComponent(newSession, "NewSessionRoute");
 export const NewSessionView = lazyRouteComponent(newSession, "NewSessionView");
 export const ChatHome = lazyRouteComponent(() => import("@/features/chat/chat-home"), "ChatHome");

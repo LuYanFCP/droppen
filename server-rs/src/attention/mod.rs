@@ -354,6 +354,30 @@ pub async fn mark_seen(State(state): State<AppState>, ApiPath((source, id)): Api
     }))
 }
 
+/// Mark one of a session's subagents as read, as of now.
+///
+/// For a subagent that is not a session of its own (Claude's), whose read mark
+/// lives within its parent's: the tree under a session shows it unread until
+/// it, or the session, is opened after it last wrote. A subagent that is a
+/// session (a Codex thread) is marked through the session route.
+#[api(id = "mark_agent_seen", group = "sessions", summary = "Mark a subagent read")]
+pub async fn mark_agent_seen(
+    State(state): State<AppState>,
+    ApiPath(crate::drive::routes::AgentPath { source, id, agent_id }): ApiPath<crate::drive::routes::AgentPath>,
+) -> Result<Json<SeenResult>, ApiError> {
+    if !crate::drive::routes::is_agent_id(&agent_id) {
+        return Err(ApiError::bad_request("invalid agent id"));
+    }
+    let previous = seen::mark(state.paths.as_ref(), source, &crate::sessions::subagents::agent_seen_id(&id, &agent_id))
+        .await
+        .map_err(|error| ApiError::internal(format!("failed to record seen: {error}")))?;
+    state.global.request_refresh(None);
+    Ok(Json(SeenResult {
+        accepted: true,
+        previous_read_at: Nullable(previous),
+    }))
+}
+
 /// What marking a session read answers.
 #[derive(Debug, Clone, Serialize, Deserialize, Schematic)]
 #[serde(rename_all = "camelCase")]
@@ -374,12 +398,20 @@ pub struct SeenResult {
 
 /// Register this subsystem's routes.
 pub fn routes(router: ApiRouter) -> ApiRouter {
-    router.post("/api/sessions/{source}/{id}/seen", mark_seen)
+    router
+        .post("/api/sessions/{source}/{id}/seen", mark_seen)
+        .post("/api/sessions/{source}/{id}/agents/{agentId}/seen", mark_agent_seen)
 }
 
 /// Everything gotcha cannot express about those routes.
 pub fn describe(reg: &mut ExtraResponses) {
-    reg.describe_final("POST", "/api/sessions/{source}/{id}/seen", 200, "The session is now marked read");
+    reg.describe_final("POST", "/api/sessions/{source}/{id}/seen", 200, "The session is now marked read")
+        .describe_final(
+            "POST",
+            "/api/sessions/{source}/{id}/agents/{agentId}/seen",
+            200,
+            "The subagent is now marked read",
+        );
 }
 
 #[cfg(test)]
@@ -478,6 +510,8 @@ mod tests {
             unread: false,
             unread_count: 0,
             asking: false,
+            children: Vec::new(),
+            parent_id: Nullable(None),
         }
     }
 

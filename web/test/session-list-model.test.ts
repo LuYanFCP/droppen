@@ -3,8 +3,10 @@ import test from "node:test";
 import {
   buildDeviceList,
   buildSessionList,
+  childTally,
   collapseKey,
   deviceCollapseKey,
+  expandKey,
   groupKeyOf,
   matchesQuery,
   NO_PROJECT,
@@ -282,4 +284,59 @@ test("several devices' sessions make one list, and one device's is exactly the s
   assert.equal(t1?.type === "session" && t1.dirLabel, "~/app");
   // Rows of different devices never share a key.
   assert.notEqual(rowKey({ type: "session", session: theirs[1]!, dirLabel: null, machine: "m-b" }, LOCAL), key({ type: "session", session: theirs[1]!, dirLabel: null }));
+});
+
+type Child = NonNullable<Session["children"]>[number];
+
+function child(id: string, over: Partial<Child> = {}): Child {
+  return { id, kind: "agent", name: id, role: null, status: "done", updatedAt: "2024-05-01T10:00:00.000Z", unread: false, children: [], ...over };
+}
+
+test("a session's subagents are listed under it only while it is unfolded, each level on its own", () => {
+  const tree = [child("a1", { children: [child("a2", { status: "working", unread: true })] }), child("b1", { status: "failed" })];
+  const sessions = [session({ id: "s", children: tree }), session({ id: "t" })];
+  const folded = buildSessionList(input({ sessions }));
+  assert.deepEqual(folded.rows.map(key), ["local|claude/s", "local|claude/t"], "folded by default");
+  const first = folded.rows[0]!;
+  assert.equal(first.type === "session" && first.expandKey, expandKey("claude", "s"));
+
+  const open = buildSessionList(input({ sessions, expanded: new Set([expandKey("claude", "s")]) }));
+  assert.deepEqual(open.rows.map((r) => (r.type === "child" ? `${r.depth}:${r.child.id}` : r.type)), ["session", "1:a1", "1:b1", "session"]);
+  assert.deepEqual([open.ownedShown, open.ownedTotal], [2, 2], "subagents are not counted as sessions");
+
+  const deep = buildSessionList(input({ sessions, expanded: new Set([expandKey("claude", "s"), expandKey("claude", "s", ["a1"])]) }));
+  assert.deepEqual(deep.rows.map((r) => (r.type === "child" ? `${r.depth}:${r.child.id}` : r.type)), ["session", "1:a1", "2:a2", "1:b1", "session"]);
+  const a2 = deep.rows[2]!;
+  assert.equal(a2.type === "child" && a2.root.id, "s", "however deep, a row knows its session");
+  assert.equal(new Set(deep.rows.map(key)).size, deep.rows.length, "no two rows share a key");
+
+  // An unfold under a folded one is kept, not shown.
+  const hidden = buildSessionList(input({ sessions, expanded: new Set([expandKey("claude", "s", ["a1"])]) }));
+  assert.equal(hidden.rows.length, 2);
+  // Grouped, they follow their session into its directory.
+  const grouped = buildSessionList(input({ sessions, grouped: true, expanded: new Set([expandKey("claude", "s")]) }));
+  assert.deepEqual(grouped.rows.map((r) => r.type), ["header", "session", "child", "child", "session"]);
+});
+
+test("the filter sees sessions, not what they delegated", () => {
+  const sessions = [session({ id: "s", title: "plan", children: [child("a1", { name: "needle" })] })];
+  assert.deepEqual(buildSessionList(input({ sessions, query: "needle" })).rows, []);
+});
+
+test("subagents tally every level, for the folded row", () => {
+  const tree = [
+    child("a1", { status: "working", children: [child("a2", { status: "waiting", unread: true }), child("a3", { status: "failed", unread: true })] }),
+    child("b1"),
+  ];
+  assert.deepEqual(childTally(tree), { total: 4, working: 1, waiting: 1, failed: 1, unread: 2 });
+  assert.deepEqual(childTally([]), { total: 0, working: 0, waiting: 0, failed: 0, unread: 0 });
+});
+
+test("another device's unfolds are keyed by that device", () => {
+  const ours = [session({ id: "s", children: [child("a1")] })];
+  const theirs = [session({ id: "s", children: [child("a1")] })];
+  const lists = [{ machine: LOCAL, rows: ours }, { machine: "m-b", rows: theirs }];
+  const model = buildDeviceList({ lists, home: LOCAL, device: "all", query: "", grouped: false, collapsedDirs: new Set(), expanded: new Set([expandKey("claude", "s", [], "m-b")]) });
+  assert.deepEqual(model.rows.map((r) => (r.type === "child" ? `child:${r.machine}` : `${r.type}:${r.machine}`)), ["session:local", "session:m-b", "child:m-b"]);
+  assert.equal(new Set(model.rows.map(key)).size, model.rows.length);
 });

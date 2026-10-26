@@ -5,6 +5,7 @@ import { activitySortRank } from "@/features/sessions/session-activity";
 
 type SessionSummary = components["schemas"]["SessionSummary"];
 type Source = components["schemas"]["Source"];
+type SessionChild = components["schemas"]["SessionChild"];
 
 /** The group a session with no working directory at all falls into. */
 export const NO_PROJECT = "(no project)";
@@ -29,6 +30,22 @@ export type SessionListRow =
       dirLabel: string | null;
       /** The device it is on, in a list of several devices' (absent: the list's own). */
       machine?: MachineKey;
+      /** What its subagents' fold is remembered under (absent: they are not listed here); see [`expandKey`]. */
+      expandKey?: string;
+      /** Its subagents are listed under it. */
+      isOpen?: boolean;
+    }
+  | {
+      /** A subagent the session above delegated to, or one of that one's own. */
+      type: "child";
+      child: SessionChild;
+      /** The listed session it hangs off, however deep. */
+      root: SessionSummary;
+      /** 1 for the session's own subagents, 2 for theirs, … */
+      depth: number;
+      expandKey: string;
+      isOpen: boolean;
+      machine?: MachineKey;
     };
 
 export interface SessionListInput {
@@ -40,6 +57,8 @@ export interface SessionListInput {
   grouped: boolean;
   /** Groups the user folded away, keyed by [`collapseKey`]. */
   collapsedDirs: ReadonlySet<string>;
+  /** Sessions and subagents whose subagents are listed, keyed by [`expandKey`]; folded by default. */
+  expanded?: ReadonlySet<string>;
   /** Used to shorten a row's own cwd to `~/…` under a repository heading. */
   homeDir: string;
   limit?: number;
@@ -99,10 +118,63 @@ export function collapseKey(dir: string): string {
   return `owned:${dir}`;
 }
 
-/** Stable identity for the virtualizer, on a list of `machine`'s rows (a row naming its own device: that one's); headers and sessions must never collide. */
+/**
+ * What a session's subagents' fold is remembered under, and each subagent's
+ * below it: the session (`claude/<id>`), then the path down to the subagent.
+ * A Claude agent's id is only unique within its session, hence the path rather
+ * than the id alone. Another device's has that device in front, as
+ * [`deviceCollapseKey`] does for its projects.
+ */
+export function expandKey(source: Source, id: string, path: readonly string[] = [], machine: MachineKey | null = null): string {
+  const own = [`${source}/${id}`, ...path].join("/");
+  return machine ? `${machine}|${own}` : own;
+}
+
+/** Stable identity for the virtualizer, on a list of `machine`'s rows (a row naming its own device: that one's); headers, sessions and subagents must never collide. */
 export function rowKey(row: SessionListRow, machine: MachineKey): string {
   if (row.type === "header") return `h:${row.collapseKey}`;
+  if (row.type === "child") return `c:${row.machine ?? machine}|${row.expandKey}`;
   return sessionKey({ machine: row.machine ?? machine, source: row.session.source, id: row.session.id });
+}
+
+const NONE: ReadonlySet<string> = new Set();
+
+/**
+ * A session's row, then, while it is unfolded, its subagents' — each one's own
+ * below it while that one is unfolded too. Nothing about a subagent decides
+ * whether its session is listed: the filter, the pins and the cap all see the
+ * session alone, and its subagents come along under it.
+ */
+function pushSession(
+  rows: SessionListRow[],
+  session: SessionSummary,
+  dirLabel: string | null,
+  expanded: ReadonlySet<string>,
+  machine?: MachineKey,
+  /** Another device's (its folds are its own). */
+  remote: MachineKey | null = null,
+): void {
+  const key = expandKey(session.source, session.id, [], remote);
+  const isOpen = expanded.has(key);
+  rows.push({ type: "session", session, dirLabel, expandKey: key, isOpen, ...(machine ? { machine } : {}) });
+  if (isOpen) pushChildren(rows, session, session.children ?? [], 1, key, expanded, machine);
+}
+
+function pushChildren(
+  rows: SessionListRow[],
+  root: SessionSummary,
+  children: readonly SessionChild[],
+  depth: number,
+  parentKey: string,
+  expanded: ReadonlySet<string>,
+  machine?: MachineKey,
+): void {
+  for (const child of children) {
+    const key = `${parentKey}/${child.id}`;
+    const isOpen = expanded.has(key);
+    rows.push({ type: "child", child, root, depth, expandKey: key, isOpen, ...(machine ? { machine } : {}) });
+    if (isOpen) pushChildren(rows, root, child.children, depth + 1, key, expanded, machine);
+  }
 }
 
 /**
@@ -131,10 +203,9 @@ function pushRows(
   sessions: readonly SessionSummary[],
   input: SessionListInput,
 ): void {
+  const expanded = input.expanded ?? NONE;
   if (!input.grouped) {
-    for (const session of sessions) {
-      rows.push({ type: "session", session, dirLabel: dirLabelFor(session, false, input.homeDir) });
-    }
+    for (const session of sessions) pushSession(rows, session, dirLabelFor(session, false, input.homeDir), expanded);
     return;
   }
   const groups = new Map<string, SessionSummary[]>();
@@ -149,9 +220,7 @@ function pushRows(
     const isOpen = !input.collapsedDirs.has(key);
     rows.push({ type: "header", dir, collapseKey: key, list, isOpen });
     if (!isOpen) continue;
-    for (const session of list) {
-      rows.push({ type: "session", session, dirLabel: dirLabelFor(session, true, input.homeDir) });
-    }
+    for (const session of list) pushSession(rows, session, dirLabelFor(session, true, input.homeDir), expanded);
   }
 }
 
@@ -187,7 +256,7 @@ export function buildSessionList(input: SessionListInput): SessionListModel {
 
   const rows: SessionListRow[] = [];
   for (const session of shown.filter((s) => s.pinned)) {
-    rows.push({ type: "session", session, dirLabel: dirLabelFor(session, input.grouped, input.homeDir) });
+    pushSession(rows, session, dirLabelFor(session, input.grouped, input.homeDir), input.expanded ?? NONE);
   }
   pushRows(rows, shown.filter((s) => !s.pinned), input);
 
@@ -213,6 +282,8 @@ export interface DeviceListInput {
   query: string;
   grouped: boolean;
   collapsedDirs: ReadonlySet<string>;
+  /** As in [`SessionListInput`]; another device's keys carry it in front ([`expandKey`]). */
+  expanded?: ReadonlySet<string>;
   limit?: number;
 }
 
@@ -254,12 +325,12 @@ export function buildDeviceList(input: DeviceListInput): SessionListModel {
   const rows: SessionListRow[] = [];
   const label = (t: { machine: MachineKey; session: SessionSummary }, grouped: boolean) =>
     dirLabelFor(t.session, grouped, homeDirs.get(t.machine) ?? "");
-  for (const t of shown.filter((t) => t.session.pinned)) {
-    rows.push({ type: "session", session: t.session, dirLabel: label(t, input.grouped), machine: t.machine });
-  }
+  const push = (t: { machine: MachineKey; session: SessionSummary }, grouped: boolean) =>
+    pushSession(rows, t.session, label(t, grouped), input.expanded ?? NONE, t.machine, t.machine === input.home ? null : t.machine);
+  for (const t of shown.filter((t) => t.session.pinned)) push(t, input.grouped);
   const rest = shown.filter((t) => !t.session.pinned);
   if (!input.grouped) {
-    for (const t of rest) rows.push({ type: "session", session: t.session, dirLabel: label(t, false), machine: t.machine });
+    for (const t of rest) push(t, false);
   } else {
     const groups = new Map<string, { machine: MachineKey; dir: string; items: typeof rest }>();
     for (const t of rest) {
@@ -274,8 +345,33 @@ export function buildDeviceList(input: DeviceListInput): SessionListModel {
       const isOpen = !input.collapsedDirs.has(key);
       rows.push({ type: "header", dir, collapseKey: key, list: items.map((t) => t.session), isOpen, machine });
       if (!isOpen) continue;
-      for (const t of items) rows.push({ type: "session", session: t.session, dirLabel: label(t, true), machine: t.machine });
+      for (const t of items) push(t, true);
     }
   }
   return { rows, ownedShown: shown.length, ownedTotal: ordered.length };
+}
+
+/** What a session's subagents are up to, every level of them, for its folded row. */
+export interface ChildTally {
+  total: number;
+  working: number;
+  waiting: number;
+  failed: number;
+  unread: number;
+}
+
+export function childTally(children: readonly SessionChild[]): ChildTally {
+  const out: ChildTally = { total: 0, working: 0, waiting: 0, failed: 0, unread: 0 };
+  const visit = (list: readonly SessionChild[]) => {
+    for (const child of list) {
+      out.total += 1;
+      if (child.status === "working") out.working += 1;
+      else if (child.status === "waiting") out.waiting += 1;
+      else if (child.status === "failed") out.failed += 1;
+      if (child.unread) out.unread += 1;
+      visit(child.children);
+    }
+  };
+  visit(children);
+  return out;
 }

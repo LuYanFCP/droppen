@@ -1368,7 +1368,7 @@ pub(crate) async fn first_unread_of(
 }
 
 /// Whether an agent id can name a file next to a transcript.
-fn is_agent_id(id: &str) -> bool {
+pub(crate) fn is_agent_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
 }
 

@@ -524,6 +524,16 @@ export const zhTW: Record<string, string> = {
   "this subagent was stopped": "這個子代理被中止了",
   "no result and nothing is minding it any more — how this subagent ended is unknown":
     "沒有結果，也沒人還在看著它 — 這個子代理最後怎麼樣了，無從得知",
+  /* a session's subagents, in the list and on their own page */
+  "{{n}} subagents": "{{n}} 個子代理",
+  "{{n}} subagents working": "{{n}} 個子代理工作中",
+  "{{n}} subagents asking you": "{{n}} 個子代理在問你",
+  "{{n}} subagents unread": "{{n}} 個子代理未讀",
+  "not read yet": "未讀",
+  "this subagent is still running": "這個子代理還在執行",
+  "this subagent is waiting for your answer": "這個子代理在等你回答",
+  "subagent of": "子代理，來自",
+  "back to {{name}}": "返回 {{name}}",
   "reported on the card that launched it, above": "上面發起它的卡片已經寫了結果",
   /* what the CLI's progress stream says a background child is doing */
   "the tool it is running now": "它目前正在跑的工具",

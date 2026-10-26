@@ -264,6 +264,8 @@ pub async fn summarize_file(file_path: &Path, id: &str, root: ClaudeRoot) -> std
         unread_count: 0,
         // Live status, applied by the callers below with `status`.
         asking: false,
+        children: Vec::new(),
+        parent_id: Nullable(None),
     };
     remember(file_path, mtime, &summary);
     // Both tiers hold the row *before* the overlays — ownership, live status,
