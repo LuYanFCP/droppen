@@ -22,8 +22,10 @@
 /* "Drafting sheet" (docs/ui-spec.md): one ink on white
    paper, 1px hairlines, and colour kept for state signals only. Token names are
    unchanged — tests and ~1500 class names use them — only their values moved.
-   `panel` equals `bg` (regions are separated by lines, not tinted panels) and
-   `accent` equals `fg` (there is no blue: focus and primary actions are ink). */
+   The ink is the dark theme's canvas (#1a1e23), so the two themes are inverses
+   rather than black vs white; `panel` equals `bg` (regions are separated by
+   lines, not tinted panels) and `accent` equals `fg` (there is no blue: focus
+   and primary actions are ink). */
 @theme {
   --color-bg: #ffffff;
   --color-panel: #ffffff;
@@ -31,18 +33,18 @@
   --color-hover: #f0f0f0;
   --color-border: #e5e5e5;
   --color-border-strong: #a3a3a3;
-  --color-fg: #0a0a0a;
+  --color-fg: #1a1e23;
   --color-muted: #666666;
   --color-faint: #8f8f8f;
-  --color-mark: #0a0a0a;
-  --color-accent: #0a0a0a;
+  --color-mark: #1a1e23;
+  --color-accent: #1a1e23;
   --color-ok: #128a3c;
   /* "Asking you": the one coloured fill. Ink text on it in both themes. */
   --color-warn: #f2a20c;
   --color-warn-fg: #8f5600;
   --color-danger: #d42a1f;
   /* Text on a signal fill (the amber "asking you" chip): ink in both themes. */
-  --color-on-signal: #0a0a0a;
+  --color-on-signal: #1a1e23;
   /* The security page's formulas (security/formula.tsx): a token's kind,
      always with a weight or an underline style beside the hue. Checked for
      colour-vision deficiency and for text contrast, in both themes. */
@@ -51,7 +53,7 @@
   --color-key-public: #047857;
   /* Unread is ink — a solid square, the second loudest thing after asking —
      so a count never reads as working (ok) or asking (warn). */
-  --color-unread: #0a0a0a;
+  --color-unread: #1a1e23;
   /* Sources are told apart by their words, not by a tint. */
   --color-claude: #666666;
   --color-codex: #666666;
