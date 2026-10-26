@@ -726,7 +726,7 @@ pub async fn session_questions(
 ) -> Result<Json<SessionQuestions>, ApiError> {
     let questions = match source {
         Source::Claude => state.drive.injections.questions().for_session(&id, questions::now_ms()),
-        Source::Codex => Vec::new(),
+        Source::Codex | Source::Bub => Vec::new(),
     };
     Ok(Json(SessionQuestions { questions }))
 }
@@ -1055,11 +1055,9 @@ pub(crate) fn external_session(source: Source) -> ApiError {
 /// an unread badge that could not be cleared would make that browsing worse
 /// rather than safer.
 pub(crate) async fn writable_session(drive: &crate::drive::Drive, source: Source, id: &str) -> Result<crate::sessions::SessionSummary, ApiError> {
-    let mut summary = match source {
-        Source::Claude => claude::load_claude_summary(&drive.paths, id).await,
-        Source::Codex => codex::find_codex_session(&drive.paths, id).await,
-    }
-    .ok_or_else(|| ApiError::not_found("session not found"))?;
+    let mut summary = crate::sessions::find_summary(&drive.paths, source, id)
+        .await
+        .ok_or_else(|| ApiError::not_found("session not found"))?;
     // The raw loaders only know the transcript. Apply the same driver snapshot
     // as the list and detail paths before a mutating route decides from this
     // row; in particular, a reaped Codex run outranks the stale `task_started`
@@ -1236,6 +1234,13 @@ pub async fn archive_session(State(state): State<AppState>, ApiPath((source, id)
                 .await
                 .map_err(|error| ApiError::conflict(error.to_string()))?;
         }
+        Source::Bub => {
+            drive
+                .injections
+                .archive_acp(source, &id)
+                .await
+                .map_err(|error| ApiError::conflict(error.to_string()))?;
+        }
     }
     // An archived session leaves the list, so nothing is named to wait for.
     state.global.request_refresh(None);
@@ -1326,6 +1331,9 @@ async fn whole_transcript(drive: &crate::drive::Drive, source: Source, id: &str)
         // A database row, and a status read of one 64 KiB tail for a recent
         // rollout only: cheap enough not to need a lookup of its own.
         Source::Codex => codex::find_codex_session(&drive.paths, id)
+            .await
+            .map(|summary| PathBuf::from(summary.file_path)),
+        Source::Bub => crate::sessions::acp_transcript::find_session(&drive.paths, source, id)
             .await
             .map(|summary| PathBuf::from(summary.file_path)),
     }

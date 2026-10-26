@@ -8,7 +8,7 @@ import { shortenHome } from "@/lib/format";
 import type { MachineKey } from "@/lib/machines/key";
 import { readMachineItem, removeMachineItem, writeMachineItem, type KeyValueStorage } from "@/lib/machines/storage";
 import type { StoredAttachment } from "./composer-box";
-import type { CreationAttempt, SessionSource } from "./new-session-flow";
+import { isSessionSource, type CreationAttempt, type SessionSource } from "./new-session-flow";
 
 type SessionSummary = Pick<components["schemas"]["SessionSummary"], "cwd" | "createdAt" | "updatedAt">;
 
@@ -173,7 +173,7 @@ export function readNewSessionDraft(storage: KeyValueStorage, machine: MachineKe
     return {
       text: isString(stored.text) ? stored.text : "",
       attachments: readAttachments(stored.attachments),
-      source: stored.source === "codex" ? "codex" : "claude",
+      source: isSessionSource(stored.source) ? stored.source : "claude",
       cwd: isString(stored.cwd) ? stored.cwd : null,
       account: isString(stored.account) ? stored.account : null,
       attempt: attempt && isString(attempt.key) && isString(attempt.clientMessageId) ? { key: attempt.key, clientMessageId: attempt.clientMessageId } : null,

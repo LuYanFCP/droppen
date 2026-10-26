@@ -914,4 +914,10 @@ export const ja: Record<string, string> = {
   "Droppen {{version}} is ready · restart to update": "新しい Droppen {{version}} の準備ができました · 再起動してアップデート",
   "restart": "再起動",
   "no room beside the returned message's attachments (at most {{max}}), so these were taken out: {{names}}": "戻されたメッセージの添付を戻すと空きがなくなったため（最大 {{max}} 個）、次の添付を外しました：{{names}}",
+  // Settings → Bub (`features/settings/settings-view.tsx`).
+  "Droppen runs Bub through its ACP server; install it into Bub's environment with `bub install bub-acp-server@main`.": "Droppen は Bub を ACP サーバー経由で動かします。`bub install bub-acp-server@main` で Bub の環境にインストールしてください。",
+  "executable": "実行ファイル",
+  "environment (one KEY=VALUE per line)": "環境変数（1 行に 1 つの KEY=VALUE）",
+  "· saved: {{names}} (a new block replaces them all)": "· 保存済み：{{names}}（新しい内容ですべて置き換えます）",
+  "clear variables": "変数を消去",
 };

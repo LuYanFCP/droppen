@@ -640,6 +640,8 @@ async fn parse_file(path: &Path, source: Source) -> std::io::Result<Vec<UsageRow
         match source {
             Source::Claude => fold_claude(&mut rows, &entry),
             Source::Codex => codex.fold(&mut rows, &entry),
+            // Bub reports no per-model token counts this server can price.
+            Source::Bub => {}
         }
     }
     Ok(rows.rows)

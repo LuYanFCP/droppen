@@ -529,6 +529,7 @@ fn response_overrides() -> ExtraResponses {
     crate::apps::describe(&mut reg);
     crate::attention::describe(&mut reg);
     crate::auth::describe(&mut reg);
+    crate::bub::describe(&mut reg);
     crate::chats::describe(&mut reg);
     cloud::describe(&mut reg);
     crate::drive::describe(&mut reg);
@@ -561,6 +562,7 @@ pub fn routes(router: ApiRouter) -> ApiRouter {
     let router = crate::apps::routes(router);
     let router = crate::attention::routes(router);
     let router = crate::auth::routes(router);
+    let router = crate::bub::routes(router);
     let router = crate::chats::routes(router);
     let router = cloud::routes(router);
     let router = crate::aggregator::gateway::routes(router);

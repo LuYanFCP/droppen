@@ -71,6 +71,7 @@
 pub use gotcha::{GotchaError, GotchaResult};
 
 pub mod accounts;
+pub mod acp;
 pub mod agent;
 pub mod aggregator;
 pub mod api;
@@ -78,6 +79,7 @@ pub mod app;
 pub mod apps;
 pub mod attention;
 pub mod auth;
+pub mod bub;
 pub mod chats;
 pub mod claude_roots;
 pub mod config;

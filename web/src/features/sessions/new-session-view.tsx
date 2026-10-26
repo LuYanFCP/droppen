@@ -83,10 +83,10 @@ import {
   type NewSessionPrefill,
   type RecentDirectory,
 } from "./new-session";
-import type { CreationAttempt, NewConversation, SessionSource } from "./new-session-flow";
+import { isSessionSource, type CreationAttempt, type NewConversation, type SessionSource } from "./new-session-flow";
 import { useCreateConversation, type AcceptedConversation } from "./use-create-conversation";
 
-const SOURCES: SessionSource[] = ["claude", "codex"];
+const SOURCES: SessionSource[] = ["claude", "codex", "bub"];
 
 /** A message on its way to becoming a session's first. */
 interface Starting {
@@ -175,8 +175,10 @@ export function NewSessionView({
   const tabStop = onScreen.includes(cwd) ? cwd : (onScreen[0] ?? null);
 
   const { data: accountList } = useAccounts();
-  // Each CLI runs under its own accounts: a Claude login cannot start a Codex session.
-  const accounts = accountsForProvider(accountList?.accounts ?? [], source);
+  // Each CLI runs under its own accounts: a Claude login cannot start a Codex
+  // session. Bub runs on its own configuration and has none.
+  const bub = source === "bub";
+  const accounts = bub ? [] : accountsForProvider(accountList?.accounts ?? [], source);
   // Untouched, the picker shows where the server will start a session that
   // names no account — the default (moved off a rest), the local login, or,
   // while that is signed out and nobody chose it, an account in the
@@ -191,7 +193,7 @@ export function NewSessionView({
   // The draft keeps the account across starts, so a local login picked weeks
   // ago, while it still worked, would otherwise go on deciding every session
   // after it stopped. Picked here and now, it is honoured — and labelled.
-  const localSignedOutNow = localLoginSignedOut(localLoginOf(accountList, source));
+  const localSignedOutNow = !bub && localLoginSignedOut(localLoginOf(accountList, source));
   const staleLocalPick = accountChoice === "" && !accountPickedHere && localSignedOutNow;
   // `null` is untouched; "" the local login, picked; an id an account, picked.
   const picked = staleLocalPick ? null : accountChoice;
@@ -246,7 +248,7 @@ export function NewSessionView({
     permission: choice.activePermission, images, files,
     // Only a pick is sent; untouched, the server's start rule decides — unless
     // the pair shown is one no model-less start reaches, which has to be named.
-    ...(picked !== null
+    ...(bub ? {} : picked !== null
       ? { accountId: picked || null }
       : startAccount?.placed === false
         ? { accountId: startAccount.accountId ?? null, accountFrom: "start" as const }
@@ -530,7 +532,7 @@ export function NewSessionView({
               <ComposerChoiceChips
                 source={source}
                 choice={choice}
-                account={accounts.length > 0 && (
+                account={!bub && accounts.length > 0 && (
                   <AccountPicker
                     ghost
                     accounts={accounts}
@@ -853,7 +855,7 @@ export interface OpenNewSession {
   cwd?: string;
   /** A first message, put in the composer in place of what was typed there; nothing is sent until the person sends it. */
   draft?: string;
-  /** The agent, claude or codex. */
+  /** The agent: claude, codex or bub. */
   source?: SessionSource;
 }
 
@@ -917,7 +919,7 @@ export interface NewSessionSearch {
   cwd?: string;
   /** A first message to fill in (not sent). */
   draft?: string;
-  /** The agent: claude or codex. */
+  /** The agent: claude, codex or bub. */
   agent?: SessionSource;
 }
 
@@ -925,7 +927,7 @@ export function validateNewSessionSearch(search: Record<string, unknown>): NewSe
   return {
     cwd: typeof search.cwd === "string" && search.cwd ? search.cwd : undefined,
     draft: typeof search.draft === "string" ? search.draft : undefined,
-    agent: search.agent === "claude" || search.agent === "codex" ? search.agent : undefined,
+    agent: isSessionSource(search.agent) ? search.agent : undefined,
   };
 }
 

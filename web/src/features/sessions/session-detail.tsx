@@ -1451,7 +1451,7 @@ function Composer({
   onQueueChanged,
   onOpenSession,
 }: {
-  source: "claude" | "codex";
+  source: Source;
   id: string;
   detail: FeedState;
   /** The feed's draft store: what the agent is doing that the transcript does not show. */
@@ -1532,7 +1532,9 @@ function Composer({
   const deliveryQueue = useMemo(() => detail.summary.resident?.queuedMessages ?? [], [detail.summary.resident]);
   const delivery = useDeliveryPreviews(sessionKey(session), {
     items: detail.items, startIndex: detail.startIndex, totalItems: detail.totalItems, queue: deliveryQueue,
-    receipts: detail.receipts, adoptQueue: source === "codex",
+    // Codex and Bub write every queued message into the transcript when it
+    // runs; claude folds a steered one into its turn without an echo.
+    receipts: detail.receipts, adoptQueue: source !== "claude",
   }, true);
   // Every message carries the id it was created with (`clientMessageId`), so a
   // retry of one the server already has is answered, not run again — see
@@ -1557,11 +1559,13 @@ function Composer({
             text: message.text,
             ...(message.images?.length ? { images: message.images } : {}),
             ...(message.files?.length ? { files: message.files } : {}),
-            model: activeModel.id,
+            // Omitted when empty: Bub chooses its own model and has no
+            // permission modes, and refuses a message that names either.
+            ...(activeModel.id ? { model: activeModel.id } : {}),
             // Omitted, not null: a model with no effort ladder refuses `--effort`
             // outright, and the flag is only built when a value is present.
             ...(activeEffort ? { effort: activeEffort } : {}),
-            permission: activePermission,
+            ...(activePermission ? { permission: activePermission } : {}),
             clientMessageId: message.clientMessageId,
           },
           signal: timeoutSignal(),
@@ -2742,13 +2746,15 @@ export function SessionDetailInner({
         metadata={<>
           {readOnly && !paneActions && <DeviceChip machine={machine} />}
           {chat ? (
-            <Badge variant={summary.source} className="shrink-0">
+            // An instant chat is Claude's or Codex's; Bub has none.
+            <Badge variant={summary.source === "bub" ? "default" : summary.source} className="shrink-0">
               {t("chat")}
             </Badge>
           ) : (
             <SourceIcon source={summary.source} className="text-muted" />
           )}
-          {!readOnly && (
+          {/* Bub runs on its own configuration: there is no account to show or bind. */}
+          {!readOnly && summary.source !== "bub" && (
             <SessionAccountBadge
               source={summary.source}
               id={id}
@@ -3006,7 +3012,7 @@ export function SessionDetailInner({
       </div>
       <Composer
         key={`${source}/${id}`}
-        source={source as "claude" | "codex"}
+        source={source as Source}
         id={id}
         detail={data}
         drafts={drafts}

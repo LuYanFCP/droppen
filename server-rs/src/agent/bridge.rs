@@ -304,6 +304,9 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = {
         ("GET", "/api/chat-provider", Use),
         ("PUT", "/api/chat-provider", Posture),
         ("GET", "/api/chat-provider/models", Use),
+        // Which binary runs as Bub, and with what in its environment.
+        ("GET", "/api/bub/settings", Use),
+        ("PUT", "/api/bub/settings", Posture),
         ("GET", "/api/fs/list", Use),
         ("GET", "/api/fs/read", Use),
         ("GET", "/api/fs/download", Use),
@@ -994,6 +997,8 @@ mod tests {
             ("head", "/api/accounts/setup-token/c-1"),
             ("PUT", "/api/notify/config"),
             ("PUT", "/api/chat-provider"),
+            // It names the program Bub sessions run.
+            ("PUT", "/api/bub/settings"),
             ("POST", "/api/push/subscriptions"),
             ("GET", "/api/push/vapid"),
             ("POST", "/rh/machine-key"),

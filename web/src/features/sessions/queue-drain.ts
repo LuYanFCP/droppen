@@ -92,7 +92,7 @@ export function injectionFailurePausesQueue(
 
 /** The action the head of this tab's queue can take right now. */
 export function localQueueHeadAction(input: {
-  source: "claude" | "codex";
+  source: "claude" | "codex" | "bub";
   canSend: boolean;
   injectionRunning: boolean;
   sending: boolean;

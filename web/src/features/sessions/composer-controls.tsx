@@ -27,6 +27,14 @@ type ModelInfo = components["schemas"]["ModelInfo"];
 type ComposerChoice = components["schemas"]["ComposerChoice"];
 type ComposerPrefs = components["schemas"]["ComposerPrefs"];
 type CliChoice = components["schemas"]["CliChoice"];
+type Source = components["schemas"]["Source"];
+
+/**
+ * The agents whose model, effort, permission and account a composer chooses.
+ * Bub chooses all four from its own configuration, so a Bub composer offers
+ * none of them and sends none of them.
+ */
+export type CliSource = "claude" | "codex";
 
 /** Every effort each CLI accepts, for models that publish no list of their own. */
 export const EFFORT_FALLBACK: Record<"claude" | "codex", string[]> = {
@@ -325,10 +333,12 @@ export function useComposerDefaultModel(source: "claude" | "codex"): string | nu
  * Either way the start, sent with the composer's model and no account, lands
  * on the login shown.
  */
-export function useComposerStart(source: "claude" | "codex") {
-  const stored = useComposerDefaultModel(source);
+export function useComposerStart(source: Source) {
+  const cli: CliSource = source === "bub" ? "claude" : source;
+  const stored = useComposerDefaultModel(cli);
   const named = stored && isSendable(stored) ? stored : null;
-  return useStartAccount(source, named, !named);
+  // Bub has no accounts: nothing to ask the server where a start would land.
+  return useStartAccount(cli, named, !named, source !== "bub");
 }
 
 /**
@@ -351,7 +361,7 @@ export function useComposerStart(source: "claude" | "codex") {
  * session bound to an account.
  */
 export function useComposerChoice(
-  source: "claude" | "codex",
+  source: Source,
   scope?: string,
   cliChoice?: CliChoice | null,
   accountId?: string | null,
@@ -362,6 +372,10 @@ export function useComposerChoice(
   const machine = useMachine();
   const queryClient = useQueryClient();
   const prefsKey = scope ? `${source}/${scope}` : null;
+  // Bub chooses nothing here (see `CliSource`); the hooks below still run, as
+  // hooks must, against a stand-in that is never shown or sent.
+  const bub = source === "bub";
+  const cli: CliSource = bub ? "codex" : source;
 
   const { data: prefs } = useQuery({
     queryKey: mq(machine, "composer-prefs"),
@@ -425,6 +439,7 @@ export function useComposerChoice(
   // account-free: sending a meaningless id would split one cache entry in two.
   const modelAccount = source === "claude" ? (accountId ?? null) : null;
   const { data: modelData, isError: modelsFailed } = useQuery({
+    enabled: !bub,
     // The account is in the key, not just the query: two accounts publish two
     // lists, and one served out of the other's entry is the bug this fixes.
     queryKey: mq(machine, "models", source, modelAccount),
@@ -434,7 +449,7 @@ export function useComposerChoice(
       })).data,
     staleTime: 5 * 60_000,
   });
-  const catalog = modelData?.models.length ? modelData.models : MODEL_FALLBACK[source];
+  const catalog = modelData?.models.length ? modelData.models : MODEL_FALLBACK[cli];
   // Whether the list on offer describes this machine's CLI or is a static guess.
   // A pending query answers "no": a warning that flashes on every mount is noise
   // about a condition that has not been established yet.
@@ -445,8 +460,8 @@ export function useComposerChoice(
     options: models,
     active: activeModel,
     custom: modelIsCustom,
-  } = resolveModel(catalog, startingModel(pick("model"), startModel), source);
-  const effortOptions = effortsOf(activeModel, source);
+  } = resolveModel(catalog, startingModel(pick("model"), startModel), cli);
+  const effortOptions = effortsOf(activeModel, cli);
   const storedEffort = pick("effort") ?? "";
   // Null for a model with no ladder, and for a stored rung the current model
   // does not accept: the effort follows the model rather than outliving it.
@@ -455,13 +470,13 @@ export function useComposerChoice(
     : defaultEffortOf(activeModel, effortOptions);
   const storedPermission = pick("permission") ?? "";
   // Stored values from an older option set fall back to the safe default.
-  const activePermission = PERMISSION_OPTIONS[source].includes(storedPermission)
+  const activePermission = PERMISSION_OPTIONS[cli].includes(storedPermission)
     ? storedPermission
-    : PERMISSION_DEFAULT[source];
+    : PERMISSION_DEFAULT[cli];
 
   const pickModel = (id: string) => {
     const next = models.find((m) => m.id === id);
-    const opts = effortsOf(next, source);
+    const opts = effortsOf(next, cli);
     const patch: ComposerChoice = { model: id };
     // Efforts do not carry across models: `xhigh` is a rung opus-4-6 never had,
     // and sending it would be refused. Converge on what the new model names.
@@ -476,6 +491,21 @@ export function useComposerChoice(
     save.mutate(patch);
   };
 
+  if (bub) {
+    return {
+      models: [],
+      activeModel: { id: "", label: null, efforts: [], defaultEffort: null } satisfies ModelInfo,
+      customModel: null,
+      effortOptions: [],
+      activeEffort: null,
+      modelsAreFallback: false,
+      pickModel: () => {},
+      setEffort: () => {},
+      // Empty is "send none": the composers leave an empty choice out of the request.
+      activePermission: "",
+      setPermission: () => {},
+    };
+  }
   return {
     models,
     activeModel,
@@ -620,13 +650,15 @@ export function ComposerChoiceChips({
   permission = true,
   account,
 }: {
-  source: "claude" | "codex";
+  source: Source;
   choice: ReturnType<typeof useComposerChoice>;
   /** Instant chats run without tools: no permission to pick. */
   permission?: boolean;
   account?: ReactNode;
 }) {
   const { t } = useTranslation();
+  // Bub's model, effort and permissions are its own configuration's.
+  if (source === "bub") return null;
   return (
     <>
       <ModelSelect ghost models={choice.models} value={choice.activeModel.id} customId={choice.customModel} onChange={choice.pickModel} />
@@ -715,7 +747,7 @@ export function ModelDriftBadge({
   id,
   cliChoice,
 }: {
-  source: "claude" | "codex";
+  source: Source;
   id: string;
   cliChoice?: CliChoice | null;
 }) {
@@ -798,12 +830,14 @@ export function ComposerQuota({
   source,
   accountId,
 }: {
-  source: "claude" | "codex";
+  source: Source;
   /** Account this session runs under; null/undefined means the local login. */
   accountId?: string | null;
 }) {
   const { t } = useTranslation();
   const { data } = useQuota();
+  // This server reads no quota for Bub: its provider is Bub's to configure.
+  if (source === "bub") return null;
 
   if (source === "codex") {
     const codex = data?.codex;
@@ -980,7 +1014,7 @@ export function ChecklistChip({
   id,
   toolTick,
 }: {
-  source: "claude" | "codex";
+  source: Source;
   id: string;
   toolTick: number;
 }) {

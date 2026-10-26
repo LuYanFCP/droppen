@@ -1,0 +1,287 @@
+//! Bub sessions end to end, against a stand-in for `bub acp`.
+//!
+//! The stand-in (`support/fake_bub.py`) speaks the ACP the driver uses and
+//! writes down everything it is sent, in the session's working directory. It
+//! is configured the way a user configures a real Bub: through
+//! `PUT /api/bub/settings`, with an absolute executable and a variable of its
+//! own — so these tests never touch `PATH`.
+
+mod common;
+
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use common::TestServer;
+use serde_json::{json, Value};
+
+const FAKE_BUB: &str = include_str!("support/fake_bub.py");
+const SESSION: &str = "f00dfeed0123456789abcdef01234567";
+
+/// The stand-in, written into `home` and made executable.
+fn install_fake(home: &Path) -> PathBuf {
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).expect("bin dir");
+    let path = bin.join("bub");
+    std::fs::write(&path, FAKE_BUB).expect("fake bub");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    path
+}
+
+/// Point the server at the stand-in, with one variable of the user's own.
+async fn configure(server: &TestServer, program: &Path) {
+    let (status, body) = server
+        .json(
+            "PUT",
+            "/api/bub/settings",
+            &json!({"command": program.to_string_lossy(), "env": "FAKE_BUB_MARK=from-settings"}),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let settings: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(settings["envNames"], json!(["FAKE_BUB_MARK"]));
+    assert!(!body.contains("from-settings"), "a value is never sent back: {body}");
+}
+
+/// What the stand-in was sent, in order.
+fn calls(workdir: &Path) -> Vec<Value> {
+    std::fs::read_to_string(workdir.join("bub-calls.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("call"))
+        .collect()
+}
+
+/// Poll the session's detail until `done` says so.
+async fn wait_for(server: &TestServer, id: &str, what: &str, done: impl Fn(&Value) -> bool) -> Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let (status, body) = server.get(&format!("/api/sessions/bub/{id}")).await;
+        if status == 200 {
+            let detail: Value = serde_json::from_str(&body).expect("json");
+            if done(&detail) {
+                return detail;
+            }
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}: {detail:#}");
+        } else {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}: {status} {body}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn texts(detail: &Value) -> Vec<(String, String, String)> {
+    detail["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|item| {
+            (
+                item["role"].as_str().unwrap_or_default().to_string(),
+                item["kind"].as_str().unwrap_or_default().to_string(),
+                item["text"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn finished(detail: &Value) -> bool {
+    detail["injection"]["state"] != "running" && !detail["injection"].is_null()
+}
+
+fn item(role: &str, kind: &str, text: &str) -> (String, String, String) {
+    (role.into(), kind.into(), text.into())
+}
+
+#[tokio::test]
+async fn a_bub_session_is_created_streamed_interrupted_reopened_and_archived() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let program = install_fake(home.path());
+    let workdir = home.path().join("work");
+    std::fs::create_dir_all(&workdir).expect("workdir");
+
+    let server = TestServer::start_at(home.path(), None).await;
+    configure(&server, &program).await;
+
+    // A new session: Bub names it, and the first turn is on screen.
+    let (status, body) = server
+        .json("POST", "/api/sessions/new", &json!({"source": "bub", "cwd": workdir, "text": "hi there"}))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let id = serde_json::from_str::<Value>(&body).expect("json")["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    assert_eq!(id, SESSION);
+    let detail = wait_for(&server, &id, "the first turn", finished).await;
+    assert_eq!(detail["injection"]["state"], "ok", "{detail:#}");
+    assert_eq!(
+        texts(&detail),
+        vec![
+            item("user", "text", "hi there"),
+            item("assistant", "thinking", "Thinking about hi there"),
+            item("assistant", "tool_use", "echo hi"),
+            item("user", "tool_result", "hi"),
+            item("assistant", "text", "Hello from Bub"),
+        ]
+    );
+    assert_eq!(detail["summary"]["scope"], "owned");
+    assert_eq!(detail["summary"]["title"], "hi there");
+    assert_eq!(detail["canSend"], true);
+    assert_eq!(
+        (detail["contextTokens"].as_u64(), detail["contextWindow"].as_u64()),
+        (Some(4020), Some(128000)),
+        "Bub's own usage reading"
+    );
+
+    let sent = calls(&workdir);
+    let methods: Vec<&str> = sent.iter().map(|call| call["method"].as_str().unwrap_or_default()).collect();
+    assert_eq!(methods, vec!["initialize", "session/new", "session/prompt"]);
+    assert_eq!(
+        sent[1]["params"]["cwd"],
+        json!(workdir.canonicalize().unwrap()),
+        "Bub runs where it was asked to"
+    );
+    assert!(
+        sent.iter().all(|call| call["mark"] == "from-settings"),
+        "the configured environment reaches Bub"
+    );
+
+    // It lists with the other sessions.
+    let list = server.get_json("/api/sessions?source=bub").await;
+    assert_eq!(list["sessions"][0]["id"], json!(SESSION), "{list:#}");
+
+    // A second message goes to the same process.
+    let (status, body) = server
+        .json("POST", &format!("/api/sessions/bub/{id}/message"), &json!({"text": "again"}))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let detail = wait_for(&server, &id, "the second turn", |detail| texts(detail).len() == 10 && finished(detail)).await;
+    assert_eq!(texts(&detail)[5], item("user", "text", "again"));
+    assert_eq!(
+        calls(&workdir).iter().filter(|call| call["method"] == "initialize").count(),
+        1,
+        "one process"
+    );
+
+    // A turn that does not end on its own is stopped from here.
+    server
+        .json("POST", &format!("/api/sessions/bub/{id}/message"), &json!({"text": "wait for me"}))
+        .await;
+    wait_for(&server, &id, "the long turn to start", |detail| detail["injection"]["state"] == "running").await;
+    wait_for(&server, &id, "the long turn to stream", |detail| {
+        texts(detail).last().is_some_and(|last| last.2 == "Working on it")
+    })
+    .await;
+    let (status, body) = server.json("POST", &format!("/api/sessions/bub/{id}/interrupt"), &json!({})).await;
+    assert_eq!(status, 200, "{body}");
+    let detail = wait_for(&server, &id, "the interruption", finished).await;
+    assert_eq!(detail["injection"]["interrupted"], true, "{detail:#}");
+    assert_eq!(texts(&detail).last(), Some(&item("system", "text", "Interrupted")));
+    assert!(calls(&workdir).iter().any(|call| call["method"] == "session/cancel"));
+
+    // A restart loses the process, not the session: the next message reopens
+    // it, and Bub's replay is not written over the transcript that has it.
+    server.stop().await;
+    let server = TestServer::start_at(home.path(), None).await;
+    let before = texts(&server.get_json(&format!("/api/sessions/bub/{id}")).await).len();
+    let (status, body) = server
+        .json("POST", &format!("/api/sessions/bub/{id}/message"), &json!({"text": "still there?"}))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let detail = wait_for(&server, &id, "the reopened turn", |detail| {
+        texts(detail).len() == before + 5 && finished(detail)
+    })
+    .await;
+    assert!(
+        !texts(&detail).iter().any(|item| item.2 == "an old answer"),
+        "the replay is not duplicated"
+    );
+    let load = calls(&workdir)
+        .into_iter()
+        .find(|call| call["method"] == "session/load")
+        .expect("reopened with session/load");
+    assert_eq!(load["params"]["sessionId"], json!(SESSION));
+
+    // Archived, it leaves the list.
+    let (status, body) = server.json("POST", &format!("/api/sessions/bub/{id}/archive"), &json!({})).await;
+    assert_eq!(status, 200, "{body}");
+    let list = server.get_json("/api/sessions?source=bub").await;
+    assert_eq!(list["sessions"], json!([]), "{list:#}");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn a_session_this_server_lost_is_given_bubs_own_history() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let program = install_fake(home.path());
+    let workdir = home.path().join("work");
+    std::fs::create_dir_all(&workdir).expect("workdir");
+    let server = TestServer::start_at(home.path(), None).await;
+    configure(&server, &program).await;
+
+    // A transcript with nothing in it but where the session ran: what is left
+    // when the conversation this server wrote down is gone.
+    let dir = server.paths.acp_sessions(remote_hand_server::sessions::Source::Bub);
+    std::fs::create_dir_all(&dir).expect("dir");
+    std::fs::write(
+        dir.join(format!("{SESSION}.jsonl")),
+        format!(
+            "{}\n",
+            json!({"type": "session", "id": SESSION, "cwd": workdir, "timestamp": "2026-10-01T10:00:00.000Z"})
+        ),
+    )
+    .expect("transcript");
+
+    let (status, body) = server
+        .json("POST", &format!("/api/sessions/bub/{SESSION}/message"), &json!({"text": "remember?"}))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let detail = wait_for(&server, SESSION, "the turn", finished).await;
+    let texts = texts(&detail);
+    assert_eq!(texts[0], item("user", "text", "an old question"));
+    assert_eq!(texts[1], item("assistant", "text", "an old answer"));
+    assert_eq!(texts[2], item("user", "text", "remember?"));
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn what_bub_cannot_do_is_refused_before_it_starts() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let workdir = home.path().join("work");
+    std::fs::create_dir_all(&workdir).expect("workdir");
+    let server = TestServer::start_at(home.path(), None).await;
+
+    // An executable that is not there is a refusal that says what to do.
+    let (status, _) = server
+        .json(
+            "PUT",
+            "/api/bub/settings",
+            &json!({"command": home.path().join("no-such-bub").to_string_lossy()}),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, body) = server
+        .json("POST", "/api/sessions/new", &json!({"source": "bub", "cwd": workdir, "text": "hi"}))
+        .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(body.contains("Bub"), "{body}");
+
+    // Settings Bub does not have are not silently dropped.
+    let program = install_fake(home.path());
+    configure(&server, &program).await;
+    let (status, body) = server
+        .json(
+            "POST",
+            "/api/sessions/new",
+            &json!({"source": "bub", "cwd": workdir, "text": "hi", "permission": "auto"}),
+        )
+        .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(calls(&workdir).is_empty(), "nothing was started");
+
+    // And an environment block that would move the child is refused.
+    let (status, _) = server.json("PUT", "/api/bub/settings", &json!({"env": "PATH=/tmp"})).await;
+    assert_eq!(status, 400);
+    server.stop().await;
+}

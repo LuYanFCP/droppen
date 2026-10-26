@@ -3,6 +3,7 @@
 //! Mirrors the former TypeScript server's `schemas.ts` plus the discovery halves
 //! of its `claude.ts` and `session-feed.ts`.
 
+pub mod acp_transcript;
 pub mod adoption_leftovers;
 pub mod checklist;
 pub mod claude;
@@ -40,6 +41,8 @@ pub enum Source {
     Claude,
     /// OpenAI Codex.
     Codex,
+    /// Bub, over its ACP server.
+    Bub,
 }
 
 impl Source {
@@ -48,6 +51,7 @@ impl Source {
         match self {
             Source::Claude => "claude",
             Source::Codex => "codex",
+            Source::Bub => "bub",
         }
     }
 }
@@ -974,6 +978,12 @@ impl Paths {
         ClaudeRoot::ALL.map(|root| claude_roots::live_dir(self, root))
     }
 
+    /// The transcripts this instance keeps for one ACP agent's sessions; see
+    /// [`acp_transcript`].
+    pub fn acp_sessions(&self, source: Source) -> PathBuf {
+        self.instance_dir().join("acp-sessions").join(source.as_str())
+    }
+
     /// `~/.codex`.
     pub fn codex_dir(&self) -> PathBuf {
         self.home.join(".codex")
@@ -1142,10 +1152,15 @@ pub async fn list_and_filter(
     query: Option<&str>,
     scope: ScopeFilter,
 ) -> Vec<SessionSummary> {
-    let (claude_sessions, codex_sessions) = match source {
-        Some(Source::Claude) => (claude::list_claude_sessions(paths, bindings).await, vec![]),
-        Some(Source::Codex) => (vec![], codex::list_codex_sessions(paths).await),
-        None => tokio::join!(claude::list_claude_sessions(paths, bindings), codex::list_codex_sessions(paths)),
+    let (claude_sessions, codex_sessions, bub_sessions) = match source {
+        Some(Source::Claude) => (claude::list_claude_sessions(paths, bindings).await, vec![], vec![]),
+        Some(Source::Codex) => (vec![], codex::list_codex_sessions(paths).await, vec![]),
+        Some(Source::Bub) => (vec![], vec![], acp_transcript::list_sessions(paths, Source::Bub).await),
+        None => tokio::join!(
+            claude::list_claude_sessions(paths, bindings),
+            codex::list_codex_sessions(paths),
+            acp_transcript::list_sessions(paths, Source::Bub)
+        ),
     };
 
     // Instant chats live in their own list, not the session sidebar.
@@ -1153,6 +1168,7 @@ pub async fn list_and_filter(
     let mut sessions: Vec<SessionSummary> = claude_sessions
         .into_iter()
         .chain(codex_sessions)
+        .chain(bub_sessions)
         .filter(|session| session.cwd.as_ref().map(String::as_str) != Some(hidden.as_str()))
         .filter(|session| scope.admits(session.scope))
         .collect();
@@ -1187,6 +1203,16 @@ pub async fn list_and_filter(
     pins::apply(paths, &mut sessions);
     sessions.sort_by_key(|session| !session.pinned);
     sessions
+}
+
+/// One session's list row, whatever CLI it belongs to, without the driver's
+/// overlay.
+pub async fn find_summary(paths: &Paths, source: Source, id: &str) -> Option<SessionSummary> {
+    match source {
+        Source::Claude => claude::load_claude_summary(paths, id).await,
+        Source::Codex => codex::find_codex_session(paths, id).await,
+        Source::Bub => acp_transcript::find_session(paths, source, id).await,
+    }
 }
 
 /// How many recent working directories the new-session picker offers.
@@ -1248,6 +1274,7 @@ pub fn external_send_block_reason(source: Source) -> String {
     match source {
         Source::Claude => "this session was not started by this instance; continue it where it was started".to_string(),
         Source::Codex => "this codex session was started elsewhere; continue it where it was started".to_string(),
+        Source::Bub => "this Bub session was started elsewhere; continue it where it was started".to_string(),
     }
 }
 

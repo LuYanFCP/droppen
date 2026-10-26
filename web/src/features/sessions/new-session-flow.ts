@@ -1,4 +1,12 @@
-export type SessionSource = "claude" | "codex";
+export type SessionSource = "claude" | "codex" | "bub";
+
+/** The CLIs an instant chat runs on; Bub has no chats. */
+export type ChatSource = "claude" | "codex";
+
+/** Whether `value` names an agent a session can run on. */
+export function isSessionSource(value: unknown): value is SessionSource {
+  return value === "claude" || value === "codex" || value === "bub";
+}
 
 export type NewConversation = {
   text: string;
@@ -14,7 +22,7 @@ export type NewConversation = {
       files?: string[];
     }
   | {
-      kind: "chat"; source: SessionSource | "api"; providerReady: boolean;
+      kind: "chat"; source: ChatSource | "api"; providerReady: boolean;
       /** A CLI chat's login, as for a session: absent follows the default, `null` is the local login. */
       accountId?: string | null;
       /** `"start"`: `accountId` is the one the start rule named (`placed: false`), not a pick. */
@@ -34,12 +42,15 @@ export function canCreateConversation(input: NewConversation, busy: boolean): bo
  *
  * Both CLIs now carry an account: `accountId` absent means "follow this CLI's
  * stored default", `null` means the user asked for the local login by hand.
+ *
+ * An empty model or permission is left out: Bub chooses both itself, and
+ * refuses a start that names either.
  */
 export function creationRequest(input: NewConversation, clientMessageId?: string) {
-  const common = { text: input.text.trim(), model: input.model, ...(input.effort ? { effort: input.effort } : {}) };
+  const common = { text: input.text.trim(), ...(input.model ? { model: input.model } : {}), ...(input.effort ? { effort: input.effort } : {}) };
   return input.kind === "session"
     ? { path: "/api/sessions/new" as const, body: {
-        ...common, source: input.source, cwd: input.cwd.trim(), permission: input.permission,
+        ...common, source: input.source, cwd: input.cwd.trim(), ...(input.permission ? { permission: input.permission } : {}),
         ...(input.accountId !== undefined ? { accountId: input.accountId } : {}),
         ...(input.accountFrom ? { accountFrom: input.accountFrom } : {}),
         // Omitted when empty, so a start with nothing attached is the body an

@@ -105,6 +105,8 @@ pub fn recent_from(sessions: &[SessionSummary], exists: impl Fn(&Path) -> bool) 
             (SessionScope::Owned, _) => FolderTool::Droppen,
             (SessionScope::External, Source::Claude) => FolderTool::Claude,
             (SessionScope::External, Source::Codex) => FolderTool::Codex,
+            // Every Bub session is one this server started.
+            (SessionScope::External, Source::Bub) => FolderTool::Droppen,
         };
         let folder = by_cwd.entry(cwd).or_insert_with(|| RecentFolder {
             path: cwd.to_string(),

@@ -3,7 +3,8 @@
 English | [简体中文](README.zh-CN.md)
 
 Droppen lets you browse and drive your Claude Code and Codex sessions from any
-device: a browser, a phone or another computer.
+device: a browser, a phone or another computer. It can also start and drive
+[Bub](https://bub.build/) sessions, over Bub's ACP server.
 
 It runs on the computer where the CLIs run. It reads their sessions where they
 are, starts and resumes them, and shows them in a web app: the transcript, a

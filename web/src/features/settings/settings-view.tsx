@@ -3,6 +3,7 @@ import { useSearch } from "@tanstack/react-router";
 import { MachineLink, useMachineNavigate } from "@/app/machine-route";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { ApiError, errorText } from "@/api/errors";
 import type { components } from "@/api/schema";
 import { useFeedSessions, useFeedSettings } from "@/app/global-feed";
 import { SelectField } from "@/components/ui/select";
@@ -598,6 +599,106 @@ function ChatProviderSection() {
   );
 }
 
+/**
+ * How this device starts Bub: its executable and the variables it needs.
+ *
+ * The values are what an API key looks like, so they are never read back —
+ * the server says which names are set, and a block typed here replaces them all.
+ */
+function BubSection() {
+  const api = useApi();
+  const machine = useMachine();
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const { data: settings } = useQuery({
+    queryKey: mq(machine, "bub-settings"),
+    queryFn: async () => (await api.GET("/api/bub/settings")).data,
+  });
+  const [command, setCommand] = useState<string | null>(null);
+  const [env, setEnv] = useState<string | null>(null);
+
+  const save = useMutation({
+    mutationFn: async (patch: { command?: string; env?: string }) => {
+      const res = await api.PUT("/api/bub/settings", { body: patch });
+      if (!res.data) throw new ApiError(res.error);
+      return res.data;
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(mq(machine, "bub-settings"), data);
+      setCommand(null);
+      setEnv(null);
+    },
+  });
+
+  const dirty = command !== null || env !== null;
+  const names = settings?.envNames ?? [];
+  const field = cn(SETTINGS_FIELD, "font-mono");
+
+  return (
+    <section className="border-b border-border p-3">
+      <h2 data-label="" className={SECTION_TITLE}>
+        {t("bub")}
+      </h2>
+      <div className={cn(SETTINGS_COLUMN, "flex flex-col gap-2")}>
+        <span className="text-xs text-muted">
+          {t("Droppen runs Bub through its ACP server; install it into Bub's environment with `bub install bub-acp-server@main`.")}
+        </span>
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-muted">{t("executable")}</span>
+          <input
+            value={command ?? settings?.command ?? ""}
+            onChange={(e) => setCommand(e.target.value)}
+            placeholder={settings?.defaultCommand ?? "bub"}
+            autoComplete="off"
+            spellCheck={false}
+            className={field}
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-muted">
+            {t("environment (one KEY=VALUE per line)")}
+            {names.length > 0 && <> {t("· saved: {{names}} (a new block replaces them all)", { names: names.join(", ") })}</>}
+          </span>
+          <textarea
+            rows={4}
+            value={env ?? ""}
+            onChange={(e) => setEnv(e.target.value)}
+            placeholder={names.length > 0 ? "••••••••" : "BUB_MODEL=…"}
+            autoComplete="off"
+            spellCheck={false}
+            className={cn(field, "h-auto resize-y py-1.5 max-md:h-auto")}
+          />
+        </label>
+        {save.error && (
+          <span data-signal="failed" className="text-xs text-danger">
+            {errorText(save.error)}
+          </span>
+        )}
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={!dirty || save.isPending}
+            onClick={() => save.mutate({ ...(command !== null ? { command } : {}), ...(env !== null ? { env } : {}) })}
+            data-variant="primary" className={SETTINGS_ACTION_PRIMARY}
+          >
+            {t("save")}
+          </button>
+          {names.length > 0 && (
+            <button
+              type="button"
+              disabled={save.isPending}
+              onClick={() => save.mutate({ env: "" })}
+              className={SETTINGS_ACTION}
+            >
+              {t("clear variables")}
+            </button>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function GeneralSettings() {
   const { t } = useTranslation();
   // Server info and counts arrive over the global websocket feed.
@@ -630,6 +731,7 @@ function GeneralSettings() {
       <PhoneNotificationsSection />
       <InstallSection />
       <ChatProviderSection />
+      <BubSection />
       <SettingsUpdatesRow />
       <section className="p-3">
         <h2 data-label="" className={SECTION_TITLE}>
