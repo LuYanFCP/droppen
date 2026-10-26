@@ -85,8 +85,10 @@ import {
 } from "./new-session";
 import { isSessionSource, type CreationAttempt, type NewConversation, type SessionSource } from "./new-session-flow";
 import { useCreateConversation, type AcceptedConversation } from "./use-create-conversation";
+import { useAcpSettings } from "./acp-agent";
 
-const SOURCES: SessionSource[] = ["claude", "codex", "bub"];
+/** The CLIs that are always offered; the ACP agent is offered once one is configured. */
+const CLI_SOURCES: SessionSource[] = ["claude", "codex"];
 
 /** A message on its way to becoming a session's first. */
 interface Starting {
@@ -176,9 +178,15 @@ export function NewSessionView({
 
   const { data: accountList } = useAccounts();
   // Each CLI runs under its own accounts: a Claude login cannot start a Codex
-  // session. Bub runs on its own configuration and has none.
-  const bub = source === "bub";
-  const accounts = bub ? [] : accountsForProvider(accountList?.accounts ?? [], source);
+  // session. An ACP agent runs on its own configuration and has none.
+  const acp = source === "acp";
+  // The ACP agent, by the name it was given, once one is configured — or while
+  // it is the agent already picked, so the picker never shows a blank.
+  const { data: acpSettings } = useAcpSettings();
+  const sources = acpSettings?.command || acp
+    ? [...CLI_SOURCES, { value: "acp", label: acpSettings?.name || t("ACP agent") }]
+    : CLI_SOURCES;
+  const accounts = acp ? [] : accountsForProvider(accountList?.accounts ?? [], source);
   // Untouched, the picker shows where the server will start a session that
   // names no account — the default (moved off a rest), the local login, or,
   // while that is signed out and nobody chose it, an account in the
@@ -193,7 +201,7 @@ export function NewSessionView({
   // The draft keeps the account across starts, so a local login picked weeks
   // ago, while it still worked, would otherwise go on deciding every session
   // after it stopped. Picked here and now, it is honoured — and labelled.
-  const localSignedOutNow = !bub && localLoginSignedOut(localLoginOf(accountList, source));
+  const localSignedOutNow = !acp && localLoginSignedOut(localLoginOf(accountList, source));
   const staleLocalPick = accountChoice === "" && !accountPickedHere && localSignedOutNow;
   // `null` is untouched; "" the local login, picked; an id an account, picked.
   const picked = staleLocalPick ? null : accountChoice;
@@ -248,7 +256,7 @@ export function NewSessionView({
     permission: choice.activePermission, images, files,
     // Only a pick is sent; untouched, the server's start rule decides — unless
     // the pair shown is one no model-less start reaches, which has to be named.
-    ...(bub ? {} : picked !== null
+    ...(acp ? {} : picked !== null
       ? { accountId: picked || null }
       : startAccount?.placed === false
         ? { accountId: startAccount.accountId ?? null, accountFrom: "start" as const }
@@ -527,12 +535,12 @@ export function NewSessionView({
             chips={<>
               {/* Never another device shown read-only here (the local app's gateway): nothing starts there. */}
               {onDevice && <DevicePicker ghost forStarting writable value={machine} onSelect={switchDevice} disabled={busy} />}
-              <ComposerSelect ghost label={t("cli")} value={source} options={SOURCES} onChange={(v) => setSource(v as SessionSource)} />
+              <ComposerSelect ghost label={t("cli")} value={source} options={sources} onChange={(v) => setSource(v as SessionSource)} />
               <DirectoryChip cwd={cwd} onShow={showList} disabled={busy} />
               <ComposerChoiceChips
                 source={source}
                 choice={choice}
-                account={!bub && accounts.length > 0 && (
+                account={!acp && accounts.length > 0 && (
                   <AccountPicker
                     ghost
                     accounts={accounts}
@@ -855,7 +863,7 @@ export interface OpenNewSession {
   cwd?: string;
   /** A first message, put in the composer in place of what was typed there; nothing is sent until the person sends it. */
   draft?: string;
-  /** The agent: claude, codex or bub. */
+  /** The agent: claude, codex or the configured ACP agent (acp). */
   source?: SessionSource;
 }
 
@@ -919,7 +927,7 @@ export interface NewSessionSearch {
   cwd?: string;
   /** A first message to fill in (not sent). */
   draft?: string;
-  /** The agent: claude, codex or bub. */
+  /** The agent: claude, codex or the configured ACP agent (acp). */
   agent?: SessionSource;
 }
 

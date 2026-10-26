@@ -1,11 +1,11 @@
-export type SessionSource = "claude" | "codex" | "bub";
+export type SessionSource = "claude" | "codex" | "acp";
 
-/** The CLIs an instant chat runs on; Bub has no chats. */
+/** The CLIs an instant chat runs on; the ACP agent has no chats. */
 export type ChatSource = "claude" | "codex";
 
 /** Whether `value` names an agent a session can run on. */
 export function isSessionSource(value: unknown): value is SessionSource {
-  return value === "claude" || value === "codex" || value === "bub";
+  return value === "claude" || value === "codex" || value === "acp";
 }
 
 export type NewConversation = {
@@ -43,7 +43,7 @@ export function canCreateConversation(input: NewConversation, busy: boolean): bo
  * Both CLIs now carry an account: `accountId` absent means "follow this CLI's
  * stored default", `null` means the user asked for the local login by hand.
  *
- * An empty model or permission is left out: Bub chooses both itself, and
+ * An empty model or permission is left out: an ACP agent may choose both itself, and
  * refuses a start that names either.
  */
 export function creationRequest(input: NewConversation, clientMessageId?: string) {

@@ -41,8 +41,9 @@ pub enum Source {
     Claude,
     /// OpenAI Codex.
     Codex,
-    /// Bub, over its ACP server.
-    Bub,
+    /// The agent the user configured to run over the Agent Client Protocol
+    /// ([`crate::acp_agent`]).
+    Acp,
 }
 
 impl Source {
@@ -51,7 +52,7 @@ impl Source {
         match self {
             Source::Claude => "claude",
             Source::Codex => "codex",
-            Source::Bub => "bub",
+            Source::Acp => "acp",
         }
     }
 }
@@ -1152,14 +1153,14 @@ pub async fn list_and_filter(
     query: Option<&str>,
     scope: ScopeFilter,
 ) -> Vec<SessionSummary> {
-    let (claude_sessions, codex_sessions, bub_sessions) = match source {
+    let (claude_sessions, codex_sessions, acp_sessions) = match source {
         Some(Source::Claude) => (claude::list_claude_sessions(paths, bindings).await, vec![], vec![]),
         Some(Source::Codex) => (vec![], codex::list_codex_sessions(paths).await, vec![]),
-        Some(Source::Bub) => (vec![], vec![], acp_transcript::list_sessions(paths, Source::Bub).await),
+        Some(Source::Acp) => (vec![], vec![], acp_transcript::list_sessions(paths, Source::Acp).await),
         None => tokio::join!(
             claude::list_claude_sessions(paths, bindings),
             codex::list_codex_sessions(paths),
-            acp_transcript::list_sessions(paths, Source::Bub)
+            acp_transcript::list_sessions(paths, Source::Acp)
         ),
     };
 
@@ -1168,7 +1169,7 @@ pub async fn list_and_filter(
     let mut sessions: Vec<SessionSummary> = claude_sessions
         .into_iter()
         .chain(codex_sessions)
-        .chain(bub_sessions)
+        .chain(acp_sessions)
         .filter(|session| session.cwd.as_ref().map(String::as_str) != Some(hidden.as_str()))
         .filter(|session| scope.admits(session.scope))
         .collect();
@@ -1211,7 +1212,7 @@ pub async fn find_summary(paths: &Paths, source: Source, id: &str) -> Option<Ses
     match source {
         Source::Claude => claude::load_claude_summary(paths, id).await,
         Source::Codex => codex::find_codex_session(paths, id).await,
-        Source::Bub => acp_transcript::find_session(paths, source, id).await,
+        Source::Acp => acp_transcript::find_session(paths, source, id).await,
     }
 }
 
@@ -1274,7 +1275,7 @@ pub fn external_send_block_reason(source: Source) -> String {
     match source {
         Source::Claude => "this session was not started by this instance; continue it where it was started".to_string(),
         Source::Codex => "this codex session was started elsewhere; continue it where it was started".to_string(),
-        Source::Bub => "this Bub session was started elsewhere; continue it where it was started".to_string(),
+        Source::Acp => "this ACP session was started elsewhere; continue it where it was started".to_string(),
     }
 }
 

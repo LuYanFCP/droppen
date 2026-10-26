@@ -2,10 +2,10 @@
 //!
 //! An ACP agent may run its shell and file tools through the client rather
 //! than itself — `terminal/*` and `fs/*` requests — so that an editor can show
-//! the terminal and the edit. Some insist on it: Bub's ACP server swaps
-//! `bash`, `fs.read`, `fs.write` and `fs.edit` for client-routed versions
-//! inside every turn, with no fallback, so a client that cannot answer them
-//! leaves it with no way to run a command or touch a file at all.
+//! the terminal and the edit. Some insist on it: an agent may swap its shell
+//! and file tools for client-routed versions inside every turn, with no
+//! fallback, so a client that cannot answer them leaves it with no way to run
+//! a command or touch a file at all.
 //!
 //! This server answers them on the machine the agent runs on, as the user the
 //! agent runs as: the same reach the agent's own built-in tools have, and

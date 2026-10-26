@@ -28,6 +28,7 @@ import {
   SETTINGS_FIELD,
 } from "@/features/settings/layout";
 import { SetupSection } from "@/features/setup/settings-section";
+import { acpSettingsKey, splitArgs, useAcpSettings } from "@/features/sessions/acp-agent";
 import { cn } from "@/lib/cn";
 import { formatTime } from "@/lib/format";
 import {
@@ -600,55 +601,80 @@ function ChatProviderSection() {
 }
 
 /**
- * How this device starts Bub: its executable and the variables it needs.
+ * How this device starts its ACP agent: any program that speaks the Agent
+ * Client Protocol over stdio, with the arguments and variables it needs.
  *
  * The values are what an API key looks like, so they are never read back —
  * the server says which names are set, and a block typed here replaces them all.
  */
-function BubSection() {
+function AcpAgentSection() {
   const api = useApi();
   const machine = useMachine();
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const { data: settings } = useQuery({
-    queryKey: mq(machine, "bub-settings"),
-    queryFn: async () => (await api.GET("/api/bub/settings")).data,
-  });
+  const { data: settings } = useAcpSettings();
+  const [name, setName] = useState<string | null>(null);
   const [command, setCommand] = useState<string | null>(null);
+  const [args, setArgs] = useState<string | null>(null);
   const [env, setEnv] = useState<string | null>(null);
 
   const save = useMutation({
-    mutationFn: async (patch: { command?: string; env?: string }) => {
-      const res = await api.PUT("/api/bub/settings", { body: patch });
+    mutationFn: async (patch: { name?: string; command?: string; args?: string[]; env?: string }) => {
+      const res = await api.PUT("/api/acp/settings", { body: patch });
       if (!res.data) throw new ApiError(res.error);
       return res.data;
     },
     onSuccess: (data) => {
-      queryClient.setQueryData(mq(machine, "bub-settings"), data);
+      queryClient.setQueryData(acpSettingsKey(machine), data);
+      void queryClient.invalidateQueries({ queryKey: mq(machine, "models", "acp") });
+      setName(null);
       setCommand(null);
+      setArgs(null);
       setEnv(null);
     },
   });
 
-  const dirty = command !== null || env !== null;
+  const dirty = name !== null || command !== null || args !== null || env !== null;
   const names = settings?.envNames ?? [];
   const field = cn(SETTINGS_FIELD, "font-mono");
 
   return (
     <section className="border-b border-border p-3">
       <h2 data-label="" className={SECTION_TITLE}>
-        {t("bub")}
+        {t("acp agent")}
       </h2>
       <div className={cn(SETTINGS_COLUMN, "flex flex-col gap-2")}>
         <span className="text-xs text-muted">
-          {t("Droppen runs Bub through its ACP server; install it into Bub's environment with `bub install bub-acp-server@main`.")}
+          {t("Any agent that speaks the Agent Client Protocol (ACP) over stdio can run sessions here. Give the command that starts it in ACP mode; leave the executable empty to turn it off.")}
         </span>
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-muted">{t("name")}</span>
+          <input
+            value={name ?? settings?.name ?? ""}
+            onChange={(e) => setName(e.target.value)}
+            placeholder={t("ACP agent")}
+            autoComplete="off"
+            spellCheck={false}
+            className={SETTINGS_FIELD}
+          />
+        </label>
         <label className="flex flex-col gap-1">
           <span className="text-xs text-muted">{t("executable")}</span>
           <input
             value={command ?? settings?.command ?? ""}
             onChange={(e) => setCommand(e.target.value)}
-            placeholder={settings?.defaultCommand ?? "bub"}
+            placeholder="/path/to/agent"
+            autoComplete="off"
+            spellCheck={false}
+            className={field}
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-muted">{t("arguments (separated by spaces)")}</span>
+          <input
+            value={args ?? settings?.args.join(" ") ?? ""}
+            onChange={(e) => setArgs(e.target.value)}
+            placeholder="acp"
             autoComplete="off"
             spellCheck={false}
             className={field}
@@ -663,7 +689,7 @@ function BubSection() {
             rows={4}
             value={env ?? ""}
             onChange={(e) => setEnv(e.target.value)}
-            placeholder={names.length > 0 ? "••••••••" : "BUB_MODEL=…"}
+            placeholder={names.length > 0 ? "••••••••" : "KEY=…"}
             autoComplete="off"
             spellCheck={false}
             className={cn(field, "h-auto resize-y py-1.5 max-md:h-auto")}
@@ -678,7 +704,14 @@ function BubSection() {
           <button
             type="button"
             disabled={!dirty || save.isPending}
-            onClick={() => save.mutate({ ...(command !== null ? { command } : {}), ...(env !== null ? { env } : {}) })}
+            onClick={() =>
+              save.mutate({
+                ...(name !== null ? { name } : {}),
+                ...(command !== null ? { command } : {}),
+                ...(args !== null ? { args: splitArgs(args) } : {}),
+                ...(env !== null ? { env } : {}),
+              })
+            }
             data-variant="primary" className={SETTINGS_ACTION_PRIMARY}
           >
             {t("save")}
@@ -731,7 +764,7 @@ function GeneralSettings() {
       <PhoneNotificationsSection />
       <InstallSection />
       <ChatProviderSection />
-      <BubSection />
+      <AcpAgentSection />
       <SettingsUpdatesRow />
       <section className="p-3">
         <h2 data-label="" className={SECTION_TITLE}>

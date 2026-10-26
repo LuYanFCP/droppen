@@ -4,7 +4,7 @@
 //! An agent driven over the Agent Client Protocol ([`crate::inject::acp`])
 //! streams a turn as `session/update` notifications and keeps nothing a client
 //! can read back later except by `session/load`, which means starting the
-//! agent. Its own history (Bub's tapes, say) is its format, not this server's
+//! agent. Its own history is its format, not this server's
 //! contract. So the session view reads a transcript *this server* writes, one
 //! per session, under [`Paths::acp_sessions`]: every update the driver hears is
 //! translated by [`Translator`] into the small, stable record set below and
@@ -180,7 +180,7 @@ impl Translator {
 }
 
 /// Whether an update is a context hand-off rather than a tool the user asked
-/// for: Bub marks its `tape.handoff` this way.
+/// for, as an agent may mark one in `_meta`.
 fn is_compaction(meta: Option<&serde_json::Map<String, Value>>) -> bool {
     meta.and_then(|meta| meta.get("contextCompaction")) == Some(&Value::Bool(true))
 }
@@ -642,7 +642,7 @@ mod tests {
             json!({"sessionUpdate": "tool_call_update", "toolCallId": "t", "status": "completed", "_meta": {"contextCompaction": true}}),
         )));
         records.push(record("turn_end", json!({"stopReason": "cancelled"})));
-        records.push(record("error", json!({"message": "Bub exited"})));
+        records.push(record("error", json!({"message": "the ACP agent exited"})));
         let items = parse(&records);
         assert_eq!(
             items.iter().map(|item| item.kind).collect::<Vec<_>>(),
@@ -663,26 +663,26 @@ mod tests {
     async fn a_transcript_lists_as_an_owned_session() {
         let home = tempfile::tempdir().expect("tempdir");
         let paths = Paths::new(home.path().to_path_buf());
-        tokio::fs::create_dir_all(paths.acp_sessions(Source::Bub)).await.unwrap();
-        let file = transcript_path(&paths, Source::Bub, "abc123");
+        tokio::fs::create_dir_all(paths.acp_sessions(Source::Acp)).await.unwrap();
+        let file = transcript_path(&paths, Source::Acp, "abc123");
         let body = lines(&[
             record("session", json!({"id": "abc123", "cwd": "/work"})),
             record("user", json!({"text": "fix the build\nplease"})),
         ])
         .join("\n");
         tokio::fs::write(&file, body + "\n").await.unwrap();
-        tokio::fs::write(paths.acp_sessions(Source::Bub).join("not an id!.jsonl"), "")
+        tokio::fs::write(paths.acp_sessions(Source::Acp).join("not an id!.jsonl"), "")
             .await
             .unwrap();
 
-        let listed = list_sessions(&paths, Source::Bub).await;
+        let listed = list_sessions(&paths, Source::Acp).await;
         assert_eq!(listed.len(), 1);
         let row = &listed[0];
-        assert_eq!((row.source, row.scope), (Source::Bub, SessionScope::Owned));
+        assert_eq!((row.source, row.scope), (Source::Acp, SessionScope::Owned));
         assert_eq!(row.title, "fix the build");
         assert_eq!(row.cwd.0.as_deref(), Some("/work"));
         assert!(has_conversation(&file).await);
-        assert!(find_session(&paths, Source::Bub, "../abc123").await.is_none());
-        assert!(find_session(&paths, Source::Bub, "abc123").await.is_some());
+        assert!(find_session(&paths, Source::Acp, "../abc123").await.is_none());
+        assert!(find_session(&paths, Source::Acp, "abc123").await.is_some());
     }
 }

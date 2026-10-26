@@ -153,12 +153,12 @@ impl ChatKind {
         }
     }
 
-    /// The kind a discovered CLI session belongs to; Bub has no chats.
+    /// The kind a discovered CLI session belongs to; an ACP agent has no chats.
     fn of(source: Source) -> Option<Self> {
         match source {
             Source::Claude => Some(ChatKind::Claude),
             Source::Codex => Some(ChatKind::Codex),
-            Source::Bub => None,
+            Source::Acp => None,
         }
     }
 }
@@ -715,7 +715,7 @@ mod tests {
         }
         assert_eq!(ChatKind::of(Source::Claude), Some(ChatKind::Claude));
         assert_eq!(ChatKind::of(Source::Codex), Some(ChatKind::Codex));
-        assert_eq!(ChatKind::of(Source::Bub), None);
+        assert_eq!(ChatKind::of(Source::Acp), None);
         assert_eq!(ChatKind::Api.source(), None, "the API backend is not a CLI");
     }
 

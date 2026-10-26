@@ -31,7 +31,7 @@ type Source = components["schemas"]["Source"];
 
 /**
  * The agents whose model, effort, permission and account a composer chooses.
- * Bub chooses all four from its own configuration, so a Bub composer offers
+ * An ACP agent chooses all four from its own configuration, so its composer offers
  * none of them and sends none of them.
  */
 export type CliSource = "claude" | "codex";
@@ -337,11 +337,11 @@ export function useComposerDefaultModel(source: "claude" | "codex"): string | nu
  * on the login shown.
  */
 export function useComposerStart(source: Source) {
-  const cli: CliSource = source === "bub" ? "claude" : source;
+  const cli: CliSource = source === "acp" ? "claude" : source;
   const stored = useComposerDefaultModel(cli);
   const named = stored && isSendable(stored) ? stored : null;
-  // Bub has no accounts: nothing to ask the server where a start would land.
-  return useStartAccount(cli, named, !named, source !== "bub");
+  // An ACP agent has no accounts: nothing to ask the server where a start would land.
+  return useStartAccount(cli, named, !named, source !== "acp");
 }
 
 /**
@@ -375,10 +375,10 @@ export function useComposerChoice(
   const machine = useMachine();
   const queryClient = useQueryClient();
   const prefsKey = scope ? `${source}/${scope}` : null;
-  // Bub chooses nothing here (see `CliSource`); the hooks below still run, as
+  // An ACP agent chooses nothing here (see `CliSource`); the hooks below still run, as
   // hooks must, against a stand-in that is never shown or sent.
-  const bub = source === "bub";
-  const cli: CliSource = bub ? "codex" : source;
+  const acp = source === "acp";
+  const cli: CliSource = acp ? "codex" : source;
 
   const { data: prefs } = useQuery({
     queryKey: mq(machine, "composer-prefs"),
@@ -453,7 +453,7 @@ export function useComposerChoice(
   });
   // An ACP agent's list is the agent's own (its `model` option); there is no
   // static guess to fall back on, and no list means no pickers at all.
-  const catalog = modelData?.models.length ? modelData.models : bub ? [] : MODEL_FALLBACK[cli];
+  const catalog = modelData?.models.length ? modelData.models : acp ? [] : MODEL_FALLBACK[cli];
   // Whether the list on offer describes this machine's CLI or is a static guess.
   // A pending query answers "no": a warning that flashes on every mount is noise
   // about a condition that has not been established yet.
@@ -466,7 +466,7 @@ export function useComposerChoice(
   // An ACP agent takes only what it published: a stored pick it no longer
   // offers falls back to its first model rather than becoming a typed-in one.
   const { options: models, active: activeModel, custom: modelIsCustom } =
-    bub && resolved.custom ? { options: catalog, active: catalog[0]!, custom: false } : resolved;
+    acp && resolved.custom ? { options: catalog, active: catalog[0]!, custom: false } : resolved;
   const effortOptions = effortsOf(activeModel, cli);
   const storedEffort = pick("effort") ?? "";
   // Null for a model with no ladder, and for a stored rung the current model
@@ -497,7 +497,7 @@ export function useComposerChoice(
     save.mutate(patch);
   };
 
-  if (bub) {
+  if (acp) {
     // No permission modes, and nothing at all while the agent's list is
     // unknown: an empty choice is "send none", which the composers leave out
     // of the request.
@@ -669,9 +669,9 @@ export function ComposerChoiceChips({
   account?: ReactNode;
 }) {
   const { t } = useTranslation();
-  // An ACP agent (Bub) offers its own models and efforts, and no permission
+  // An ACP agent offers its own models and efforts, and no permission
   // modes; with its list unknown there is nothing to pick at all.
-  const acp = source === "bub";
+  const acp = source === "acp";
   if (acp && choice.models.length === 0) return null;
   return (
     <>
@@ -857,8 +857,8 @@ export function ComposerQuota({
 }) {
   const { t } = useTranslation();
   const { data } = useQuota();
-  // This server reads no quota for Bub: its provider is Bub's to configure.
-  if (source === "bub") return null;
+  // This server reads no quota for an ACP agent: its provider is the agent's to configure.
+  if (source === "acp") return null;
 
   if (source === "codex") {
     const codex = data?.codex;

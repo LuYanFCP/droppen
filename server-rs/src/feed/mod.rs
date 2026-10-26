@@ -423,13 +423,13 @@ pub async fn load_session_state(drive: &Arc<Drive>, source: Source, id: &str) ->
         Source::Claude => claude::read_cli_choice(Path::new(&summary.file_path)).await,
         Source::Codex => codex::read_codex_cli_choice(Path::new(&summary.file_path)).await,
         // The `config` record the driver writes when the choice changes.
-        Source::Bub => crate::sessions::acp_transcript::read_cli_choice(Path::new(&summary.file_path)).await,
+        Source::Acp => crate::sessions::acp_transcript::read_cli_choice(Path::new(&summary.file_path)).await,
     };
     let context = match source {
         Source::Claude => crate::sessions::context::read_claude_context(Path::new(&summary.file_path)).await,
         Source::Codex => crate::sessions::context::read_codex_context(Path::new(&summary.file_path)).await,
-        // The `usage` record the driver writes from Bub's own `usage_update`.
-        Source::Bub => crate::sessions::context::read_bub_context(Path::new(&summary.file_path)).await,
+        // The `usage` record the driver writes from the agent's own `usage_update`.
+        Source::Acp => crate::sessions::context::read_acp_context(Path::new(&summary.file_path)).await,
     };
     // The CLI's own figure wins, then the model on the entry the reading came
     // from, then the reading itself; see `context::resolve_window`.
@@ -448,7 +448,7 @@ pub async fn load_session_state(drive: &Arc<Drive>, source: Source, id: &str) ->
     // `raw.claudeRoot ?? "local"` says.
     let claude_root = match source {
         Source::Claude => Some(summary.claude_root.unwrap_or(ClaudeRoot::Local)),
-        Source::Codex | Source::Bub => None,
+        Source::Codex | Source::Acp => None,
     };
     // A row is a row wherever it is served from: the list route, the detail
     // route and this feed's `state` frames must not disagree about whether a
@@ -460,12 +460,12 @@ pub async fn load_session_state(drive: &Arc<Drive>, source: Source, id: &str) ->
     // Only claude sessions rotate, and only this instance's log knows about it.
     let rotation = match source {
         Source::Claude => drive.accounts.rotation_log().latest(id),
-        Source::Codex | Source::Bub => None,
+        Source::Codex | Source::Acp => None,
     };
     let receipts = drive.injections.receipts().for_session(source, id, crate::inject::receipts::now_ms());
     let questions = match source {
         Source::Claude => drive.injections.questions().for_session(id, crate::inject::questions::now_ms()),
-        Source::Codex | Source::Bub => Vec::new(),
+        Source::Codex | Source::Acp => Vec::new(),
     };
     Some(SessionState {
         summary,
@@ -597,7 +597,7 @@ pub async fn load_transcript(paths: &Paths, source: Source, file_path: &Path, si
         Source::Codex => codex::parse_codex_transcript(paths, file_path)
             .await
             .map(|items| Transcript::new(file_path, Arc::new(items))),
-        Source::Bub => crate::sessions::acp_transcript::parse_transcript(file_path)
+        Source::Acp => crate::sessions::acp_transcript::parse_transcript(file_path)
             .await
             .map(|items| Transcript::new(file_path, Arc::new(items))),
     };
@@ -626,7 +626,7 @@ pub async fn read_transcript_uncached(paths: &Paths, source: Source, file_path: 
         Source::Codex => codex::parse_codex_transcript(paths, file_path)
             .await
             .map(|items| Transcript::new(file_path, Arc::new(items))),
-        Source::Bub => crate::sessions::acp_transcript::parse_transcript(file_path)
+        Source::Acp => crate::sessions::acp_transcript::parse_transcript(file_path)
             .await
             .map(|items| Transcript::new(file_path, Arc::new(items))),
     };

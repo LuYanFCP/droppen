@@ -25,10 +25,9 @@
 //! [`crate::sessions::acp_transcript`] keeps; that file is what the session
 //! view reads.
 //!
-//! Everything here is the same for every ACP agent. What differs — how the
-//! agent is started, what it is called, what to tell a user who has not
-//! installed it — is an [`AcpAgent`], and adding an agent is adding one of
-//! those (plus its [`Source`] and its icon).
+//! Everything here is the same for every ACP agent. Which agent runs is the
+//! user's to configure ([`crate::acp_agent`]): how it is started, and what to
+//! tell a user whose agent cannot be started, is an [`AcpAgent`].
 //!
 //! One message runs at a time. A message sent mid-turn waits in the driver's
 //! queue and goes in when the turn ends: ACP takes a second `session/prompt`
@@ -62,8 +61,9 @@ use tokio::sync::{mpsc, oneshot};
 
 /// How long an agent may take to start and open a session.
 ///
-/// Generous: `initialize` may import a whole framework and its plugins (Bub
-/// is Python), and `session/load` reads and replays the whole history.
+/// Generous: `initialize` may import a whole framework and its plugins (an
+/// agent may be a Python program), and `session/load` reads and replays the
+/// whole history.
 const START_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// One agent this server drives over ACP.
@@ -93,7 +93,7 @@ pub struct Launch {
 /// The ACP agent behind a session source, if it is one.
 pub fn agent(source: Source) -> Option<&'static AcpAgent> {
     match source {
-        Source::Bub => Some(&crate::bub::AGENT),
+        Source::Acp => Some(&crate::acp_agent::AGENT),
         Source::Claude | Source::Codex => None,
     }
 }
@@ -135,7 +135,7 @@ fn check_options(agent: &AcpAgent, options: &SendOptions) -> Result<(), InjectEr
     let name = agent.name;
     if options.account.named().is_some() || matches!(options.account, AccountChoice::Rule(_)) {
         return Err(InjectError::message(format!(
-            "{name} sessions run on {name}'s own configuration; there is no account to choose"
+            "{name} runs on its own configuration; there is no account to choose"
         )));
     }
     let named = |value: &Option<String>| value.as_deref().is_some_and(|value| !value.trim().is_empty());
@@ -180,6 +180,9 @@ struct Started {
 /// Start `agent` in `workdir` and connect to it.
 async fn start(agent: &AcpAgent, paths: &Paths, workdir: &Path) -> Result<Started, InjectError> {
     let launch = (agent.launch)(paths);
+    if launch.program.as_os_str().is_empty() {
+        return Err(InjectError::message(format!("no ACP agent is configured. {}", agent.install_hint)));
+    }
     let mut child = tokio::process::Command::new(&launch.program)
         .args(&launch.args)
         .current_dir(workdir)
@@ -356,7 +359,7 @@ impl InjectionRegistry {
         tokio::fs::create_dir_all(&archived)
             .await
             .and(tokio::fs::rename(&from, archived.join(format!("{id}.jsonl"))).await)
-            .map_err(|error| ArchiveError(format!("cannot archive the {name} session: {error}")))
+            .map_err(|error| ArchiveError(format!("cannot archive the ACP session: {error}")))
     }
 
     async fn acp_spawn(self: &Arc<Self>, agent: &'static AcpAgent, id: Option<&str>, cwd: Option<&str>) -> Result<(String, Handle), InjectError> {
@@ -367,7 +370,7 @@ impl InjectionRegistry {
             Some(id) => Some(
                 crate::sessions::acp_transcript::find_session(&self.paths, agent.source, id)
                     .await
-                    .ok_or_else(|| InjectError::message(format!("{name} session not found")))?
+                    .ok_or_else(|| InjectError::message("ACP session not found"))?
                     .cwd
                     .0,
             ),
@@ -463,7 +466,7 @@ mod tests {
 
     #[test]
     fn options_an_acp_agent_cannot_honour_are_refused() {
-        let agent = &crate::bub::AGENT;
+        let agent = &crate::acp_agent::AGENT;
         assert!(check_options(agent, &SendOptions::default()).is_ok());
         assert!(check_options(
             agent,
@@ -488,13 +491,13 @@ mod tests {
             },
         ] {
             let error = check_options(agent, &refused).expect_err("refused");
-            assert!(error.to_string().contains("Bub"), "the refusal names the agent: {error}");
+            assert!(error.to_string().contains("ACP agent"), "the refusal names the agent: {error}");
         }
     }
 
     #[test]
     fn a_model_or_effort_is_checked_against_what_the_agent_offers() {
-        let agent = &crate::bub::AGENT;
+        let agent = &crate::acp_agent::AGENT;
         let offered = crate::acp::config_options(&json!({"configOptions": [
             {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "a:x",
              "options": [{"value": "a:x", "name": "X"}, {"value": "a:y", "name": "Y"}]},
@@ -516,7 +519,7 @@ mod tests {
 
     #[test]
     fn only_the_acp_sources_have_an_agent() {
-        assert_eq!(agent(Source::Bub).map(|agent| agent.source), Some(Source::Bub));
+        assert_eq!(agent(Source::Acp).map(|agent| agent.source), Some(Source::Acp));
         assert!(agent(Source::Claude).is_none());
         assert!(agent(Source::Codex).is_none());
     }

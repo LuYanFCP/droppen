@@ -913,8 +913,11 @@ export const zhCN: Record<string, string> = {
   "Droppen {{version}} is ready · restart to update": "新版本 Droppen {{version}} 已就绪 · 重启以更新",
   "restart": "重启",
   "no room beside the returned message's attachments (at most {{max}}), so these were taken out: {{names}}": "退回的消息自带的附件放回后已没有空位（最多 {{max}} 个），以下附件已被移出：{{names}}",
-  // Settings → Bub (`features/settings/settings-view.tsx`).
-  "Droppen runs Bub through its ACP server; install it into Bub's environment with `bub install bub-acp-server@main`.": "Droppen 通过 Bub 的 ACP 服务驱动它；请用 `bub install bub-acp-server@main` 安装到 Bub 所在的环境。",
+  // Settings → ACP agent (`features/settings/settings-view.tsx`), and the agent's name where none is set.
+  "ACP agent": "ACP 智能体",
+  "acp agent": "acp 智能体",
+  "Any agent that speaks the Agent Client Protocol (ACP) over stdio can run sessions here. Give the command that starts it in ACP mode; leave the executable empty to turn it off.": "任何通过 stdio 使用 Agent Client Protocol（ACP）的智能体都可以在这里运行会话。填写以 ACP 模式启动它的命令；可执行文件留空即关闭。",
+  "arguments (separated by spaces)": "参数（以空格分隔）",
   "executable": "可执行文件",
   "environment (one KEY=VALUE per line)": "环境变量（每行一个 KEY=VALUE）",
   "· saved: {{names}} (a new block replaces them all)": "· 已保存：{{names}}（填写新的内容会全部替换）",

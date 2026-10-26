@@ -481,6 +481,66 @@
         "required": [],
         "type": "object"
       },
+      "AcpAgentSettings": {
+        "description": "How the ACP agent is started, as a client sees it: the variables' names,\nnot their values.",
+        "properties": {
+          "args": {
+            "description": "Its arguments, in order.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "command": {
+            "description": "The configured executable, or `\"\"` when no agent is configured.",
+            "type": "string"
+          },
+          "envNames": {
+            "description": "The names of the extra environment variables, in order.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "description": "What the user calls the agent, or `\"\"` for the generic name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "command",
+          "args",
+          "envNames"
+        ],
+        "type": "object"
+      },
+      "AcpAgentSettingsUpdate": {
+        "description": "The body of `PUT /api/acp/settings`; every field is a patch.",
+        "properties": {
+          "args": {
+            "description": "The arguments; absent leaves them alone.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "command": {
+            "description": "The executable; `\"\"` removes the agent, absent leaves it alone.",
+            "type": "string"
+          },
+          "env": {
+            "description": "A `KEY=VALUE`-per-line block that replaces every stored variable; `\"\"`\nclears them, absent leaves them alone.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The name; `\"\"` goes back to the generic one, absent leaves it alone.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
       "AgentTranscript": {
         "description": "A subagent's own transcript.",
         "properties": {
@@ -955,47 +1015,6 @@
           "taskType",
           "startedAt"
         ],
-        "type": "object"
-      },
-      "BubSettings": {
-        "description": "How Bub is started, as a client sees it: the variables' names, not their values.",
-        "properties": {
-          "command": {
-            "description": "The configured executable, or `\"\"` for the default.",
-            "type": "string"
-          },
-          "defaultCommand": {
-            "description": "What an empty `command` runs.",
-            "type": "string"
-          },
-          "envNames": {
-            "description": "The names of the extra environment variables, in order.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "command",
-          "defaultCommand",
-          "envNames"
-        ],
-        "type": "object"
-      },
-      "BubSettingsUpdate": {
-        "description": "The body of `PUT /api/bub/settings`; every field is a patch.",
-        "properties": {
-          "command": {
-            "description": "The executable; `\"\"` goes back to the default, absent leaves it alone.",
-            "type": "string"
-          },
-          "env": {
-            "description": "A `KEY=VALUE`-per-line block that replaces every stored variable; `\"\"`\nclears them, absent leaves them alone.",
-            "type": "string"
-          }
-        },
-        "required": [],
         "type": "object"
       },
       "CancelRequest": {
@@ -5523,7 +5542,7 @@
         "enum": [
           "claude",
           "codex",
-          "bub"
+          "acp"
         ],
         "type": "string"
       },
@@ -7259,6 +7278,73 @@
         ]
       }
     },
+    "/api/acp/settings": {
+      "get": {
+        "deprecated": false,
+        "description": "How the ACP agent is started on this machine.",
+        "operationId": "acp_settings",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcpAgentSettings"
+                }
+              }
+            },
+            "description": "The ACP agent's name, command line and the names of its extra variables"
+          }
+        },
+        "summary": "ACP agent settings",
+        "tags": [
+          "acp"
+        ]
+      },
+      "put": {
+        "deprecated": false,
+        "description": "Change how the ACP agent is started. Applies to the next agent process; one\nalready running keeps what it was started with.",
+        "operationId": "update_acp_settings",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcpAgentSettingsUpdate"
+              }
+            }
+          },
+          "description": "The body of `PUT /api/acp/settings`; every field is a patch.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcpAgentSettings"
+                }
+              }
+            },
+            "description": "Updated ACP agent settings"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An unusable name, executable, argument or environment block"
+          }
+        },
+        "summary": "Update the ACP agent settings",
+        "tags": [
+          "acp"
+        ]
+      }
+    },
     "/api/api-chats/{id}": {
       "delete": {
         "deprecated": false,
@@ -7944,73 +8030,6 @@
         "summary": "Mint a websocket or download ticket",
         "tags": [
           "auth"
-        ]
-      }
-    },
-    "/api/bub/settings": {
-      "get": {
-        "deprecated": false,
-        "description": "How Bub is started on this machine.",
-        "operationId": "bub_settings",
-        "parameters": [],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BubSettings"
-                }
-              }
-            },
-            "description": "The Bub executable and the names of its extra variables"
-          }
-        },
-        "summary": "Bub settings",
-        "tags": [
-          "bub"
-        ]
-      },
-      "put": {
-        "deprecated": false,
-        "description": "Change how Bub is started. Applies to the next Bub process; one already\nrunning keeps what it was started with.",
-        "operationId": "update_bub_settings",
-        "parameters": [],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BubSettingsUpdate"
-              }
-            }
-          },
-          "description": "The body of `PUT /api/bub/settings`; every field is a patch.",
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BubSettings"
-                }
-              }
-            },
-            "description": "Updated Bub settings"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            },
-            "description": "An unusable executable or environment block"
-          }
-        },
-        "summary": "Update the Bub settings",
-        "tags": [
-          "bub"
         ]
       }
     },

@@ -142,9 +142,9 @@ pub async fn read_claude_context(file_path: &Path) -> Option<ContextUsage> {
     None
 }
 
-/// Bub's occupancy: the newest `usage` record, which is Bub's own
-/// `usage_update` with the window it reported beside it.
-pub async fn read_bub_context(file_path: &Path) -> Option<ContextUsage> {
+/// An ACP agent's occupancy: the newest `usage` record, which is the agent's
+/// own `usage_update` with the window it reported beside it.
+pub async fn read_acp_context(file_path: &Path) -> Option<ContextUsage> {
     let lines = read_tail_lines(file_path, TAIL_BYTES).await.ok()?;
     lines.iter().rev().filter_map(|line| try_parse(line)).find_map(|entry| {
         if entry.get("type").and_then(Value::as_str) != Some("usage") {

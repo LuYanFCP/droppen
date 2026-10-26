@@ -547,7 +547,7 @@ pub async fn bind_session_account(
     let account_id = body.account_id.0;
     let Some(provider) = AccountProvider::of(source) else {
         return Err(ApiError::bad_request(
-            "Bub sessions run on Bub's own configuration and have no account to bind",
+            "ACP sessions run on the agent's own configuration and have no account to bind",
         ));
     };
     if let Some(account_id) = account_id.as_deref() {

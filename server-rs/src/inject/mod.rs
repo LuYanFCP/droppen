@@ -1055,7 +1055,7 @@ fn cli_binary(source: Source) -> &'static str {
     match source {
         Source::Claude => "claude",
         Source::Codex => "codex",
-        Source::Bub => "bub",
+        Source::Acp => "the ACP agent",
     }
 }
 
@@ -2051,9 +2051,9 @@ impl InjectionRegistry {
                 // where claude would have said something.
                 Some(session) => session.status == SessionStatus::Running,
             },
-            // A Bub process is never journalled, so it is never adopted: it
+            // An ACP agent process is never journalled, so it is never adopted: it
             // dies with the server that started it (see `acp`).
-            Source::Bub => false,
+            Source::Acp => false,
         }
     }
 }
@@ -2221,7 +2221,7 @@ async fn transcript_progress(source: Source, paths: &Paths, id: &str) -> Option<
         // is always `None`, which falls back to output activity exactly as the
         // TypeScript does for a session with no file yet.
         Source::Codex => codex::find_codex_session(paths, id).await.map(|s| std::path::PathBuf::from(s.file_path)),
-        Source::Bub => Some(crate::sessions::acp_transcript::transcript_path(paths, source, id)),
+        Source::Acp => Some(crate::sessions::acp_transcript::transcript_path(paths, source, id)),
     }?;
     let modified = tokio::fs::metadata(&path).await.ok()?.modified().ok()?;
     let age = std::time::SystemTime::now().duration_since(modified).ok()?;

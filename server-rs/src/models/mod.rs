@@ -316,7 +316,7 @@ pub async fn list_models(State(state): State<AppState>, ApiQuery(query): ApiQuer
     let (models, source) = match query.source {
         Source::Codex => codex_models(&paths.codex_models_cache()).await,
         Source::Claude => claude_models(&state, query.account_id.as_deref()).await,
-        Source::Bub => acp_models(&state, query.source).await,
+        Source::Acp => acp_models(&state, query.source).await,
     };
     Json(ModelList { models, source })
 }
@@ -328,7 +328,7 @@ pub(crate) async fn model_ids(state: &AppState, source: Source, account_id: Opti
     let (models, _) = match source {
         Source::Codex => codex_models(&state.paths.codex_models_cache()).await,
         Source::Claude => claude_models(state, account_id).await,
-        Source::Bub => acp_models(state, source).await,
+        Source::Acp => acp_models(state, source).await,
     };
     models.into_iter().map(|model| model.id).collect()
 }
@@ -451,8 +451,8 @@ fn probe_dir(accounts: &crate::accounts::store::AccountsStore, account: &Account
 /// second kind of wrong.
 pub async fn accepted_efforts(paths: &crate::sessions::Paths, source: Source, model: Option<&str>) -> Option<Vec<String>> {
     match source {
-        // Bub checks an effort against the model it runs when it is set.
-        Source::Bub => None,
+        // The agent checks an effort against the model it runs when it is set.
+        Source::Acp => None,
         Source::Claude => Some(claude_efforts(model.unwrap_or_default())),
         Source::Codex => {
             let (models, list) = codex_models(&paths.codex_models_cache()).await;
@@ -496,8 +496,8 @@ pub fn permission_is_known(source: Source, permission: &str) -> bool {
     match source {
         Source::Claude => CLAUDE_PERMISSIONS.contains(&permission),
         Source::Codex => crate::inject::codex_permission_flags(permission).is_ok(),
-        // Bub has no permission modes to choose between.
-        Source::Bub => false,
+        // An ACP agent has no permission modes to choose between.
+        Source::Acp => false,
     }
 }
 

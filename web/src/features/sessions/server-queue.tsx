@@ -127,8 +127,8 @@ export function ServerQueueList({
               </span>
             ) : (
               <>
-                {/* Bub takes the next message only when the turn in flight ends. */}
-                {source !== "bub" && <button
+                {/* An ACP agent takes the next message only when the turn in flight ends. */}
+                {source !== "acp" && <button
                   type="button"
                   disabled={busy}
                   title={

@@ -1532,7 +1532,7 @@ function Composer({
   const deliveryQueue = useMemo(() => detail.summary.resident?.queuedMessages ?? [], [detail.summary.resident]);
   const delivery = useDeliveryPreviews(sessionKey(session), {
     items: detail.items, startIndex: detail.startIndex, totalItems: detail.totalItems, queue: deliveryQueue,
-    // Codex and Bub write every queued message into the transcript when it
+    // Codex and the ACP agent write every queued message into the transcript when it
     // runs; claude folds a steered one into its turn without an echo.
     receipts: detail.receipts, adoptQueue: source !== "claude",
   }, true);
@@ -1559,7 +1559,7 @@ function Composer({
             text: message.text,
             ...(message.images?.length ? { images: message.images } : {}),
             ...(message.files?.length ? { files: message.files } : {}),
-            // Omitted when empty: Bub chooses its own model and has no
+            // Omitted when empty: an ACP agent may choose its own model and has no
             // permission modes, and refuses a message that names either.
             ...(activeModel.id ? { model: activeModel.id } : {}),
             // Omitted, not null: a model with no effort ladder refuses `--effort`
@@ -2746,15 +2746,15 @@ export function SessionDetailInner({
         metadata={<>
           {readOnly && !paneActions && <DeviceChip machine={machine} />}
           {chat ? (
-            // An instant chat is Claude's or Codex's; Bub has none.
-            <Badge variant={summary.source === "bub" ? "default" : summary.source} className="shrink-0">
+            // An instant chat is Claude's or Codex's; the ACP agent has none.
+            <Badge variant={summary.source === "acp" ? "default" : summary.source} className="shrink-0">
               {t("chat")}
             </Badge>
           ) : (
             <SourceIcon source={summary.source} className="text-muted" />
           )}
-          {/* Bub runs on its own configuration: there is no account to show or bind. */}
-          {!readOnly && summary.source !== "bub" && (
+          {/* An ACP agent runs on its own configuration: there is no account to show or bind. */}
+          {!readOnly && summary.source !== "acp" && (
             <SessionAccountBadge
               source={summary.source}
               id={id}

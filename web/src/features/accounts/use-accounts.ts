@@ -85,7 +85,7 @@ export function useStartAccount(
   provider: AccountProvider,
   model?: string | null,
   chooseModel = false,
-  /** False for a start that runs on no account at all (Bub): nothing is asked, and there is no start. */
+  /** False for a start that runs on no account at all (an ACP agent): nothing is asked, and there is no start. */
   enabled = true,
 ): { start: AccountStart | null; ready: boolean; confirm: () => Promise<boolean> } {
   const machine = useMachine();

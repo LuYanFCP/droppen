@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""A bounded, local stand-in for `bub acp`; never talks to a real model.
+"""A bounded, local stand-in for an ACP agent; never talks to a real model.
 
 Speaks the part of ACP Droppen uses: initialize, session/new, session/load,
 session/set_config_option, session/close, session/prompt and session/cancel.
 Its sessions offer a model and a reasoning effort as configuration options,
-as Bub's do. Everything it is asked is appended to `bub-calls.jsonl` in its
-working directory — or to `$FAKE_BUB_LOG`, which a probe's scratch directory
+as real agents' do. Everything it is asked is appended to `agent-calls.jsonl` in its
+working directory — or to `$FAKE_AGENT_LOG`, which a probe's scratch directory
 needs — so a test can read what it was sent. A prompt containing "wait" holds
 its turn open until it is cancelled.
 """
@@ -15,15 +15,16 @@ from pathlib import Path
 import sys
 import threading
 
-if sys.argv[1:] != ["acp"]:
+# Started with the arguments the settings give it, and only those.
+if sys.argv[1:] != ["--acp", "--stdio"]:
     sys.exit(2)
 
 # A plugin that prints to the wrong stream: not the protocol, and the client
 # has to read past it.
-print("bub: loading plugins", flush=True)
+print("agent: loading plugins", flush=True)
 
 cwd = Path.cwd()
-calls = Path(os.environ["FAKE_BUB_LOG"]) if os.environ.get("FAKE_BUB_LOG") else cwd / "bub-calls.jsonl"
+calls = Path(os.environ["FAKE_AGENT_LOG"]) if os.environ.get("FAKE_AGENT_LOG") else cwd / "agent-calls.jsonl"
 lock = threading.Lock()
 waiting = {}
 
@@ -85,8 +86,8 @@ def run_turn(request):
     update(session, {"sessionUpdate": "tool_call_update", "toolCallId": "call-1", "status": "completed",
                      "content": [{"type": "content", "content": {"type": "text", "text": "hi"}}]})
     update(session, chunk("agent_message_chunk", "Hello "))
-    update(session, chunk("agent_message_chunk", "from Bub"))
-    # Bub reports its context usage after the answer streams, as the real one does.
+    update(session, chunk("agent_message_chunk", "from the agent"))
+    # Context usage arrives after the answer streams, as a real agent may send it.
     update(session, {"sessionUpdate": "usage_update", "used": 4020, "size": 128000})
     answer(request, {"stopReason": "end_turn"})
 
@@ -95,7 +96,7 @@ for raw in sys.stdin:
     request = json.loads(raw)
     method = request.get("method")
     params = request.get("params", {})
-    log({"method": method, "params": params, "mark": os.environ.get("FAKE_BUB_MARK")})
+    log({"method": method, "params": params, "mark": os.environ.get("FAKE_AGENT_MARK")})
     if method == "session/cancel":
         done = waiting.pop(params.get("sessionId"), None)
         if done:

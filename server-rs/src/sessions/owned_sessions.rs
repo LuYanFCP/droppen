@@ -112,7 +112,7 @@ impl OwnedSessions {
             Source::Codex => &self.codex,
             // Owned by where its transcript is kept, not by a record here; see
             // `crate::sessions::acp_transcript`.
-            Source::Bub => {
+            Source::Acp => {
                 static NONE: BTreeMap<String, ServerId> = BTreeMap::new();
                 &NONE
             }

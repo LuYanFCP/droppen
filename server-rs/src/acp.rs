@@ -141,7 +141,7 @@ pub struct ToolCall {
     /// The tool's input, as the agent gave it.
     #[serde(default)]
     pub raw_input: Option<Value>,
-    /// Extension data: Bub marks a context hand-off here.
+    /// Extension data: an agent may mark a context hand-off here.
     #[serde(default, rename = "_meta")]
     pub meta: Option<Map<String, Value>>,
 }
@@ -162,7 +162,7 @@ pub struct ToolCallUpdate {
     /// What it returned to the agent.
     #[serde(default)]
     pub raw_output: Option<Value>,
-    /// Extension data: Bub marks a context hand-off here.
+    /// Extension data: an agent may mark a context hand-off here.
     #[serde(default, rename = "_meta")]
     pub meta: Option<Map<String, Value>>,
 }

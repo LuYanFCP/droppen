@@ -53,8 +53,8 @@ export function SessionAccountBadge({
   rotation,
   onOpenSession,
 }: {
-  /** Which CLI this session belongs to; it picks the accounts and the route. Bub has no accounts. */
-  source: Exclude<SessionSource, "bub">;
+  /** Which CLI this session belongs to; it picks the accounts and the route. An ACP agent has no accounts. */
+  source: Exclude<SessionSource, "acp">;
   id: string;
   claudeRoot: ClaudeRoot | undefined;
   account: AccountRef | undefined;

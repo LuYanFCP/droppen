@@ -47,7 +47,7 @@ import type { MachineKey } from "@/lib/machines/key";
 
 type ScheduledTask = components["schemas"]["ScheduledTask"];
 type TaskStatus = components["schemas"]["TaskStatus"];
-// The agents a schedule can run: Bub is not one of them (yet).
+// The agents a schedule can run: the ACP agent is not one of them (yet).
 type Source = CliSource;
 
 export const scheduledTasksKey = (machine: MachineKey) => mq(machine, "scheduled-tasks");

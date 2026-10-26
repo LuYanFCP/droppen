@@ -326,6 +326,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/acp/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * ACP agent settings
+         * @description How the ACP agent is started on this machine.
+         */
+        get: operations["acp_settings"];
+        /**
+         * Update the ACP agent settings
+         * @description Change how the ACP agent is started. Applies to the next agent process; one
+         *     already running keeps what it was started with.
+         */
+        put: operations["update_acp_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/api-chats/{id}": {
         parameters: {
             query?: never;
@@ -614,31 +639,6 @@ export interface paths {
          * @description Mint a scoped, short-lived credential for a URL that cannot carry a header.
          */
         post: operations["auth_ticket"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/bub/settings": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Bub settings
-         * @description How Bub is started on this machine.
-         */
-        get: operations["bub_settings"];
-        /**
-         * Update the Bub settings
-         * @description Change how Bub is started. Applies to the next Bub process; one already
-         *     running keeps what it was started with.
-         */
-        put: operations["update_bub_settings"];
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2791,6 +2791,34 @@ export interface components {
              */
             secret?: string;
         };
+        /**
+         * @description How the ACP agent is started, as a client sees it: the variables' names,
+         *     not their values.
+         */
+        AcpAgentSettings: {
+            /** @description Its arguments, in order. */
+            args: string[];
+            /** @description The configured executable, or `""` when no agent is configured. */
+            command: string;
+            /** @description The names of the extra environment variables, in order. */
+            envNames: string[];
+            /** @description What the user calls the agent, or `""` for the generic name. */
+            name: string;
+        };
+        /** @description The body of `PUT /api/acp/settings`; every field is a patch. */
+        AcpAgentSettingsUpdate: {
+            /** @description The arguments; absent leaves them alone. */
+            args?: string[];
+            /** @description The executable; `""` removes the agent, absent leaves it alone. */
+            command?: string;
+            /**
+             * @description A `KEY=VALUE`-per-line block that replaces every stored variable; `""`
+             *     clears them, absent leaves them alone.
+             */
+            env?: string;
+            /** @description The name; `""` goes back to the generic one, absent leaves it alone. */
+            name?: string;
+        };
         /** @description A subagent's own transcript. */
         AgentTranscript: {
             /** @description Which agent type answered. */
@@ -3097,25 +3125,6 @@ export interface components {
             toolUses?: number;
             /** @description Tokens the task has spent so far, as the CLI counts them. */
             totalTokens?: number;
-        };
-        /** @description How Bub is started, as a client sees it: the variables' names, not their values. */
-        BubSettings: {
-            /** @description The configured executable, or `""` for the default. */
-            command: string;
-            /** @description What an empty `command` runs. */
-            defaultCommand: string;
-            /** @description The names of the extra environment variables, in order. */
-            envNames: string[];
-        };
-        /** @description The body of `PUT /api/bub/settings`; every field is a patch. */
-        BubSettingsUpdate: {
-            /** @description The executable; `""` goes back to the default, absent leaves it alone. */
-            command?: string;
-            /**
-             * @description A `KEY=VALUE`-per-line block that replaces every stored variable; `""`
-             *     clears them, absent leaves them alone.
-             */
-            env?: string;
         };
         /** @description `POST /api/cloud/link/cancel`. */
         CancelRequest: {
@@ -5677,7 +5686,7 @@ export interface components {
          * @description Which CLI a session belongs to.
          * @enum {string}
          */
-        Source: "claude" | "codex" | "bub";
+        Source: "claude" | "codex" | "acp";
         /** @description One CLI's share of the window. */
         SourceUsage: {
             /** @description Estimated USD; an unpriced model contributes nothing. */
@@ -6755,6 +6764,60 @@ export interface operations {
             };
         };
     };
+    acp_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The ACP agent's name, command line and the names of its extra variables */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcpAgentSettings"];
+                };
+            };
+        };
+    };
+    update_acp_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description The body of `PUT /api/acp/settings`; every field is a patch. */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AcpAgentSettingsUpdate"];
+            };
+        };
+        responses: {
+            /** @description Updated ACP agent settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcpAgentSettings"];
+                };
+            };
+            /** @description An unusable name, executable, argument or environment block */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     get_api_chat: {
         parameters: {
             query?: never;
@@ -7264,60 +7327,6 @@ export interface operations {
             };
             /** @description Too many live tickets */
             429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Error"];
-                };
-            };
-        };
-    };
-    bub_settings: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The Bub executable and the names of its extra variables */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BubSettings"];
-                };
-            };
-        };
-    };
-    update_bub_settings: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** @description The body of `PUT /api/bub/settings`; every field is a patch. */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["BubSettingsUpdate"];
-            };
-        };
-        responses: {
-            /** @description Updated Bub settings */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BubSettings"];
-                };
-            };
-            /** @description An unusable executable or environment block */
-            400: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -740,7 +740,7 @@ pub async fn session_questions(
 ) -> Result<Json<SessionQuestions>, ApiError> {
     let questions = match source {
         Source::Claude => state.drive.injections.questions().for_session(&id, questions::now_ms()),
-        Source::Codex | Source::Bub => Vec::new(),
+        Source::Codex | Source::Acp => Vec::new(),
     };
     Ok(Json(SessionQuestions { questions }))
 }
@@ -1248,7 +1248,7 @@ pub async fn archive_session(State(state): State<AppState>, ApiPath((source, id)
                 .await
                 .map_err(|error| ApiError::conflict(error.to_string()))?;
         }
-        Source::Bub => {
+        Source::Acp => {
             drive
                 .injections
                 .archive_acp(source, &id)
@@ -1347,7 +1347,7 @@ async fn whole_transcript(drive: &crate::drive::Drive, source: Source, id: &str)
         Source::Codex => codex::find_codex_session(&drive.paths, id)
             .await
             .map(|summary| PathBuf::from(summary.file_path)),
-        Source::Bub => crate::sessions::acp_transcript::find_session(&drive.paths, source, id)
+        Source::Acp => crate::sessions::acp_transcript::find_session(&drive.paths, source, id)
             .await
             .map(|summary| PathBuf::from(summary.file_path)),
     }
