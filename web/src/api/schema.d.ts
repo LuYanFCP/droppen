@@ -4305,6 +4305,11 @@ export interface components {
             math?: components["schemas"]["MathStyle"];
             /** @description How the session list is grouped. */
             sessionGrouping: components["schemas"]["SessionGrouping"];
+            /**
+             * @description Whether the session list shows each session's subagents; a body
+             *     without it means `off`.
+             */
+            subagentTree?: components["schemas"]["SubagentTree"];
             /** @description How transcripts render. */
             transcriptStyle: components["schemas"]["TranscriptStyle"];
         };
@@ -5747,6 +5752,15 @@ export interface components {
             /** @description 04 · Finishing up. */
             wrap: components["schemas"]["StepState"];
         };
+        /**
+         * @description Whether the session list shows the subagents each session delegated to.
+         *
+         *     Opt-in: off until somebody turns it on, and while it is off the list is
+         *     exactly what it was before the tree existed — the subagents are not even
+         *     looked for ([`crate::sessions::subagents`]).
+         * @enum {string}
+         */
+        SubagentTree: "off" | "on";
         /**
          * @description A new subscription.
          *

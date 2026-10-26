@@ -129,6 +129,23 @@ export function PreferencesSection() {
       </div>
       <div className={cn(preferenceRow, "mt-3")}>
         <div>
+          <div className={ROW_LABEL}>{t("subagent tree")}</div>
+          <div className={ROW_HINT}>{t("list the subagents a session delegated to under it")}</div>
+        </div>
+        {prefs ? (
+          // Opt-in: the server only looks for subagents once this is on.
+          <SettingSwitch
+            on={prefs.subagentTree === "on"}
+            disabled={save.isPending}
+            label={prefs.subagentTree === "on" ? t("enabled") : t("disabled")}
+            onChange={(on) => save.mutate({ ...prefs, subagentTree: on ? "on" : "off" })}
+          />
+        ) : (
+          <span className="font-mono text-xs text-muted">…</span>
+        )}
+      </div>
+      <div className={cn(preferenceRow, "mt-3")}>
+        <div>
           <div className={ROW_LABEL}>{t("message display")}</div>
           <div className={ROW_HINT}>{t("chat bubbles or a flat list")}</div>
         </div>

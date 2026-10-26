@@ -525,6 +525,8 @@ export const zhCN: Record<string, string> = {
   "no result and nothing is minding it any more — how this subagent ended is unknown":
     "没有结果，也没人还在看着它 — 这个子代理最后怎么样了，无从得知",
   /* a session's subagents, in the list and on their own page */
+  "subagent tree": "子代理树",
+  "list the subagents a session delegated to under it": "在会话列表里，把会话委派出去的子代理列在它下面",
   "{{n}} subagents": "{{n}} 个子代理",
   "show {{n}} subagents": "展开 {{n}} 个子代理",
   "hide {{n}} subagents": "收起 {{n}} 个子代理",

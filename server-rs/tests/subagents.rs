@@ -141,6 +141,13 @@ fn seed_codex(home: &Path) {
     }
 }
 
+/// The tree is opt-in: turn it on, as the settings page does.
+async fn enable_tree(server: &TestServer) {
+    let prefs = json!({"sessionGrouping": "flat", "composerSend": "enter", "fontSize": "default", "language": "auto", "transcriptStyle": "flat", "subagentTree": "on"});
+    let (status, body) = server.json("PUT", "/api/prefs", &prefs).await;
+    assert_eq!(status, 200, "{body}");
+}
+
 fn row<'a>(list: &'a Value, id: &str) -> Option<&'a Value> {
     list["sessions"].as_array().expect("sessions").iter().find(|row| row["id"] == id)
 }
@@ -148,6 +155,15 @@ fn row<'a>(list: &'a Value, id: &str) -> Option<&'a Value> {
 #[tokio::test]
 async fn claude_subagents_nest_under_their_session_and_are_read_one_by_one() {
     let server = TestServer::start_with(seed_claude).await;
+    let list = server.get_json("/api/sessions?scope=all").await;
+    assert_eq!(
+        row(&list, CLAUDE_SESSION).expect("the session lists")["children"],
+        json!([]),
+        "off until turned on"
+    );
+    let detail = server.get_json(&format!("/api/sessions/claude/{CLAUDE_SESSION}")).await;
+    assert_eq!(detail["summary"]["children"], json!([]), "on the detail too");
+    enable_tree(&server).await;
     let list = server.get_json("/api/sessions?scope=all").await;
     let session = row(&list, CLAUDE_SESSION).expect("the session lists");
     let children = session["children"].as_array().expect("children");
@@ -180,6 +196,7 @@ async fn claude_subagents_nest_under_their_session_and_are_read_one_by_one() {
 
     // Opening only the nested one leaves the one above it unread.
     let server2 = TestServer::start_with(seed_claude).await;
+    enable_tree(&server2).await;
     server2
         .json("POST", &format!("/api/sessions/claude/{CLAUDE_SESSION}/agents/a2/seen"), &json!({}))
         .await;
@@ -208,7 +225,17 @@ async fn claude_subagents_nest_under_their_session_and_are_read_one_by_one() {
 async fn codex_subagent_threads_nest_under_their_parent_and_open_with_a_way_back() {
     let server = TestServer::start_with(seed_codex).await;
     let list = server.get_json("/api/sessions?scope=all").await;
-    assert!(row(&list, CODEX_CHILD).is_none(), "a subagent thread is not a top-level row");
+    assert!(
+        row(&list, CODEX_CHILD).is_none(),
+        "a subagent thread is not a top-level row, tree or no tree"
+    );
+    assert_eq!(
+        row(&list, CODEX_PARENT).expect("the parent lists")["children"],
+        json!([]),
+        "off until turned on"
+    );
+    enable_tree(&server).await;
+    let list = server.get_json("/api/sessions?scope=all").await;
     assert!(row(&list, CODEX_GUARDIAN).is_none(), "nor is a guardian review");
     let parent = row(&list, CODEX_PARENT).expect("the parent lists");
     let children = parent["children"].as_array().expect("children");

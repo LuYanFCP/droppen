@@ -94,9 +94,14 @@ pub struct SessionChild {
     pub children: Vec<SessionChild>,
 }
 
-/// Fill in `children` on every row.
+/// Fill in `children` on every row, while the `subagentTree` pref is on.
 pub async fn apply(paths: &Paths, sessions: &mut [SessionSummary]) {
     if sessions.is_empty() {
+        return;
+    }
+    // Opt-in (`subagentTree` in the prefs): until it is on, nothing is looked
+    // for, and every row goes out with no children, as before the tree.
+    if crate::prefs::read_prefs(paths).await.subagent_tree != crate::prefs::SubagentTree::On {
         return;
     }
     let marks = seen::read(paths).await;

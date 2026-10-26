@@ -36,6 +36,7 @@ async fn prefs_round_trip_and_leave_no_file_behind() {
             "transcriptStyle": "flat",
             "math": "rendered",
             "diagrams": "rendered",
+            "subagentTree": "off",
         })
     );
 
@@ -47,6 +48,7 @@ async fn prefs_round_trip_and_leave_no_file_behind() {
         "transcriptStyle": "bubble",
         "math": "source",
         "diagrams": "source",
+        "subagentTree": "on",
     });
     let (status, body) = server.json("PUT", "/api/prefs", &wanted).await;
     assert_eq!(status, 200, "PUT /api/prefs -> {status}: {body}");
@@ -72,6 +74,7 @@ async fn prefs_round_trip_and_leave_no_file_behind() {
             "language=zh-CN",
             "math=source",
             "sessionGrouping=directory",
+            "subagentTree=on",
             "transcriptStyle=bubble",
         ]
     );

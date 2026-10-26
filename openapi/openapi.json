@@ -3344,6 +3344,10 @@
             "$ref": "#/components/schemas/SessionGrouping",
             "description": "How the session list is grouped."
           },
+          "subagentTree": {
+            "$ref": "#/components/schemas/SubagentTree",
+            "description": "Whether the session list shows each session's subagents; a body\nwithout it means `off`."
+          },
           "transcriptStyle": {
             "$ref": "#/components/schemas/TranscriptStyle",
             "description": "How transcripts render."
@@ -5695,6 +5699,14 @@
           "wrap"
         ],
         "type": "object"
+      },
+      "SubagentTree": {
+        "description": "Whether the session list shows the subagents each session delegated to.\n\nOpt-in: off until somebody turns it on, and while it is off the list is\nexactly what it was before the tree existed — the subagents are not even\nlooked for ([`crate::sessions::subagents`]).",
+        "enum": [
+          "off",
+          "on"
+        ],
+        "type": "string"
       },
       "SubscribeBody": {
         "description": "A new subscription.\n\nDeliberately the exact shape of `PushSubscription.toJSON()`, so a client\nposts what the browser handed it rather than unpacking and re-packing it —\none fewer place the two keys can be swapped.",
