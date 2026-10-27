@@ -86,9 +86,11 @@ import {
 import { isSessionSource, type CreationAttempt, type NewConversation, type SessionSource } from "./new-session-flow";
 import { useCreateConversation, type AcceptedConversation } from "./use-create-conversation";
 import { useAcpSettings } from "./acp-agent";
+import { ACP_GLYPH, useAcpAgentLook } from "./acp-agent-icons";
+import { cliGlyph } from "@/components/source-icon";
 
-/** The CLIs that are always offered; the ACP agent is offered once one is configured. */
-const CLI_SOURCES: SessionSource[] = ["claude", "codex"];
+/** The CLIs that are always offered, with their marks; the ACP agent is offered once one is configured. */
+const CLI_SOURCES = (["claude", "codex"] as const).map((source) => ({ value: source, label: source, glyph: cliGlyph(source) }));
 
 /** A message on its way to becoming a session's first. */
 interface Starting {
@@ -183,8 +185,9 @@ export function NewSessionView({
   // The ACP agent, by the name it was given, once one is configured — or while
   // it is the agent already picked, so the picker never shows a blank.
   const { data: acpSettings } = useAcpSettings();
+  const acpLook = useAcpAgentLook();
   const sources = acpSettings?.command || acp
-    ? [...CLI_SOURCES, { value: "acp", label: acpSettings?.name || t("ACP agent") }]
+    ? [...CLI_SOURCES, { value: "acp", label: acpLook.name || t("ACP agent"), glyph: acpLook.glyph ?? ACP_GLYPH }]
     : CLI_SOURCES;
   const accounts = acp ? [] : accountsForProvider(accountList?.accounts ?? [], source);
   // Untouched, the picker shows where the server will start a session that

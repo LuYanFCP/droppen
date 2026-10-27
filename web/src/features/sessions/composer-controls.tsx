@@ -4,7 +4,8 @@ import { memo, useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { components } from "@/api/schema";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue, useLatest, useStableOptions } from "@/components/ui/select";
+import { glyphValue, OptionLabel, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, useLatest, useStableOptions } from "@/components/ui/select";
+import type { Glyph } from "@/components/glyph";
 import { activeRests, restChipText, restTitle, restTone } from "@/features/accounts/account-rest";
 import { QuotaBlock, QuotaGauges } from "@/features/accounts/quota-bits";
 import {
@@ -1117,7 +1118,7 @@ export function autoGrowTextarea(el: HTMLTextAreaElement | null): void {
 }
 
 /** A bare string is its own label; the object form separates the two. */
-export type ComposerOption = string | { value: string; label: string };
+export type ComposerOption = string | { value: string; label: string; glyph?: Glyph };
 
 type ComposerSelectProps = {
   value: string;
@@ -1148,7 +1149,7 @@ const ComposerSelectView = memo(function ComposerSelectView({
   ghost = false,
   className,
   label,
-}: Omit<ComposerSelectProps, "options"> & { items: readonly { value: string; label: string }[] }) {
+}: Omit<ComposerSelectProps, "options"> & { items: readonly { value: string; label: string; glyph?: Glyph }[] }) {
   return (
     <Select
       value={value}
@@ -1177,14 +1178,14 @@ const ComposerSelectView = memo(function ComposerSelectView({
             is the longest thing this control has to say. The cap still exists so
             one freakish value cannot stretch the row, and the toolbar wraps
             rather than scrolls, so a long name costs a line, not a cut-off. */}
-        <SelectValue className={ghost ? "max-w-48" : undefined} />
+        <SelectValue className={ghost ? "max-w-48" : undefined}>{glyphValue(items)}</SelectValue>
       </SelectTrigger>
       {/* Anchored to the chip like every select: a chip at the bottom of the
           composer opens upward, over the message box. */}
       <SelectContent variant={ghost ? "chip" : "field"}>
         {items.map((o) => (
           <SelectItem key={o.value} value={o.value}>
-            {o.label}
+            <OptionLabel label={o.label} glyph={o.glyph} />
           </SelectItem>
         ))}
       </SelectContent>

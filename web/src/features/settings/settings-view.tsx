@@ -29,6 +29,8 @@ import {
 } from "@/features/settings/layout";
 import { SetupSection } from "@/features/setup/settings-section";
 import { acpSettingsKey, splitArgs, useAcpSettings } from "@/features/sessions/acp-agent";
+import { ACP_AGENT_PRESETS, applyPreset, CUSTOM_PRESET, matchingPreset, presetById } from "@/features/sessions/acp-agent-presets";
+import { ACP_GLYPH, presetGlyph } from "@/features/sessions/acp-agent-icons";
 import { cn } from "@/lib/cn";
 import { formatTime } from "@/lib/format";
 import {
@@ -604,6 +606,10 @@ function ChatProviderSection() {
  * How this device starts its ACP agent: any program that speaks the Agent
  * Client Protocol over stdio, with the arguments and variables it needs.
  *
+ * A preset (`acp-agent-presets.json`) fills in the name, executable and
+ * arguments of a known agent; they stay editable, and nothing is saved until
+ * the person saves. Nothing is picked for them: no agent is the default.
+ *
  * The values are what an API key looks like, so they are never read back —
  * the server says which names are set, and a block typed here replaces them all.
  */
@@ -617,6 +623,18 @@ function AcpAgentSection() {
   const [command, setCommand] = useState<string | null>(null);
   const [args, setArgs] = useState<string | null>(null);
   const [env, setEnv] = useState<string | null>(null);
+  // The preset picked since the last save; otherwise the one the saved
+  // command line came from, if any.
+  const [preset, setPreset] = useState<string | null>(null);
+  const shownPreset = preset ?? matchingPreset(settings)?.id ?? CUSTOM_PRESET;
+  const hint = presetById(shownPreset);
+  const pickPreset = (id: string) => {
+    const next = applyPreset({ name, command, args }, id);
+    setName(next.name);
+    setCommand(next.command);
+    setArgs(next.args);
+    setPreset(id);
+  };
 
   const save = useMutation({
     mutationFn: async (patch: { name?: string; command?: string; args?: string[]; env?: string }) => {
@@ -631,6 +649,7 @@ function AcpAgentSection() {
       setCommand(null);
       setArgs(null);
       setEnv(null);
+      setPreset(null);
     },
   });
 
@@ -647,6 +666,29 @@ function AcpAgentSection() {
         <span className="text-xs text-muted">
           {t("Any agent that speaks the Agent Client Protocol (ACP) over stdio can run sessions here. Give the command that starts it in ACP mode; leave the executable empty to turn it off.")}
         </span>
+        <div className="flex flex-col gap-1">
+          <span className="text-xs text-muted">{t("preset")}</span>
+          <SelectField
+            aria-label={t("preset")}
+            value={shownPreset}
+            onValueChange={pickPreset}
+            options={[
+              { value: CUSTOM_PRESET, label: t("custom (no preset)"), glyph: ACP_GLYPH },
+              ...ACP_AGENT_PRESETS.map((p) => ({ value: p.id, label: p.name, glyph: presetGlyph(p) ?? ACP_GLYPH })),
+            ]}
+          />
+          {hint && (hint.note || hint.homepage) && (
+            <span data-preset-hint="" className="text-xs text-muted">
+              {hint.note}
+              {hint.note && hint.homepage && " · "}
+              {hint.homepage && (
+                <a href={hint.homepage} target="_blank" rel="noreferrer" className="underline hover:text-fg">
+                  {t("learn more")}
+                </a>
+              )}
+            </span>
+          )}
+        </div>
         <label className="flex flex-col gap-1">
           <span className="text-xs text-muted">{t("name")}</span>
           <input
