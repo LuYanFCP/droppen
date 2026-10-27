@@ -42,8 +42,9 @@ pub enum Source {
     Claude,
     /// OpenAI Codex.
     Codex,
-    /// The agent the user configured to run over the Agent Client Protocol
-    /// ([`crate::acp_agent`]).
+    /// An agent run over the Agent Client Protocol: any of the agents the user
+    /// configured ([`crate::acp_agent`]); which one is the session's
+    /// [`SessionSummary::acp_agent`].
     Acp,
 }
 
@@ -605,6 +606,10 @@ pub struct SessionSummary {
     /// Added with the accounts subsystem (`crate::claude_roots`); `None` for
     /// codex, which has one root.
     pub claude_root: Option<ClaudeRoot>,
+    /// The id of the ACP agent an acp session runs on; null for claude and
+    /// codex. It may name an agent that has since been removed, whose sessions
+    /// are listed and read but not continued.
+    pub acp_agent: Option<String>,
     /// Account the session is pinned to, for managed-root sessions.
     pub account_id: Option<String>,
     /// When the assistant last spoke on the main chain, ISO-8601.
@@ -975,10 +980,10 @@ impl Paths {
         ClaudeRoot::ALL.map(|root| (root, claude_roots::projects_dir(self, root)))
     }
 
-    /// The transcripts this instance keeps for one ACP agent's sessions; see
-    /// [`acp_transcript`].
-    pub fn acp_sessions(&self, source: Source) -> PathBuf {
-        self.instance_dir().join("acp-sessions").join(source.as_str())
+    /// The transcripts this instance keeps for ACP sessions, one directory per
+    /// agent; see [`acp_transcript`].
+    pub fn acp_sessions(&self) -> PathBuf {
+        self.instance_dir().join("acp-sessions")
     }
 
     /// `~/.codex`.
@@ -1111,11 +1116,11 @@ pub async fn list_and_filter(
     let (claude_sessions, codex_sessions, acp_sessions) = match source {
         Some(Source::Claude) => (claude::list_claude_sessions(paths, bindings).await, vec![], vec![]),
         Some(Source::Codex) => (vec![], codex::list_codex_sessions(paths).await, vec![]),
-        Some(Source::Acp) => (vec![], vec![], acp_transcript::list_sessions(paths, Source::Acp).await),
+        Some(Source::Acp) => (vec![], vec![], acp_transcript::list_sessions(paths).await),
         None => tokio::join!(
             claude::list_claude_sessions(paths, bindings),
             codex::list_codex_sessions(paths),
-            acp_transcript::list_sessions(paths, Source::Acp)
+            acp_transcript::list_sessions(paths)
         ),
     };
 
@@ -1170,7 +1175,7 @@ pub async fn find_summary(paths: &Paths, source: Source, id: &str) -> Option<Ses
     match source {
         Source::Claude => claude::load_claude_summary(paths, id).await,
         Source::Codex => codex::find_codex_session(paths, id).await,
-        Source::Acp => acp_transcript::find_session(paths, source, id).await,
+        Source::Acp => acp_transcript::find_session(paths, id).await,
     }
 }
 
@@ -1406,6 +1411,7 @@ mod tests {
             activity: SessionActivity::from_status(status),
             resident: Nullable(None),
             claude_root: None,
+            acp_agent: None,
             account_id: None,
             attention_at: Nullable(None),
             unread: false,

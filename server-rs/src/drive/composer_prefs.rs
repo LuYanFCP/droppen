@@ -80,7 +80,7 @@ pub const ACP_MODEL_PATTERN: &str = r"^[A-Za-z0-9][[:word:].:/@+-]*$";
 
 /// The pattern and length a model id for `source` is held to.
 pub fn model_rule(source: Source) -> (&'static str, usize) {
-    if crate::inject::acp::agent(source).is_some() {
+    if source == Source::Acp {
         (ACP_MODEL_PATTERN, 200)
     } else {
         (MODEL_PATTERN, 100)

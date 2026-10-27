@@ -173,6 +173,10 @@ pub struct SendOptions {
     /// receipt can follow the message from the first instant a driver holds it.
     /// `None` mints one, as every send did before.
     pub message_id: Option<String>,
+    /// New ACP sessions only: the id of the configured agent to start
+    /// ([`crate::acp_agent`]). A message to an existing session always goes to
+    /// the agent that session runs on.
+    pub acp_agent: Option<String>,
 }
 
 /// Mode names aligned with current Codex terminology, mapped onto what
@@ -675,8 +679,9 @@ pub async fn send_to_session(
         let delivery = drive.injections.deliver(id, &prompt, recipe, options.message_id.clone()).await?;
         return Ok(Sent { queued: delivery.queued });
     }
-    if let Some(agent) = acp::agent(source) {
-        return drive.injections.acp_deliver(agent, Some(id), cwd, text, options).await.map(|(_, sent)| sent);
+    if source == Source::Acp {
+        // Reopened where it ran, whatever `cwd` says: see `acp_send`.
+        return drive.injections.acp_send(id, text, options).await;
     }
 
     // Resolved before anything is built, exactly as the claude branch does: an
@@ -745,11 +750,14 @@ pub async fn start_new_session(
         drive.injections.deliver(&id, &prompt, recipe, options.message_id.clone()).await?;
         return Ok(id);
     }
-    if let Some(agent) = acp::agent(source) {
-        // The agent names the session, and the transcript it is kept in is
-        // this instance's own, so there is no ownership to record.
-        let (id, _) = drive.injections.acp_deliver(agent, None, Some(cwd), text, options).await?;
-        return Ok(id);
+    if source == Source::Acp {
+        // The id is this server's own and the transcript it is kept in is this
+        // instance's, so there is no ownership to record.
+        let agent = options
+            .acp_agent
+            .as_deref()
+            .ok_or_else(|| InjectError::message("a new ACP session needs the agent it runs on"))?;
+        return drive.injections.acp_start(agent, cwd, text, options).await;
     }
 
     let account = codex_account(drive, None, options).await?;
@@ -1147,11 +1155,12 @@ pub struct InjectionRegistry {
     /// The agent process behind each ACP session, keyed [`Self::key_of`];
     /// see [`acp`].
     acp_servers: Mutex<HashMap<String, acp::Handle>>,
-    /// What each ACP agent last said it offers: its model list and effort
-    /// ladder, for the composer; see [`InjectionRegistry::acp_options`].
-    acp_options: Mutex<HashMap<Source, Vec<crate::acp::ConfigOption>>>,
-    /// Serializes probes, so a page asking twice starts one agent, not two.
-    acp_probe: tokio::sync::Mutex<()>,
+    /// What each ACP agent last said it offers, by agent id: its model list
+    /// and effort ladder, for the composer; see [`InjectionRegistry::acp_options`].
+    acp_options: Mutex<HashMap<String, Vec<crate::acp::ConfigOption>>>,
+    /// Serializes each agent's probes, so a page asking twice starts one
+    /// process, not two.
+    acp_probes: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     runs: Mutex<HashMap<String, Arc<Run>>>,
     /// The resident claude behind each session, keyed by session id alone —
     /// there is no codex resident, so the source is not part of the key.
@@ -1329,7 +1338,7 @@ impl InjectionRegistry {
             codex_servers: Mutex::new(HashMap::new()),
             acp_servers: Mutex::new(HashMap::new()),
             acp_options: Mutex::new(HashMap::new()),
-            acp_probe: tokio::sync::Mutex::new(()),
+            acp_probes: Mutex::new(HashMap::new()),
             runs: Mutex::new(HashMap::new()),
             residents: Mutex::new(HashMap::new()),
             spawn_gate: tokio::sync::Mutex::new(()),
@@ -1479,8 +1488,8 @@ impl InjectionRegistry {
 
     /// The state of the run for this session, if remote-hand ever started one.
     pub fn injection_for(&self, source: Source, id: &str) -> Option<Injection> {
-        if acp::agent(source).is_some() {
-            return self.acp_handle(source, id).and_then(|handle| handle.injection());
+        if source == Source::Acp {
+            return self.acp_handle(id).and_then(|handle| handle.injection());
         }
         if source == Source::Codex {
             if let Some(handle) = self.codex_handle(id) {
@@ -1565,8 +1574,8 @@ impl InjectionRegistry {
 
     /// This server's resident for one session, as the API reports it.
     pub fn resident_info(&self, source: Source, id: &str) -> Option<crate::sessions::ResidentInfo> {
-        if acp::agent(source).is_some() {
-            return self.acp_handle(source, id).filter(acp::Handle::visible).map(|h| h.info());
+        if source == Source::Acp {
+            return self.acp_handle(id).filter(acp::Handle::visible).map(|h| h.info());
         }
         if source == Source::Codex {
             return self.codex_handle(id).filter(app_server::Handle::visible).map(|h| h.info());
@@ -1584,8 +1593,8 @@ impl InjectionRegistry {
         if source == Source::Codex {
             return self.codex_queue_action(id, qid, false).await;
         }
-        if acp::agent(source).is_some() {
-            return self.acp_queue_action(source, id, qid, false).await;
+        if source == Source::Acp {
+            return self.acp_queue_action(id, qid, false).await;
         }
         if source != Source::Claude {
             return QueueOutcome::NoResident;
@@ -1601,8 +1610,8 @@ impl InjectionRegistry {
         if source == Source::Codex {
             return self.codex_queue_action(id, qid, true).await;
         }
-        if acp::agent(source).is_some() {
-            return self.acp_queue_action(source, id, qid, true).await;
+        if source == Source::Acp {
+            return self.acp_queue_action(id, qid, true).await;
         }
         if source != Source::Claude {
             return QueueOutcome::NoResident;
@@ -1623,8 +1632,8 @@ impl InjectionRegistry {
     /// signalled, and the run is closed out as finished instead — see
     /// [`vanished`] for why that is the only safe direction.
     pub fn interrupt(&self, source: Source, id: &str) -> bool {
-        if acp::agent(source).is_some() {
-            return self.acp_handle(source, id).filter(acp::Handle::alive).is_some_and(|h| h.interrupt());
+        if source == Source::Acp {
+            return self.acp_handle(id).filter(acp::Handle::alive).is_some_and(|h| h.interrupt());
         }
         if source == Source::Codex {
             if let Some(h) = self.codex_handle(id).filter(app_server::Handle::alive) {
@@ -2182,7 +2191,7 @@ async fn transcript_progress(source: Source, paths: &Paths, id: &str) -> Option<
         // is always `None`, which falls back to output activity exactly as the
         // TypeScript does for a session with no file yet.
         Source::Codex => codex::find_codex_session(paths, id).await.map(|s| std::path::PathBuf::from(s.file_path)),
-        Source::Acp => Some(crate::sessions::acp_transcript::transcript_path(paths, source, id)),
+        Source::Acp => crate::sessions::acp_transcript::locate(paths, id).await.map(|(_, file)| file),
     }?;
     let modified = tokio::fs::metadata(&path).await.ok()?.modified().ok()?;
     let age = std::time::SystemTime::now().duration_since(modified).ok()?;

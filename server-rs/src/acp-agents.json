@@ -4,7 +4,6 @@
     "name": "Bub",
     "command": "bub",
     "args": ["acp"],
-    "icon": "bub.svg",
     "homepage": "https://bub.build/",
     "note": "Needs Bub's ACP server: bub install bub-acp-server@main"
   },
@@ -13,7 +12,6 @@
     "name": "OpenCode",
     "command": "opencode",
     "args": ["acp"],
-    "icon": "opencode.svg",
     "homepage": "https://opencode.ai/docs/acp/"
   }
 ]

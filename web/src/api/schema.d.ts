@@ -326,7 +326,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/acp/settings": {
+    "/api/acp/agents": {
         parameters: {
             query?: never;
             header?: never;
@@ -334,18 +334,39 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * ACP agent settings
-         * @description How the ACP agent is started on this machine.
+         * ACP agents
+         * @description The ACP agents configured on this machine, and the built-in descriptions.
          */
-        get: operations["acp_settings"];
-        /**
-         * Update the ACP agent settings
-         * @description Change how the ACP agent is started. Applies to the next agent process; one
-         *     already running keeps what it was started with.
-         */
-        put: operations["update_acp_settings"];
+        get: operations["acp_agents"];
+        put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/acp/agents/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Add or update an ACP agent
+         * @description Add an ACP agent or change how it is started. Applies to the next agent
+         *     process; one already running keeps what it was started with.
+         */
+        put: operations["put_acp_agent"];
+        post?: never;
+        /**
+         * Remove an ACP agent
+         * @description Remove an ACP agent. Its sessions stay listed and readable; they cannot be
+         *     continued until an agent with this id is configured again.
+         */
+        delete: operations["delete_acp_agent"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2830,31 +2851,59 @@ export interface components {
             secret?: string;
         };
         /**
-         * @description How the ACP agent is started, as a client sees it: the variables' names,
-         *     not their values.
+         * @description One configured agent, as a client sees it: the variables' names, not their
+         *     values.
          */
-        AcpAgentSettings: {
+        AcpAgentInfo: {
             /** @description Its arguments, in order. */
             args: string[];
-            /** @description The configured executable, or `""` when no agent is configured. */
+            /** @description The configured executable. */
             command: string;
             /** @description The names of the extra environment variables, in order. */
             envNames: string[];
-            /** @description What the user calls the agent, or `""` for the generic name. */
+            /** @description Where its ACP setup is documented, for a built-in agent. */
+            homepage?: string;
+            /** @description Its id: what sessions record, and what `presets/icons/<id>.svg` draws. */
+            id: string;
+            /** @description What the user calls it. */
             name: string;
+            /** @description What a built-in agent needs before it can run. */
+            note?: string;
         };
-        /** @description The body of `PUT /api/acp/settings`; every field is a patch. */
-        AcpAgentSettingsUpdate: {
+        /** @description `GET /api/acp/agents`. */
+        AcpAgentList: {
+            /** @description The agents sessions can run on, in id order. */
+            agents: components["schemas"]["AcpAgentInfo"][];
+            /** @description The built-in descriptions, to offer when an agent is added. */
+            presets: components["schemas"]["AcpAgentPreset"][];
+        };
+        /** @description One built-in agent description: how a known agent is started in ACP mode. */
+        AcpAgentPreset: {
+            /** @description The arguments that put it into ACP mode over stdio. */
+            args: string[];
+            /** @description The executable, as found on the `PATH`. */
+            command: string;
+            /** @description Where its ACP setup is documented. */
+            homepage?: string;
+            /** @description Its id, which a configured agent made from it keeps. */
+            id: string;
+            /** @description What the agent is called. */
+            name: string;
+            /** @description What it needs before it can run. */
+            note?: string;
+        };
+        /** @description The body of `PUT /api/acp/agents/{id}`; every field is a patch. */
+        AcpAgentUpdate: {
             /** @description The arguments; absent leaves them alone. */
             args?: string[];
-            /** @description The executable; `""` removes the agent, absent leaves it alone. */
+            /** @description The executable; required unless the agent exists or is a built-in. */
             command?: string;
             /**
              * @description A `KEY=VALUE`-per-line block that replaces every stored variable; `""`
              *     clears them, absent leaves them alone.
              */
             env?: string;
-            /** @description The name; `""` goes back to the generic one, absent leaves it alone. */
+            /** @description The name; `""` goes back to the built-in's or the id, absent leaves it alone. */
             name?: string;
         };
         /** @description A subagent's own transcript. */
@@ -4074,6 +4123,11 @@ export interface components {
             accountFrom?: components["schemas"]["AccountFrom"];
             /** @description Run under a stored Claude account; `null` means the local login. */
             accountId?: string | null;
+            /**
+             * @description The configured ACP agent to start, by id (`GET /api/acp/agents`):
+             *     required when `source` is `acp`, refused otherwise.
+             */
+            acpAgent?: string;
             /**
              * @description A UUID the client minted for this first message, sent unchanged with
              *     every attempt. A repeat answers the session the first attempt started
@@ -5422,6 +5476,12 @@ export interface components {
         SessionSummary: {
             /** @description Account the session is pinned to, for managed-root sessions. */
             accountId?: string | null;
+            /**
+             * @description The id of the ACP agent an acp session runs on; null for claude and
+             *     codex. It may name an agent that has since been removed, whose sessions
+             *     are listed and read but not continued.
+             */
+            acpAgent?: string | null;
             /**
              * @description Whether anything is in flight, and if not, what is holding it up.
              *
@@ -6908,7 +6968,7 @@ export interface operations {
             };
         };
     };
-    acp_settings: {
+    acp_agents: {
         parameters: {
             query?: never;
             header?: never;
@@ -6917,42 +6977,75 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The ACP agent's name, command line and the names of its extra variables */
+            /** @description The configured ACP agents, with the names of their extra variables, and the built-in descriptions */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AcpAgentSettings"];
+                    "application/json": components["schemas"]["AcpAgentList"];
                 };
             };
         };
     };
-    update_acp_settings: {
+    put_acp_agent: {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                id: string;
+            };
             cookie?: never;
         };
-        /** @description The body of `PUT /api/acp/settings`; every field is a patch. */
+        /** @description The body of `PUT /api/acp/agents/{id}`; every field is a patch. */
         requestBody: {
             content: {
-                "application/json": components["schemas"]["AcpAgentSettingsUpdate"];
+                "application/json": components["schemas"]["AcpAgentUpdate"];
             };
         };
         responses: {
-            /** @description Updated ACP agent settings */
+            /** @description The agent as now configured */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AcpAgentSettings"];
+                    "application/json": components["schemas"]["AcpAgentInfo"];
                 };
             };
-            /** @description An unusable name, executable, argument or environment block */
+            /** @description An unusable id, name, executable, argument or environment block */
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    delete_acp_agent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The agent is gone; its sessions stay */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendResult"];
+                };
+            };
+            /** @description No such ACP agent */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8356,6 +8449,11 @@ export interface operations {
                  *     user's own login. Ignored by the codex lane, which has one config root.
                  */
                 accountId?: string | null;
+                /**
+                 * @description Which ACP agent the list is for, by id: required when `source` is
+                 *     `acp`, ignored otherwise.
+                 */
+                acpAgent?: string | null;
             };
             header?: never;
             path?: never;
@@ -8370,6 +8468,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ModelList"];
+                };
+            };
+            /** @description An ACP list that names no usable agent */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };

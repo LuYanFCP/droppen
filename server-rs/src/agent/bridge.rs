@@ -305,9 +305,10 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = {
         ("GET", "/api/chat-provider", Use),
         ("PUT", "/api/chat-provider", Posture),
         ("GET", "/api/chat-provider/models", Use),
-        // Which program runs as the ACP agent, and with what in its environment.
-        ("GET", "/api/acp/settings", Use),
-        ("PUT", "/api/acp/settings", Posture),
+        // Which programs run as ACP agents, and with what in their environment.
+        ("GET", "/api/acp/agents", Use),
+        ("PUT", "/api/acp/agents/{id}", Posture),
+        ("DELETE", "/api/acp/agents/{id}", Posture),
         ("GET", "/api/fs/list", Use),
         ("GET", "/api/fs/read", Use),
         ("GET", "/api/fs/download", Use),
@@ -949,6 +950,9 @@ mod tests {
             ("GET", "/api/sessions/claude/a%20b"),
             ("PUT", "/api/screens/order"),
             ("POST", "/api/notify/test"),
+            // Which agents there are, by name: no values, nothing to run.
+            ("GET", "/api/acp/agents"),
+            ("POST", "/api/sessions/acp/abc/message"),
         ] {
             assert_eq!(refusal(method, path, PLAIN), None, "{method} {path}");
         }
@@ -970,8 +974,9 @@ mod tests {
             ("head", "/api/accounts/setup-token/c-1"),
             ("PUT", "/api/notify/config"),
             ("PUT", "/api/chat-provider"),
-            // It names the program ACP sessions run.
-            ("PUT", "/api/acp/settings"),
+            // They name the programs ACP sessions run.
+            ("PUT", "/api/acp/agents/bub"),
+            ("DELETE", "/api/acp/agents/bub"),
             ("POST", "/api/push/subscriptions"),
             ("GET", "/api/push/vapid"),
             ("POST", "/rh/machine-key"),

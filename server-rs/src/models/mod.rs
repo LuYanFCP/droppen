@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::accounts::store::{Account, AccountKind};
+use crate::api::error::ApiError;
 use crate::api::extract::ApiQuery;
 use crate::api::{ApiRouter, AppState};
 use crate::openapi_ext::{ExtraResponses, Nullable};
@@ -87,6 +88,9 @@ pub struct ModelsQuery {
     /// Which stored Claude account the list is for; absent or empty is the
     /// user's own login. Ignored by the codex lane, which has one config root.
     pub account_id: Option<String>,
+    /// Which ACP agent the list is for, by id: required when `source` is
+    /// `acp`, ignored otherwise.
+    pub acp_agent: Option<String>,
 }
 
 /// Everything `claude --effort` accepts; the CLI presents max as "ultracode".
@@ -311,14 +315,23 @@ fn claude_env_models(vars: &BTreeMap<String, String>) -> Option<Vec<ModelInfo>> 
 /// for the process — asking costs a CLI startup — so only the first request
 /// after a cold start or an expired reading waits for one.
 #[api(id = "list_models", group = "models", summary = "List models")]
-pub async fn list_models(State(state): State<AppState>, ApiQuery(query): ApiQuery<ModelsQuery>) -> Json<ModelList> {
+pub async fn list_models(State(state): State<AppState>, ApiQuery(query): ApiQuery<ModelsQuery>) -> Result<Json<ModelList>, ApiError> {
     let paths = state.paths.as_ref();
     let (models, source) = match query.source {
         Source::Codex => codex_models(&paths.codex_models_cache()).await,
         Source::Claude => claude_models(&state, query.account_id.as_deref()).await,
-        Source::Acp => acp_models(&state, query.source).await,
+        Source::Acp => {
+            // Every agent has its own list: one served for another is a picker
+            // offering models the session cannot run.
+            let agent = query
+                .acp_agent
+                .as_deref()
+                .filter(|id| crate::acp_agent::valid_id(id))
+                .ok_or_else(|| ApiError::bad_request("acpAgent names the ACP agent to list models for"))?;
+            acp_models(&state, agent).await
+        }
     };
-    Json(ModelList { models, source })
+    Ok(Json(ModelList { models, source }))
 }
 
 /// The ids `GET /api/models` lists for one login of `source`, in its order — the
@@ -328,7 +341,8 @@ pub(crate) async fn model_ids(state: &AppState, source: Source, account_id: Opti
     let (models, _) = match source {
         Source::Codex => codex_models(&state.paths.codex_models_cache()).await,
         Source::Claude => claude_models(state, account_id).await,
-        Source::Acp => acp_models(state, source).await,
+        // An ACP agent has no logins; its list is asked for by agent.
+        Source::Acp => (Vec::new(), ModelListSource::Fallback),
     };
     models.into_iter().map(|model| model.id).collect()
 }
@@ -338,17 +352,17 @@ pub(crate) async fn model_ids(state: &AppState, source: Source, account_id: Opti
 /// ([`crate::inject::InjectionRegistry::acp_options`]).
 ///
 /// The agent's list is the whole list: there is no static guess to fall back
-/// on, so an agent that cannot be asked yields no models, which hides the
-/// pickers, and a `fallback` source, which says why.
-async fn acp_models(state: &AppState, source: Source) -> (Vec<ModelInfo>, ModelListSource) {
+/// on, so an agent that cannot be asked — or is not configured — yields no
+/// models, which hides the pickers, and a `fallback` source, which says why.
+async fn acp_models(state: &AppState, agent: &str) -> (Vec<ModelInfo>, ModelListSource) {
     use crate::acp::{category, option_for};
-    let Some(agent) = crate::inject::acp::agent(source) else {
+    let Some(agent) = crate::acp_agent::agent(&state.paths, agent) else {
         return (Vec::new(), ModelListSource::Fallback);
     };
-    let options = match state.drive.injections.acp_options(agent).await {
+    let options = match state.drive.injections.acp_options(&agent).await {
         Ok(options) => options,
         Err(error) => {
-            tracing::info!(agent = agent.name, %error, "cannot read the agent's models");
+            tracing::info!(agent = %agent.id, %error, "cannot read the agent's models");
             return (Vec::new(), ModelListSource::Fallback);
         }
     };
@@ -513,7 +527,8 @@ pub fn describe(reg: &mut ExtraResponses) {
         "/api/models",
         200,
         "Models the named login's CLI publishes, in the order it publishes them",
-    );
+    )
+    .error("GET", "/api/models", 400, "An ACP list that names no usable agent");
 }
 
 #[cfg(test)]

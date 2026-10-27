@@ -418,7 +418,12 @@ pub async fn load_session_state(drive: &Arc<Drive>, source: Source, id: &str) ->
     // three functions away is a rule waiting to be broken.
     crate::sessions::apply_driver(&mut summary, resident.as_ref(), running, finished_at);
     crate::sessions::pins::apply(paths, std::slice::from_mut(&mut summary));
-    let (can_send, send_block_reason) = sendability(source, summary.scope, summary.status, running, resident.is_some());
+    // An ACP session whose agent was removed cannot be continued, whatever is
+    // still running for it.
+    let (can_send, send_block_reason) = match crate::acp_agent::send_block(paths, &summary) {
+        Some(reason) => (false, Some(reason)),
+        None => sendability(source, summary.scope, summary.status, running, resident.is_some()),
+    };
     let cli_choice = match source {
         Source::Claude => claude::read_cli_choice(Path::new(&summary.file_path)).await,
         Source::Codex => codex::read_codex_cli_choice(Path::new(&summary.file_path)).await,

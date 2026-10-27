@@ -908,6 +908,7 @@ mod tests {
             activity: SessionActivity::Idle,
             resident: Nullable(None),
             claude_root: None,
+            acp_agent: None,
             account_id: None,
             attention_at: Nullable(None),
             unread: false,

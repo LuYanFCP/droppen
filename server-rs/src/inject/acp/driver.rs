@@ -13,11 +13,11 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::client::Client;
 use super::conn::{Conn, Event};
-use super::AcpAgent;
 use crate::acp::{category, option_for, ConfigOption, SessionUpdate};
+use crate::acp_agent::AcpAgent;
 use crate::inject::{InjectError, InjectionRegistry, Phase, QueueOutcome, ResidentState, Sent};
 use crate::sessions::acp_transcript::{record, Translator};
-use crate::sessions::{iso8601, Injection, InjectionRunState};
+use crate::sessions::{iso8601, Injection, InjectionRunState, Source};
 
 /// How long an agent process with nothing to do is kept.
 pub(super) const IDLE_EXIT: Duration = Duration::from_secs(30 * 60);
@@ -217,8 +217,15 @@ impl Transcript {
 
 pub(super) struct Driver {
     pub(super) registry: Arc<InjectionRegistry>,
-    pub(super) agent: &'static AcpAgent,
+    /// The agent the session runs on, as it was configured when this process
+    /// started.
+    pub(super) agent: AcpAgent,
+    /// This server's id for the session: what the feed, the receipts and the
+    /// session row know it by.
     pub(super) id: String,
+    /// The agent's id for it: what every request to the agent names, and what
+    /// its notifications carry.
+    pub(super) agent_session: String,
     pub(super) child: Child,
     pub(super) conn: Conn,
     pub(super) client: Arc<Client>,
@@ -238,7 +245,7 @@ pub(super) struct Driver {
 impl Driver {
     fn publish(&mut self) {
         *self.shared.lock().unwrap() = self.state.clone();
-        self.registry.poke_feed(self.agent.source, &self.id);
+        self.registry.poke_feed(Source::Acp, &self.id);
     }
 
     pub(super) async fn run(mut self) {
@@ -256,7 +263,7 @@ impl Driver {
             tokio::select! {
                 event = self.conn.events.recv() => match event {
                     Some(Event::Update(notification)) => {
-                        if notification.session_id == self.id {
+                        if notification.session_id == self.agent_session {
                             if let SessionUpdate::ConfigOptionUpdate(update) = &notification.update {
                                 self.options_changed(update.options());
                                 self.publish();
@@ -264,7 +271,7 @@ impl Driver {
                             let records = self.translator.update(&notification.update);
                             if !records.is_empty() {
                                 self.transcript.append(&records).await;
-                                self.registry.poke_feed(self.agent.source, &self.id);
+                                self.registry.poke_feed(Source::Acp, &self.id);
                             }
                         }
                     }
@@ -299,7 +306,7 @@ impl Driver {
                 _ = tokio::time::sleep_until(idle_deadline.into()), if !self.state.active && self.state.queue.is_empty() => {
                     // Gone from the map first, so the next message starts a new
                     // process instead of finding this one on its way out.
-                    let key = self.registry.key_of(self.agent.source, &self.id);
+                    let key = self.registry.key_of(Source::Acp, &self.id);
                     self.registry.acp_servers.lock().unwrap().remove(&key);
                     self.exit().await;
                     return;
@@ -320,7 +327,7 @@ impl Driver {
             Cmd::Interrupt => {
                 if self.state.active && !self.interrupted {
                     self.interrupted = true;
-                    self.conn.cancel(&self.id).await?;
+                    self.conn.cancel(&self.agent_session).await?;
                 }
             }
             Cmd::Queue { id, steer, reply } => {
@@ -337,7 +344,7 @@ impl Driver {
                 let dropped = self.state.queue.remove(index).expect("an index the queue just gave");
                 self.publish();
                 self.registry
-                    .note_receipt(self.agent.source, &self.id, &dropped.id, crate::inject::receipts::ReceiptStatus::Failed);
+                    .note_receipt(Source::Acp, &self.id, &dropped.id, crate::inject::receipts::ReceiptStatus::Failed);
                 let _ = reply.send(QueueOutcome::Done);
             }
             Cmd::Stop(_) => unreachable!("handled by the loop"),
@@ -356,7 +363,7 @@ impl Driver {
             // The turn never starts: the session would have run on a model or
             // at an effort nobody asked for.
             self.registry
-                .note_receipt(self.agent.source, &self.id, &message.id, crate::inject::receipts::ReceiptStatus::Failed);
+                .note_receipt(Source::Acp, &self.id, &message.id, crate::inject::receipts::ReceiptStatus::Failed);
             let message = self.registry.redact(&reason);
             self.transcript.append(&[record("error", json!({ "message": message }))]).await;
             self.start_turn();
@@ -364,9 +371,9 @@ impl Driver {
             return Ok(());
         }
         self.record_choice().await;
-        self.conn.prompt(&self.id, message.prompt).await?;
+        self.conn.prompt(&self.agent_session, message.prompt).await?;
         self.registry
-            .note_receipt(self.agent.source, &self.id, &message.id, crate::inject::receipts::ReceiptStatus::Sent);
+            .note_receipt(Source::Acp, &self.id, &message.id, crate::inject::receipts::ReceiptStatus::Sent);
         self.start_turn();
         Ok(())
     }
@@ -390,7 +397,7 @@ impl Driver {
     /// Set the session's model and effort to what the message picked, where
     /// they differ: one `session/set_config_option` each.
     async fn configure(&mut self, message: &Message) -> Result<(), String> {
-        let name = self.agent.name;
+        let name = self.agent.name.clone();
         let picks = [
             (category::MODEL, "model", message.model.as_deref()),
             (category::THOUGHT_LEVEL, "effort", message.effort.as_deref()),
@@ -408,7 +415,7 @@ impl Driver {
             }
             let options = self
                 .conn
-                .set_config_option(&self.id, &option.id, wanted)
+                .set_config_option(&self.agent_session, &option.id, wanted)
                 .await
                 .map_err(|error| format!("{name} did not switch its {what} to {wanted}: {error}"))?;
             if options.is_empty() {
@@ -491,7 +498,7 @@ impl Driver {
         self.publish();
         crate::push::notify_turn(
             self.registry.paths.clone(),
-            self.agent.source,
+            Source::Acp,
             self.id.clone(),
             outcome,
             error,
@@ -511,7 +518,7 @@ impl Driver {
         } else {
             format!("{reason}\n{tail}")
         });
-        tracing::warn!(session = %self.id, agent = self.agent.name, error = %message, "the agent process for this session is gone");
+        tracing::warn!(session = %self.id, agent = %self.agent.id, error = %message, "the agent process for this session is gone");
         let mut records = self.translator.flush();
         if self.state.active || !self.state.queue.is_empty() {
             records.push(record("error", json!({ "message": message })));
@@ -519,7 +526,7 @@ impl Driver {
         self.transcript.append(&records).await;
         for dropped in std::mem::take(&mut self.state.queue) {
             self.registry
-                .note_receipt(self.agent.source, &self.id, &dropped.id, crate::inject::receipts::ReceiptStatus::Failed);
+                .note_receipt(Source::Acp, &self.id, &dropped.id, crate::inject::receipts::ReceiptStatus::Failed);
         }
         if self.state.active {
             let interrupted = self.interrupted;

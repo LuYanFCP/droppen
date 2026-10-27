@@ -98,6 +98,10 @@ pub struct NewSession {
     /// (`duplicate: true`) instead of starting a second one.
     #[serde(default, skip_serializing_if = "Optional::is_none")]
     pub client_message_id: Optional<String>,
+    /// The configured ACP agent to start, by id (`GET /api/acp/agents`):
+    /// required when `source` is `acp`, refused otherwise.
+    #[serde(default, skip_serializing_if = "Optional::is_none")]
+    pub acp_agent: Optional<String>,
 }
 
 /// The id of the session that was just created.
@@ -481,6 +485,21 @@ fn validate_body(
     Ok(())
 }
 
+/// A new session names an ACP agent exactly when it is one, and the agent it
+/// names is one that is configured: an unknown one is a bad request rather
+/// than a session that cannot start.
+fn validate_acp_agent(state: &AppState, source: Source, agent: Option<&str>) -> Result<(), ApiError> {
+    match (source, agent) {
+        (Source::Acp, None) => Err(ApiError::bad_request("an ACP session needs acpAgent: the agent it runs on")),
+        (Source::Acp, Some(id)) if !crate::acp_agent::valid_id(id) => Err(ApiError::bad_request(format!("invalid ACP agent id: {id}"))),
+        (Source::Acp, Some(id)) if crate::acp_agent::agent(&state.paths, id).is_none() => {
+            Err(ApiError::bad_request(format!("no ACP agent \"{id}\" is configured")))
+        }
+        (Source::Acp, Some(_)) | (_, None) => Ok(()),
+        (_, Some(_)) => Err(ApiError::bad_request("acpAgent is only for ACP sessions")),
+    }
+}
+
 fn send_options(model: Option<String>, effort: Option<String>, permission: Option<String>, account_id: Option<Option<String>>) -> SendOptions {
     SendOptions {
         model,
@@ -504,6 +523,7 @@ pub async fn new_session(State(state): State<AppState>, ApiJson(body): ApiJson<N
         body.permission.as_deref(),
         &body.account_id,
     )?;
+    validate_acp_agent(&state, body.source, body.acp_agent.as_deref())?;
     let Some(client_id) = body.client_message_id.0.clone() else {
         return start_session(state, body, None).await.map(Json);
     };
@@ -552,6 +572,7 @@ async fn start_session(state: AppState, body: NewSession, qid: Option<String>) -
         files: attachments,
         message_id: qid,
         account: AccountChoice::from_start_request(body.account_id.clone(), body.account_from.0),
+        acp_agent: body.acp_agent.0,
         ..send_options(body.model.0, body.effort.0, body.permission.0, body.account_id)
     };
     let id = inject::start_new_session(drive, body.source, &resolved.to_string_lossy(), &body.text, &options)
@@ -652,14 +673,18 @@ async fn deliver_message(
     // A session with a resident behind it is never refused for being busy: the
     // message goes into that process' queue and is delivered when the turn in
     // flight ends. See [`sendability`] for why the live-process arm is lifted
-    // too — the live process the probe can see is ours.
-    let (can_send, reason) = sendability(
-        source,
-        summary.scope,
-        summary.status,
-        drive.injections.is_running(source, &id),
-        drive.injections.has_resident(source, &id),
-    );
+    // too — the live process the probe can see is ours. An ACP session whose
+    // agent was removed is refused whatever is running.
+    let (can_send, reason) = match crate::acp_agent::send_block(&drive.paths, &summary) {
+        Some(reason) => (false, Some(reason)),
+        None => sendability(
+            source,
+            summary.scope,
+            summary.status,
+            drive.injections.is_running(source, &id),
+            drive.injections.has_resident(source, &id),
+        ),
+    };
     if !can_send {
         return Err(ApiError::conflict(reason.unwrap_or_else(|| "cannot send".to_string())));
     }
@@ -1251,7 +1276,7 @@ pub async fn archive_session(State(state): State<AppState>, ApiPath((source, id)
         Source::Acp => {
             drive
                 .injections
-                .archive_acp(source, &id)
+                .archive_acp(&id)
                 .await
                 .map_err(|error| ApiError::conflict(error.to_string()))?;
         }
@@ -1347,7 +1372,7 @@ async fn whole_transcript(drive: &crate::drive::Drive, source: Source, id: &str)
         Source::Codex => codex::find_codex_session(&drive.paths, id)
             .await
             .map(|summary| PathBuf::from(summary.file_path)),
-        Source::Acp => crate::sessions::acp_transcript::find_session(&drive.paths, source, id)
+        Source::Acp => crate::sessions::acp_transcript::find_session(&drive.paths, id)
             .await
             .map(|summary| PathBuf::from(summary.file_path)),
     }
@@ -2085,6 +2110,7 @@ mod tests {
             account_id: None,
             account_from: Optional(None),
             client_message_id: Optional(None),
+            acp_agent: Optional(None),
         }
     }
 

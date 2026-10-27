@@ -481,8 +481,8 @@
         "required": [],
         "type": "object"
       },
-      "AcpAgentSettings": {
-        "description": "How the ACP agent is started, as a client sees it: the variables' names,\nnot their values.",
+      "AcpAgentInfo": {
+        "description": "One configured agent, as a client sees it: the variables' names, not their\nvalues.",
         "properties": {
           "args": {
             "description": "Its arguments, in order.",
@@ -492,7 +492,7 @@
             "type": "array"
           },
           "command": {
-            "description": "The configured executable, or `\"\"` when no agent is configured.",
+            "description": "The configured executable.",
             "type": "string"
           },
           "envNames": {
@@ -502,12 +502,25 @@
             },
             "type": "array"
           },
+          "homepage": {
+            "description": "Where its ACP setup is documented, for a built-in agent.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Its id: what sessions record, and what `presets/icons/<id>.svg` draws.",
+            "type": "string"
+          },
           "name": {
-            "description": "What the user calls the agent, or `\"\"` for the generic name.",
+            "description": "What the user calls it.",
+            "type": "string"
+          },
+          "note": {
+            "description": "What a built-in agent needs before it can run.",
             "type": "string"
           }
         },
         "required": [
+          "id",
           "name",
           "command",
           "args",
@@ -515,8 +528,71 @@
         ],
         "type": "object"
       },
-      "AcpAgentSettingsUpdate": {
-        "description": "The body of `PUT /api/acp/settings`; every field is a patch.",
+      "AcpAgentList": {
+        "description": "`GET /api/acp/agents`.",
+        "properties": {
+          "agents": {
+            "description": "The agents sessions can run on, in id order.",
+            "items": {
+              "$ref": "#/components/schemas/AcpAgentInfo"
+            },
+            "type": "array"
+          },
+          "presets": {
+            "description": "The built-in descriptions, to offer when an agent is added.",
+            "items": {
+              "$ref": "#/components/schemas/AcpAgentPreset"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "agents",
+          "presets"
+        ],
+        "type": "object"
+      },
+      "AcpAgentPreset": {
+        "description": "One built-in agent description: how a known agent is started in ACP mode.",
+        "properties": {
+          "args": {
+            "description": "The arguments that put it into ACP mode over stdio.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "command": {
+            "description": "The executable, as found on the `PATH`.",
+            "type": "string"
+          },
+          "homepage": {
+            "description": "Where its ACP setup is documented.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Its id, which a configured agent made from it keeps.",
+            "type": "string"
+          },
+          "name": {
+            "description": "What the agent is called.",
+            "type": "string"
+          },
+          "note": {
+            "description": "What it needs before it can run.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "command",
+          "args"
+        ],
+        "type": "object"
+      },
+      "AcpAgentUpdate": {
+        "description": "The body of `PUT /api/acp/agents/{id}`; every field is a patch.",
         "properties": {
           "args": {
             "description": "The arguments; absent leaves them alone.",
@@ -526,7 +602,7 @@
             "type": "array"
           },
           "command": {
-            "description": "The executable; `\"\"` removes the agent, absent leaves it alone.",
+            "description": "The executable; required unless the agent exists or is a built-in.",
             "type": "string"
           },
           "env": {
@@ -534,7 +610,7 @@
             "type": "string"
           },
           "name": {
-            "description": "The name; `\"\"` goes back to the generic one, absent leaves it alone.",
+            "description": "The name; `\"\"` goes back to the built-in's or the id, absent leaves it alone.",
             "type": "string"
           }
         },
@@ -2754,6 +2830,10 @@
           "accountId": {
             "description": "Run under a stored Claude account; `null` means the local login.",
             "nullable": true,
+            "type": "string"
+          },
+          "acpAgent": {
+            "description": "The configured ACP agent to start, by id (`GET /api/acp/agents`):\nrequired when `source` is `acp`, refused otherwise.",
             "type": "string"
           },
           "clientMessageId": {
@@ -5134,6 +5214,11 @@
             "nullable": true,
             "type": "string"
           },
+          "acpAgent": {
+            "description": "The id of the ACP agent an acp session runs on; null for claude and\ncodex. It may name an agent that has since been removed, whose sessions\nare listed and read but not continued.",
+            "nullable": true,
+            "type": "string"
+          },
           "activity": {
             "$ref": "#/components/schemas/SessionActivity",
             "description": "Whether anything is in flight, and if not, what is holding it up.\n\nThe field a list row should render \"busy\" from. Unlike `status` it can\ntell a queued message from an idle session, and background work from\nnothing at all."
@@ -7446,43 +7531,95 @@
         ]
       }
     },
-    "/api/acp/settings": {
+    "/api/acp/agents": {
       "get": {
         "deprecated": false,
-        "description": "How the ACP agent is started on this machine.",
-        "operationId": "acp_settings",
+        "description": "The ACP agents configured on this machine, and the built-in descriptions.",
+        "operationId": "acp_agents",
         "parameters": [],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AcpAgentSettings"
+                  "$ref": "#/components/schemas/AcpAgentList"
                 }
               }
             },
-            "description": "The ACP agent's name, command line and the names of its extra variables"
+            "description": "The configured ACP agents, with the names of their extra variables, and the built-in descriptions"
           }
         },
-        "summary": "ACP agent settings",
+        "summary": "ACP agents",
+        "tags": [
+          "acp"
+        ]
+      }
+    },
+    "/api/acp/agents/{id}": {
+      "delete": {
+        "deprecated": false,
+        "description": "Remove an ACP agent. Its sessions stay listed and readable; they cannot be\ncontinued until an agent with this id is configured again.",
+        "operationId": "delete_acp_agent",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendResult"
+                }
+              }
+            },
+            "description": "The agent is gone; its sessions stay"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No such ACP agent"
+          }
+        },
+        "summary": "Remove an ACP agent",
         "tags": [
           "acp"
         ]
       },
       "put": {
         "deprecated": false,
-        "description": "Change how the ACP agent is started. Applies to the next agent process; one\nalready running keeps what it was started with.",
-        "operationId": "update_acp_settings",
-        "parameters": [],
+        "description": "Add an ACP agent or change how it is started. Applies to the next agent\nprocess; one already running keeps what it was started with.",
+        "operationId": "put_acp_agent",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AcpAgentSettingsUpdate"
+                "$ref": "#/components/schemas/AcpAgentUpdate"
               }
             }
           },
-          "description": "The body of `PUT /api/acp/settings`; every field is a patch.",
+          "description": "The body of `PUT /api/acp/agents/{id}`; every field is a patch.",
           "required": true
         },
         "responses": {
@@ -7490,11 +7627,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AcpAgentSettings"
+                  "$ref": "#/components/schemas/AcpAgentInfo"
                 }
               }
             },
-            "description": "Updated ACP agent settings"
+            "description": "The agent as now configured"
           },
           "400": {
             "content": {
@@ -7504,10 +7641,10 @@
                 }
               }
             },
-            "description": "An unusable name, executable, argument or environment block"
+            "description": "An unusable id, name, executable, argument or environment block"
           }
         },
-        "summary": "Update the ACP agent settings",
+        "summary": "Add or update an ACP agent",
         "tags": [
           "acp"
         ]
@@ -9346,6 +9483,17 @@
               "nullable": true,
               "type": "string"
             }
+          },
+          {
+            "description": "Which ACP agent the list is for, by id: required when `source` is\n`acp`, ignored otherwise.",
+            "in": "query",
+            "name": "acpAgent",
+            "required": false,
+            "schema": {
+              "description": "Which ACP agent the list is for, by id: required when `source` is\n`acp`, ignored otherwise.",
+              "nullable": true,
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -9358,6 +9506,16 @@
               }
             },
             "description": "Models the named login's CLI publishes, in the order it publishes them"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An ACP list that names no usable agent"
           }
         },
         "summary": "List models",

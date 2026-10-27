@@ -6,14 +6,24 @@
 //! can read back later except by `session/load`, which means starting the
 //! agent. Its own history is its format, not this server's
 //! contract. So the session view reads a transcript *this server* writes, one
-//! per session, under [`Paths::acp_sessions`]: every update the driver hears is
-//! translated by [`Translator`] into the small, stable record set below and
-//! appended. The feed watches that file the way it watches a claude or codex
-//! transcript, which is what makes streamed output show up as it arrives.
+//! per session, under [`Paths::acp_sessions`]`/<agent id>/<session id>.jsonl`:
+//! every update the driver hears is translated by [`Translator`] into the
+//! small, stable record set below and appended. The feed watches that file the
+//! way it watches a claude or codex transcript, which is what makes streamed
+//! output show up as it arrives.
+//!
+//! The session id is this server's own, a UUID minted when the session is
+//! created, not the agent's: an agent chooses its ids, and two agents are free
+//! to choose the same one, while every route, feed and store here keys a
+//! session by `(source, id)`. The agent's id is kept in the header and is what
+//! the driver speaks to the agent with. The directory says which agent the
+//! session runs on, and is the only agent it is ever reopened with.
 //!
 //! The records, one JSON object per line, each with a `timestamp`:
 //!
-//! * `session` — the first line: `id` and `cwd`.
+//! * `session` — the first line: `id` (this server's), `agent` (the agent's id,
+//!   [`crate::acp_agent`]), `agentSessionId` (the id the agent gave it) and
+//!   `cwd`.
 //! * `user` — a message this server sent: `text`, and `images` / `files` paths.
 //! * `delta` — a streamed piece of the agent's answer (`kind` `text`) or of its
 //!   reasoning (`kind` `thinking`).
@@ -33,7 +43,9 @@
 //! Every session in an agent's directory was started by this server instance,
 //! so every one is owned: there is no external ACP session to browse yet.
 //! Listing an agent's own sessions (`session/list`) is left for when it can be
-//! asked without starting a process per listing.
+//! asked without starting a process per listing. A session whose agent was
+//! removed stays listed under the id it recorded ([`crate::acp_agent`] says what
+//! that means for sending to it).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -53,15 +65,72 @@ const HEAD_BYTES: usize = 64 * 1024;
 /// How long a tool's one-line summary may be.
 const LINE: usize = 180;
 
-/// The transcript of one session.
-pub fn transcript_path(paths: &Paths, source: Source, id: &str) -> PathBuf {
-    paths.acp_sessions(source).join(format!("{id}.jsonl"))
+/// The directory one agent's transcripts are kept in, or `None` for an id that
+/// cannot name one ([`crate::acp_agent::valid_id`]).
+pub fn agent_dir(paths: &Paths, agent: &str) -> Option<PathBuf> {
+    crate::acp_agent::valid_id(agent).then(|| paths.acp_sessions().join(agent))
 }
 
-/// Whether `id` can name a session: ACP session ids are opaque strings, and
-/// only the ones that cannot leave the directory are let near a path.
+/// Whether `id` can name a session: only the ids that cannot leave the
+/// directory are let near a path. This server mints UUIDs; the agent's own
+/// ids are held to the same rule, so nothing odd reaches a header either.
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Where the transcript of session `id` is, and which agent's directory it is
+/// in; `None` when there is no such session.
+pub async fn locate(paths: &Paths, id: &str) -> Option<(String, PathBuf)> {
+    if !valid_id(id) {
+        return None;
+    }
+    for agent in agent_dirs(paths).await {
+        let file = paths.acp_sessions().join(&agent).join(format!("{id}.jsonl"));
+        if tokio::fs::metadata(&file).await.is_ok_and(|metadata| metadata.is_file()) {
+            return Some((agent, file));
+        }
+    }
+    None
+}
+
+/// Every agent directory there is, by agent id, in id order.
+async fn agent_dirs(paths: &Paths) -> Vec<String> {
+    let Ok(mut entries) = tokio::fs::read_dir(paths.acp_sessions()).await else {
+        return Vec::new();
+    };
+    let mut agents = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if crate::acp_agent::valid_id(&name) && entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+            agents.push(name);
+        }
+    }
+    agents.sort();
+    agents
+}
+
+/// What a transcript's `session` record says about the session.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Header {
+    /// The id the agent gave the session; what it is reopened and spoken to by.
+    pub agent_session_id: Option<String>,
+    /// Where it runs.
+    pub cwd: Option<String>,
+}
+
+/// The `session` record of a transcript, if it has one.
+pub async fn read_header(file_path: &Path) -> Option<Header> {
+    let head = read_head_lines(file_path, HEAD_BYTES).await.ok()?;
+    head.iter().filter_map(|line| try_parse(line)).find_map(|entry| {
+        if entry.get("type").and_then(Value::as_str) != Some("session") {
+            return None;
+        }
+        let field = |key: &str| entry.get(key).and_then(Value::as_str).map(str::to_owned);
+        Some(Header {
+            agent_session_id: field("agentSessionId").filter(|id| valid_id(id)),
+            cwd: field("cwd"),
+        })
+    })
 }
 
 /// A record, stamped now.
@@ -462,43 +531,40 @@ pub async fn has_conversation(file_path: &Path) -> bool {
         .any(|entry| entry.get("type").and_then(Value::as_str) != Some("session"))
 }
 
-/// Every session of one ACP agent this server made; the order is the caller's.
-pub async fn list_sessions(paths: &Paths, source: Source) -> Vec<SessionSummary> {
-    let Ok(mut entries) = tokio::fs::read_dir(paths.acp_sessions(source)).await else {
-        return Vec::new();
-    };
-    let mut ids = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(id) = name.strip_suffix(".jsonl").filter(|id| valid_id(id)) {
-            ids.push(id.to_string());
-        }
-    }
-    let titles = super::claude::custom_titles(paths, source).await;
-    let mut out = Vec::with_capacity(ids.len());
-    for id in ids {
-        if let Some(summary) = summary_of(paths, source, &id, &titles).await {
-            out.push(summary);
+/// Every ACP session this server made, on every agent, configured or not; the
+/// order is the caller's.
+pub async fn list_sessions(paths: &Paths) -> Vec<SessionSummary> {
+    let titles = super::claude::custom_titles(paths, Source::Acp).await;
+    let mut out = Vec::new();
+    for agent in agent_dirs(paths).await {
+        let dir = paths.acp_sessions().join(&agent);
+        let Ok(mut entries) = tokio::fs::read_dir(&dir).await else { continue };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(id) = name.strip_suffix(".jsonl").filter(|id| valid_id(id)) else { continue };
+            if let Some(summary) = summary_of(paths, &agent, &dir.join(&name), id, &titles).await {
+                out.push(summary);
+            }
         }
     }
     out
 }
 
 /// One session's list row, or `None` when there is no such session.
-pub async fn find_session(paths: &Paths, source: Source, id: &str) -> Option<SessionSummary> {
-    if !valid_id(id) {
-        return None;
-    }
-    let titles = super::claude::custom_titles(paths, source).await;
-    summary_of(paths, source, id, &titles).await
+pub async fn find_session(paths: &Paths, id: &str) -> Option<SessionSummary> {
+    let (agent, file_path) = locate(paths, id).await?;
+    let titles = super::claude::custom_titles(paths, Source::Acp).await;
+    summary_of(paths, &agent, &file_path, id, &titles).await
 }
 
-/// Build the row for one transcript.
-async fn summary_of(paths: &Paths, source: Source, id: &str, titles: &HashMap<String, String>) -> Option<SessionSummary> {
-    let file_path = transcript_path(paths, source, id);
-    let metadata = tokio::fs::metadata(&file_path).await.ok()?;
+/// Build the row for one transcript of `agent`'s.
+async fn summary_of(paths: &Paths, agent: &str, file_path: &Path, id: &str, titles: &HashMap<String, String>) -> Option<SessionSummary> {
+    let metadata = tokio::fs::metadata(file_path).await.ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
     let modified = metadata.modified().map(iso8601).unwrap_or_default();
-    let head = read_head_lines(&file_path, HEAD_BYTES).await.unwrap_or_default();
+    let head = read_head_lines(file_path, HEAD_BYTES).await.unwrap_or_default();
     let mut cwd = None;
     let mut created_at = None;
     let mut first_message = None;
@@ -518,7 +584,7 @@ async fn summary_of(paths: &Paths, source: Source, id: &str, titles: &HashMap<St
     Some(SessionSummary {
         pinned: false,
         id: id.to_string(),
-        source,
+        source: Source::Acp,
         scope: SessionScope::Owned,
         server: ServerId::local(paths).to_string(),
         title: title_line(&title),
@@ -535,6 +601,7 @@ async fn summary_of(paths: &Paths, source: Source, id: &str, titles: &HashMap<St
         activity: SessionActivity::Idle,
         resident: Nullable(None),
         claude_root: None,
+        acp_agent: Some(agent.to_string()),
         account_id: None,
         attention_at: Nullable(None),
         unread: false,
@@ -662,29 +729,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_transcript_lists_as_an_owned_session() {
+    async fn a_transcript_lists_as_an_owned_session_of_its_agent() {
         let home = tempfile::tempdir().expect("tempdir");
         let paths = Paths::new(home.path().to_path_buf());
-        tokio::fs::create_dir_all(paths.acp_sessions(Source::Acp)).await.unwrap();
-        let file = transcript_path(&paths, Source::Acp, "abc123");
+        let dir = agent_dir(&paths, "mine").expect("a slug");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let file = dir.join("abc123.jsonl");
         let body = lines(&[
-            record("session", json!({"id": "abc123", "cwd": "/work"})),
+            record("session", json!({"id": "abc123", "agent": "mine", "agentSessionId": "agent-1", "cwd": "/work"})),
             record("user", json!({"text": "fix the build\nplease"})),
         ])
         .join("\n");
         tokio::fs::write(&file, body + "\n").await.unwrap();
-        tokio::fs::write(paths.acp_sessions(Source::Acp).join("not an id!.jsonl"), "")
-            .await
-            .unwrap();
+        tokio::fs::write(dir.join("not an id!.jsonl"), "").await.unwrap();
+        // Neither a directory an agent id cannot name, nor a stray file, is an agent.
+        tokio::fs::create_dir_all(paths.acp_sessions().join("Not An Agent")).await.unwrap();
+        tokio::fs::write(paths.acp_sessions().join("Not An Agent").join("zzz.jsonl"), "").await.unwrap();
+        tokio::fs::write(paths.acp_sessions().join("stray.jsonl"), "").await.unwrap();
 
-        let listed = list_sessions(&paths, Source::Acp).await;
-        assert_eq!(listed.len(), 1);
+        let listed = list_sessions(&paths).await;
+        assert_eq!(listed.len(), 1, "{listed:?}");
         let row = &listed[0];
         assert_eq!((row.source, row.scope), (Source::Acp, SessionScope::Owned));
+        assert_eq!(row.acp_agent.as_deref(), Some("mine"));
         assert_eq!(row.title, "fix the build");
         assert_eq!(row.cwd.0.as_deref(), Some("/work"));
         assert!(has_conversation(&file).await);
-        assert!(find_session(&paths, Source::Acp, "../abc123").await.is_none());
-        assert!(find_session(&paths, Source::Acp, "abc123").await.is_some());
+        assert!(find_session(&paths, "../abc123").await.is_none());
+        assert!(find_session(&paths, "zzz").await.is_none());
+        assert_eq!(find_session(&paths, "abc123").await.and_then(|row| row.acp_agent), Some("mine".into()));
+        let header = read_header(&file).await.expect("a header");
+        assert_eq!(header.agent_session_id.as_deref(), Some("agent-1"));
+        assert_eq!(header.cwd.as_deref(), Some("/work"));
+        assert!(agent_dir(&paths, "../x").is_none());
+    }
+
+    #[tokio::test]
+    async fn sessions_of_two_agents_are_listed_with_their_own_agent() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::new(home.path().to_path_buf());
+        for (agent, id) in [("one", "s-1"), ("two", "s-2")] {
+            let dir = agent_dir(&paths, agent).unwrap();
+            tokio::fs::create_dir_all(&dir).await.unwrap();
+            // Both agents gave their session the same id; this server's ids differ.
+            let header = record("session", json!({"id": id, "agent": agent, "agentSessionId": "same", "cwd": "/w"}));
+            tokio::fs::write(dir.join(format!("{id}.jsonl")), format!("{header}\n")).await.unwrap();
+        }
+        let mut listed: Vec<(String, Option<String>)> = list_sessions(&paths).await.into_iter().map(|row| (row.id, row.acp_agent)).collect();
+        listed.sort();
+        assert_eq!(listed, vec![("s-1".into(), Some("one".into())), ("s-2".into(), Some("two".into()))]);
+        assert_eq!(locate(&paths, "s-2").await.map(|(agent, _)| agent).as_deref(), Some("two"));
     }
 }

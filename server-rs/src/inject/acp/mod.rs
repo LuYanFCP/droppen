@@ -25,9 +25,12 @@
 //! [`crate::sessions::acp_transcript`] keeps; that file is what the session
 //! view reads.
 //!
-//! Everything here is the same for every ACP agent. Which agent runs is the
-//! user's to configure ([`crate::acp_agent`]): how it is started, and what to
-//! tell a user whose agent cannot be started, is an [`AcpAgent`].
+//! Everything here is the same for every ACP agent. Which agents there are is
+//! the user's to configure ([`crate::acp_agent`]); each session records the one
+//! it runs on, and is started, reopened and resumed with that agent and no
+//! other. Its id is this server's own and the agent's id is kept beside it
+//! ([`crate::sessions::acp_transcript`]): two agents may give two sessions the
+//! same id, and both still have to be told apart here.
 //!
 //! One message runs at a time. A message sent mid-turn waits in the driver's
 //! queue and goes in when the turn ends: ACP takes a second `session/prompt`
@@ -51,7 +54,8 @@ use std::process::Stdio;
 
 use super::*;
 use crate::acp::{category, option_for, ConfigOption};
-use crate::sessions::acp_transcript::{has_conversation, record, transcript_path, Translator};
+use crate::acp_agent::AcpAgent;
+use crate::sessions::acp_transcript::{agent_dir, has_conversation, locate, read_header, record, Translator};
 use client::Client;
 use conn::Conn;
 pub(super) use driver::Handle;
@@ -66,36 +70,25 @@ use tokio::sync::{mpsc, oneshot};
 /// whole history.
 const START_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// One agent this server drives over ACP.
-pub struct AcpAgent {
-    /// The session source its sessions are listed under.
-    pub source: Source,
-    /// What the user calls it, in every message about it.
-    pub name: &'static str,
-    /// What to do when it cannot be started, said after the reason.
-    pub install_hint: &'static str,
-    /// How to start it on this machine, read at each start so a settings
-    /// change applies to the next process.
-    pub launch: fn(&Paths) -> Launch,
+/// What to do when an agent cannot be started, said after the reason.
+const INSTALL_HINT: &str = "Check its executable and arguments in Settings";
+
+/// The configured agent `id`, or why a new session cannot run on it.
+fn configured(paths: &Paths, id: &str) -> Result<AcpAgent, InjectError> {
+    crate::acp_agent::agent(paths, id)
+        .ok_or_else(|| InjectError::message(format!("no ACP agent \"{id}\" is configured; add it in Settings")))
 }
 
-/// The command line and environment an agent is started with.
-#[derive(Debug, Clone)]
-pub struct Launch {
-    /// The executable, absolute or looked up on the `PATH` in `env`.
-    pub program: PathBuf,
-    /// Its arguments: whatever puts it into ACP mode over stdio.
-    pub args: Vec<String>,
-    /// Its whole environment; nothing is inherited past this.
-    pub env: Env,
-}
-
-/// The ACP agent behind a session source, if it is one.
-pub fn agent(source: Source) -> Option<&'static AcpAgent> {
-    match source {
-        Source::Acp => Some(&crate::acp_agent::AGENT),
-        Source::Claude | Source::Codex => None,
-    }
+/// A session this server already has a transcript for.
+struct Recorded {
+    /// This server's id for it.
+    id: String,
+    /// Its transcript.
+    file: PathBuf,
+    /// The id the agent gave it.
+    agent_session: String,
+    /// Where it ran.
+    cwd: Option<String>,
 }
 
 /// The prompt an agent is sent: the text, and where each attachment is on disk.
@@ -132,7 +125,7 @@ fn message(text: &str, options: &SendOptions) -> Message {
 /// model and effort are its own configuration options, checked against what
 /// it publishes ([`check_choice`]).
 fn check_options(agent: &AcpAgent, options: &SendOptions) -> Result<(), InjectError> {
-    let name = agent.name;
+    let name = &agent.name;
     if options.account.named().is_some() || matches!(options.account, AccountChoice::Rule(_)) {
         return Err(InjectError::message(format!(
             "{name} runs on its own configuration; there is no account to choose"
@@ -177,17 +170,19 @@ struct Started {
     conn: Conn,
 }
 
-/// Start `agent` in `workdir` and connect to it.
-async fn start(agent: &AcpAgent, paths: &Paths, workdir: &Path) -> Result<Started, InjectError> {
-    let launch = (agent.launch)(paths);
-    if launch.program.as_os_str().is_empty() {
-        return Err(InjectError::message(format!("no ACP agent is configured. {}", agent.install_hint)));
+/// Start `agent` in `workdir` and connect to it: its command line, over stdio,
+/// with its variables laid over the server's clean environment.
+async fn start(agent: &AcpAgent, workdir: &Path) -> Result<Started, InjectError> {
+    let program = agent.program();
+    if program.as_os_str().is_empty() {
+        return Err(InjectError::message(format!("{} has no executable. {INSTALL_HINT}", agent.name)));
     }
-    let mut child = tokio::process::Command::new(&launch.program)
-        .args(&launch.args)
+    let env = agent.environment(clean_env_bare());
+    let mut child = tokio::process::Command::new(&program)
+        .args(&agent.args)
         .current_dir(workdir)
         .env_clear()
-        .envs(&launch.env)
+        .envs(&env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -195,14 +190,13 @@ async fn start(agent: &AcpAgent, paths: &Paths, workdir: &Path) -> Result<Starte
         .spawn()
         .map_err(|error| {
             InjectError::message(format!(
-                "cannot start {} ({}): {error}. {}",
+                "cannot start {} ({}): {error}. {INSTALL_HINT}",
                 agent.name,
-                launch.program.display(),
-                agent.install_hint
+                program.display(),
             ))
         })?;
     let stderr = StderrTail::follow(child.stderr.take().expect("piped stderr"));
-    let client = Client::new(workdir.to_path_buf(), launch.env.clone());
+    let client = Client::new(workdir.to_path_buf(), env);
     let conn = Conn::start(
         child.stdin.take().expect("piped stdin"),
         child.stdout.take().expect("piped stdout"),
@@ -228,19 +222,21 @@ impl InjectionRegistry {
     /// The configuration options `agent` offers, for the composer: the model
     /// list and the effort ladder.
     ///
-    /// Remembered per agent once read — from a probe, or from a session the
+    /// Remembered per agent id once read — from a probe, or from a session the
     /// agent created since — and forgotten when its settings change. Only a
     /// fresh session's options are remembered: their current values are the
     /// agent's defaults, which a switched session's are not. With
     /// nothing remembered, a probe opens a session in a scratch directory,
     /// reads its options and closes it, so it leaves no conversation behind.
-    pub async fn acp_options(self: &Arc<Self>, agent: &'static AcpAgent) -> Result<Vec<ConfigOption>, InjectError> {
-        if let Some(options) = self.acp_options.lock().unwrap().get(&agent.source) {
+    pub async fn acp_options(self: &Arc<Self>, agent: &AcpAgent) -> Result<Vec<ConfigOption>, InjectError> {
+        if let Some(options) = self.acp_options.lock().unwrap().get(&agent.id) {
             return Ok(options.clone());
         }
-        // One probe at a time: a page that asks twice gets the first answer.
-        let _probing = self.acp_probe.lock().await;
-        if let Some(options) = self.acp_options.lock().unwrap().get(&agent.source) {
+        // One probe per agent at a time: a page that asks twice gets the first
+        // answer, and a slow agent does not hold up another's list.
+        let gate = self.acp_probes.lock().unwrap().entry(agent.id.clone()).or_default().clone();
+        let _probing = gate.lock().await;
+        if let Some(options) = self.acp_options.lock().unwrap().get(&agent.id) {
             return Ok(options.clone());
         }
         let scratch = std::env::temp_dir().join(format!("droppen-acp-probe-{}", new_uuid()));
@@ -250,12 +246,12 @@ impl InjectionRegistry {
         let probed = self.probe(agent, &scratch).await;
         let _ = tokio::fs::remove_dir_all(&scratch).await;
         let options = probed?;
-        self.remember_acp_options(agent.source, &options);
+        self.remember_acp_options(&agent.id, &options);
         Ok(options)
     }
 
-    async fn probe(&self, agent: &'static AcpAgent, scratch: &Path) -> Result<Vec<ConfigOption>, InjectError> {
-        let mut started = start(agent, &self.paths, scratch).await?;
+    async fn probe(&self, agent: &AcpAgent, scratch: &Path) -> Result<Vec<ConfigOption>, InjectError> {
+        let mut started = start(agent, scratch).await?;
         let opened = tokio::time::timeout(START_TIMEOUT, started.conn.open(None, scratch)).await;
         let opened = match opened {
             Ok(Ok(opened)) => opened,
@@ -264,7 +260,7 @@ impl InjectionRegistry {
                     Ok(Err(error)) => error.to_string(),
                     _ => format!("{} did not open a session in time", agent.name),
                 };
-                return Err(started.fail(self, agent.name, reason).await);
+                return Err(started.fail(self, &agent.name, reason).await);
             }
         };
         started.conn.close_session(&opened.id).await;
@@ -275,139 +271,167 @@ impl InjectionRegistry {
         Ok(opened.options)
     }
 
-    /// What `source` offers, as a fresh session reports it.
-    pub(super) fn remember_acp_options(&self, source: Source, options: &[ConfigOption]) {
+    /// What the agent `agent` offers, as a fresh session reports it.
+    pub(super) fn remember_acp_options(&self, agent: &str, options: &[ConfigOption]) {
         if !options.is_empty() {
-            self.acp_options.lock().unwrap().insert(source, options.to_vec());
+            self.acp_options.lock().unwrap().insert(agent.to_string(), options.to_vec());
         }
     }
 
-    /// Forget what `source` offers: its settings changed, so the next start
-    /// may run a different configuration.
-    pub fn forget_acp_options(&self, source: Source) {
-        self.acp_options.lock().unwrap().remove(&source);
+    /// Forget what the agent `agent` offers: its settings changed, so the next
+    /// start may run a different configuration.
+    pub fn forget_acp_options(&self, agent: &str) {
+        self.acp_options.lock().unwrap().remove(agent);
     }
 
-    pub(super) fn acp_handle(&self, source: Source, id: &str) -> Option<Handle> {
-        self.acp_servers.lock().unwrap().get(&self.key_of(source, id)).cloned()
+    pub(super) fn acp_handle(&self, id: &str) -> Option<Handle> {
+        self.acp_servers.lock().unwrap().get(&self.key_of(Source::Acp, id)).cloned()
     }
 
-    /// Hand a message to an ACP session, starting its agent if needed.
-    ///
-    /// `id` is `None` for a new session; the id the agent gives it is returned.
-    pub(super) async fn acp_deliver(
-        self: &Arc<Self>,
-        agent: &'static AcpAgent,
-        id: Option<&str>,
-        cwd: Option<&str>,
-        text: &str,
-        options: &SendOptions,
-    ) -> Result<(String, Sent), InjectError> {
-        check_options(agent, options)?;
+    /// Start a new session on the configured agent `agent` in `cwd`, with its
+    /// first message; this server's id for it is returned.
+    pub(super) async fn acp_start(self: &Arc<Self>, agent: &str, cwd: &str, text: &str, options: &SendOptions) -> Result<String, InjectError> {
+        let agent = configured(&self.paths, agent)?;
+        check_options(&agent, options)?;
         let message = message(text, options);
         let _gate = self.spawn_gate.lock().await;
-        let running = id.and_then(|id| {
-            self.acp_handle(agent.source, id)
-                .filter(Handle::alive)
-                .map(|handle| (id.to_string(), handle))
-        });
-        // Checked before anything starts, against the session's own options
-        // when it is running and what the agent last offered otherwise: a
-        // refused pick must not leave a new, empty session behind.
-        let offered = match &running {
-            Some((_, handle)) => handle.options(),
-            None => self.acp_options.lock().unwrap().get(&agent.source).cloned().unwrap_or_default(),
-        };
-        check_choice(agent, &offered, message.model.as_deref(), message.effort.as_deref())?;
-        let (id, handle) = match running {
-            Some(running) => running,
-            None => self.acp_spawn(agent, id, cwd).await?,
-        };
-        let gone = || InjectError::message(format!("{} exited before it took the message", agent.name));
-        let (reply, rx) = oneshot::channel();
-        handle.tx.send(Cmd::Deliver(message, reply)).map_err(|_| gone())?;
-        let sent = rx.await.map_err(|_| gone())?;
-        Ok((id, sent))
+        // Checked before anything starts, against what the agent last offered:
+        // a refused pick must not leave a new, empty session behind.
+        let offered = self.acp_options.lock().unwrap().get(&agent.id).cloned().unwrap_or_default();
+        check_choice(&agent, &offered, message.model.as_deref(), message.effort.as_deref())?;
+        let name = agent.name.clone();
+        let (id, handle) = self.acp_spawn(agent, None, Some(cwd)).await?;
+        Self::acp_hand_over(&handle, &name, message).await?;
+        Ok(id)
     }
 
-    pub(super) async fn acp_queue_action(&self, source: Source, id: &str, qid: &str, steer: bool) -> QueueOutcome {
-        match self.acp_handle(source, id).filter(Handle::alive) {
+    /// Hand a message to the session `id`, starting its own agent if needed:
+    /// the one its transcript is kept under, whatever else is configured now.
+    pub(super) async fn acp_send(self: &Arc<Self>, id: &str, text: &str, options: &SendOptions) -> Result<Sent, InjectError> {
+        let (agent_id, file) = locate(&self.paths, id)
+            .await
+            .ok_or_else(|| InjectError::message("ACP session not found"))?;
+        let agent = crate::acp_agent::agent(&self.paths, &agent_id)
+            .ok_or_else(|| InjectError::message(crate::acp_agent::removed(&agent_id)))?;
+        check_options(&agent, options)?;
+        let message = message(text, options);
+        let _gate = self.spawn_gate.lock().await;
+        let running = self.acp_handle(id).filter(Handle::alive);
+        // Checked before anything starts, against the session's own options
+        // when it is running and what the agent last offered otherwise.
+        let offered = match &running {
+            Some(handle) => handle.options(),
+            None => self.acp_options.lock().unwrap().get(&agent.id).cloned().unwrap_or_default(),
+        };
+        check_choice(&agent, &offered, message.model.as_deref(), message.effort.as_deref())?;
+        let name = agent.name.clone();
+        let handle = match running {
+            Some(handle) => handle,
+            None => {
+                // Written by this server when the session was created; a header
+                // without the agent's id is from before this server minted its
+                // own, when the two were the same.
+                let header = read_header(&file).await.unwrap_or_default();
+                let recorded = Recorded {
+                    id: id.to_string(),
+                    file,
+                    agent_session: header.agent_session_id.unwrap_or_else(|| id.to_string()),
+                    cwd: header.cwd,
+                };
+                self.acp_spawn(agent, Some(recorded), None).await?.1
+            }
+        };
+        Self::acp_hand_over(&handle, &name, message).await
+    }
+
+    /// Give a running session's driver its next message.
+    async fn acp_hand_over(handle: &Handle, name: &str, message: Message) -> Result<Sent, InjectError> {
+        let gone = || InjectError::message(format!("{name} exited before it took the message"));
+        let (reply, rx) = oneshot::channel();
+        handle.tx.send(Cmd::Deliver(message, reply)).map_err(|_| gone())?;
+        rx.await.map_err(|_| gone())
+    }
+
+    pub(super) async fn acp_queue_action(&self, id: &str, qid: &str, steer: bool) -> QueueOutcome {
+        match self.acp_handle(id).filter(Handle::alive) {
             Some(handle) => handle.queue_action(qid, steer).await,
             None => QueueOutcome::NoResident,
         }
     }
 
     /// Put an ACP session away: its transcript leaves the list, and the
-    /// agent's own record of it is left alone.
+    /// agent's own record of it is left alone. A session of an agent that was
+    /// removed can be put away too.
     ///
     /// Refused while a turn is running or a message is waiting, as the other
     /// archives are: the user is told rather than the work being dropped.
-    pub async fn archive_acp(&self, source: Source, id: &str) -> Result<(), crate::drive::archive::ArchiveError> {
+    pub async fn archive_acp(&self, id: &str) -> Result<(), crate::drive::archive::ArchiveError> {
         use crate::drive::archive::ArchiveError;
-        let name = agent(source).map_or("the agent", |agent| agent.name);
+        let (agent_id, from) = locate(&self.paths, id)
+            .await
+            .ok_or_else(|| ArchiveError("cannot archive the ACP session: it is gone".to_string()))?;
+        let name = crate::acp_agent::agent(&self.paths, &agent_id).map_or(agent_id.clone(), |agent| agent.name);
         let _gate = self.spawn_gate.lock().await;
-        if let Some(handle) = self.acp_handle(source, id).filter(Handle::alive) {
+        if let Some(handle) = self.acp_handle(id).filter(Handle::alive) {
             if !handle.stop().await {
                 return Err(ArchiveError(format!(
                     "{name} is running or has queued messages; stop it and clear the queue before archiving"
                 )));
             }
         }
-        self.acp_servers.lock().unwrap().remove(&self.key_of(source, id));
-        let from = transcript_path(&self.paths, source, id);
-        let archived = self.paths.acp_sessions(source).join("archived");
+        self.acp_servers.lock().unwrap().remove(&self.key_of(Source::Acp, id));
+        let archived = from.with_file_name("archived");
         tokio::fs::create_dir_all(&archived)
             .await
             .and(tokio::fs::rename(&from, archived.join(format!("{id}.jsonl"))).await)
             .map_err(|error| ArchiveError(format!("cannot archive the ACP session: {error}")))
     }
 
-    async fn acp_spawn(self: &Arc<Self>, agent: &'static AcpAgent, id: Option<&str>, cwd: Option<&str>) -> Result<(String, Handle), InjectError> {
-        let name = agent.name;
+    /// Start `agent` for a session and open it: a new one in `cwd`, or the
+    /// `recorded` one, reopened where it ran with `session/load`.
+    async fn acp_spawn(self: &Arc<Self>, agent: AcpAgent, recorded: Option<Recorded>, cwd: Option<&str>) -> Result<(String, Handle), InjectError> {
         // A session that exists ran somewhere; that is where it is reopened,
         // whatever directory the request names.
-        let recorded = match id {
-            Some(id) => Some(
-                crate::sessions::acp_transcript::find_session(&self.paths, agent.source, id)
-                    .await
-                    .ok_or_else(|| InjectError::message("ACP session not found"))?
-                    .cwd
-                    .0,
-            ),
-            None => None,
-        };
-        let workdir = claude_workdir(&self.paths, recorded.flatten().as_deref().or(cwd));
-        let mut started = start(agent, &self.paths, &workdir).await?;
-        let opened = match tokio::time::timeout(START_TIMEOUT, started.conn.open(id, &workdir)).await {
+        let workdir = claude_workdir(&self.paths, recorded.as_ref().and_then(|recorded| recorded.cwd.as_deref()).or(cwd));
+        let mut started = start(&agent, &workdir).await?;
+        let reopen = recorded.as_ref().map(|recorded| recorded.agent_session.as_str());
+        let opened = match tokio::time::timeout(START_TIMEOUT, started.conn.open(reopen, &workdir)).await {
             Ok(Ok(opened)) => opened,
             failed => {
                 let reason = match failed {
                     Ok(Err(error)) => error.to_string(),
-                    _ => format!("{name} did not open the session in time"),
+                    _ => format!("{} did not open the session in time", agent.name),
                 };
-                return Err(started.fail(self, name, reason).await);
+                return Err(started.fail(self, &agent.name, reason).await);
             }
         };
-        let new = id.is_none();
-        let id = opened.id;
-        // A new session's options say what a fresh one starts on — the
-        // defaults the composer offers. A reopened one's say what *it* was
-        // switched to, which is nobody else's default.
-        if new {
-            self.remember_acp_options(agent.source, &opened.options);
-        }
+        let (id, file) = match recorded {
+            Some(recorded) => (recorded.id, recorded.file),
+            None => {
+                // A new session's options say what a fresh one starts on — the
+                // defaults the composer offers. A reopened one's say what *it*
+                // was switched to, which is nobody else's default.
+                self.remember_acp_options(&agent.id, &opened.options);
+                let dir = agent_dir(&self.paths, &agent.id).ok_or_else(|| InjectError::Internal(format!("unusable agent id {}", agent.id)))?;
+                tokio::fs::create_dir_all(&dir)
+                    .await
+                    .map_err(|error| InjectError::Internal(error.to_string()))?;
+                let id = new_uuid();
+                let file = dir.join(format!("{id}.jsonl"));
+                (id, file)
+            }
+        };
 
-        let file = transcript_path(&self.paths, agent.source, &id);
-        tokio::fs::create_dir_all(self.paths.acp_sessions(agent.source))
-            .await
-            .map_err(|error| InjectError::Internal(error.to_string()))?;
         let fresh = tokio::fs::metadata(&file).await.map(|metadata| metadata.len() == 0).unwrap_or(true);
         let mut transcript = driver::Transcript::open(&file)
             .await
             .map_err(|error| InjectError::Internal(error.to_string()))?;
         if fresh {
             transcript
-                .append(&[record("session", json!({"id": id, "cwd": workdir.to_string_lossy()}))])
+                .append(&[record(
+                    "session",
+                    json!({"id": id, "agent": agent.id, "agentSessionId": opened.id, "cwd": workdir.to_string_lossy()}),
+                )])
                 .await;
         }
         // The agent's own history, for a transcript this server does not have:
@@ -422,12 +446,13 @@ impl InjectionRegistry {
 
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = Handle::new(tx);
-        self.acp_servers.lock().unwrap().insert(self.key_of(agent.source, &id), handle.clone());
+        self.acp_servers.lock().unwrap().insert(self.key_of(Source::Acp, &id), handle.clone());
         let Started { child, stderr, client, conn } = started;
         let driver = Driver {
             registry: self.clone(),
             agent,
             id: id.clone(),
+            agent_session: opened.id,
             child,
             conn,
             client,
@@ -464,9 +489,19 @@ mod tests {
         assert_eq!(prompt, "look\n\n[2 attached file(s):]\n- /u/a.png\n- /u/b.txt");
     }
 
+    fn agent() -> AcpAgent {
+        AcpAgent {
+            id: "fake".into(),
+            name: "Fake agent".into(),
+            command: "/x/fake".into(),
+            args: vec![],
+            env: vec![],
+        }
+    }
+
     #[test]
     fn options_an_acp_agent_cannot_honour_are_refused() {
-        let agent = &crate::acp_agent::AGENT;
+        let agent = &agent();
         assert!(check_options(agent, &SendOptions::default()).is_ok());
         assert!(check_options(
             agent,
@@ -491,13 +526,13 @@ mod tests {
             },
         ] {
             let error = check_options(agent, &refused).expect_err("refused");
-            assert!(error.to_string().contains("ACP agent"), "the refusal names the agent: {error}");
+            assert!(error.to_string().contains("Fake agent"), "the refusal names the agent: {error}");
         }
     }
 
     #[test]
     fn a_model_or_effort_is_checked_against_what_the_agent_offers() {
-        let agent = &crate::acp_agent::AGENT;
+        let agent = &agent();
         let offered = crate::acp::config_options(&json!({"configOptions": [
             {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "a:x",
              "options": [{"value": "a:x", "name": "X"}, {"value": "a:y", "name": "Y"}]},
@@ -515,12 +550,5 @@ mod tests {
         let model_only = &offered[..1];
         let refused = check_choice(agent, model_only, None, Some("high")).expect_err("no effort to choose");
         assert!(refused.to_string().contains("offers no effort"), "{refused}");
-    }
-
-    #[test]
-    fn only_the_acp_sources_have_an_agent() {
-        assert_eq!(agent(Source::Acp).map(|agent| agent.source), Some(Source::Acp));
-        assert!(agent(Source::Claude).is_none());
-        assert!(agent(Source::Codex).is_none());
     }
 }

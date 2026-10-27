@@ -832,8 +832,8 @@ impl InjectionRegistry {
         if source == Source::Codex {
             return self.codex_handle(id).is_some_and(|h| h.visible());
         }
-        if super::acp::agent(source).is_some() {
-            return self.acp_handle(source, id).is_some_and(|h| h.visible());
+        if source == Source::Acp {
+            return self.acp_handle(id).is_some_and(|h| h.visible());
         }
         source == Source::Claude && self.residents.lock().expect("residents poisoned").contains_key(id)
     }
@@ -843,8 +843,8 @@ impl InjectionRegistry {
         if source == Source::Codex {
             return self.codex_handle(id).filter(|h| h.visible()).map(|h| h.state());
         }
-        if super::acp::agent(source).is_some() {
-            return self.acp_handle(source, id).filter(|h| h.visible()).map(|h| h.state());
+        if source == Source::Acp {
+            return self.acp_handle(id).filter(|h| h.visible()).map(|h| h.state());
         }
         if source != Source::Claude {
             return None;
@@ -7160,7 +7160,7 @@ mod tests {
             codex_servers: Mutex::new(HashMap::new()),
             acp_servers: Mutex::new(HashMap::new()),
             acp_options: Mutex::new(HashMap::new()),
-            acp_probe: tokio::sync::Mutex::new(()),
+            acp_probes: Mutex::new(HashMap::new()),
             runs: Mutex::new(HashMap::new()),
             residents: Mutex::new(HashMap::new()),
             spawn_gate: tokio::sync::Mutex::new(()),
