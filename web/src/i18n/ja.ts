@@ -509,6 +509,20 @@ export const ja: Record<string, string> = {
   "this subagent was stopped": "このサブエージェントは中止されました",
   "no result and nothing is minding it any more — how this subagent ended is unknown":
     "結果もなく、見ているものもありません — このサブエージェントがどう終わったかは不明です",
+  /* a session's subagents, in the list and on their own page */
+  "subagent tree": "サブエージェントのツリー",
+  "list the subagents a session delegated to under it": "セッションが委任したサブエージェントを、セッション一覧でその下に表示します",
+  "{{n}} subagents": "サブエージェント {{n}} 件",
+  "show {{n}} subagents": "サブエージェント {{n}} 件を表示",
+  "hide {{n}} subagents": "サブエージェント {{n}} 件を隠す",
+  "{{n}} subagents working": "サブエージェント {{n}} 件が作業中",
+  "{{n}} subagents asking you": "サブエージェント {{n}} 件が質問中",
+  "{{n}} subagents unread": "サブエージェント {{n}} 件が未読",
+  "not read yet": "未読",
+  "this subagent is still running": "このサブエージェントはまだ実行中です",
+  "this subagent is waiting for your answer": "このサブエージェントは回答を待っています",
+  "subagent of": "呼び出し元",
+  "back to {{name}}": "{{name}} に戻る",
   "reported on the card that launched it, above": "上の起動カードに結果が出ています",
   /* what the CLI's progress stream says a background child is doing */
   "the tool it is running now": "いま実行中のツール",

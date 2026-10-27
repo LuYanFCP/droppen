@@ -2,7 +2,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { SourceIcon } from "@/components/source-icon";
 import { Outlet, useParams } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ChevronRight, Folder, Pin, Plus, X } from "lucide-react";
+import { Bot, ChevronRight, Folder, Pin, Plus, X } from "lucide-react";
 import { memo, useCallback, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ApiError, errorText } from "@/api/errors";
@@ -33,11 +33,13 @@ import {
 import {
   buildDeviceList,
   buildSessionList,
+  childTally,
   matchesQuery,
   NO_PROJECT,
   rowKey,
   type SessionListRow,
 } from "@/features/sessions/session-list-model";
+import { ChildStatusMark, UnreadMark } from "@/features/sessions/subagent-marks";
 import { copyNote, type DeviceChoice, DeviceFilterBar, deviceLabel, loadDeviceChoice, saveDeviceChoice } from "@/features/sessions/device-filter";
 import { gatewayShell, gatewayShellStore } from "@/features/machines/shells";
 import { useDeviceSessions, useShellDevices } from "@/features/machines/device-sessions";
@@ -57,6 +59,7 @@ import { SetupBars } from "@/features/setup/bars";
 
 type Source = components["schemas"]["Source"];
 type SessionSummary = components["schemas"]["SessionSummary"];
+type SessionChild = components["schemas"]["SessionChild"];
 
 /**
  * A relative timestamp that keeps up with the clock.
@@ -106,6 +109,9 @@ const SessionRow = memo(function SessionRow({
   machine,
   device = null,
   readOnly = false,
+  expandKey,
+  isOpen = false,
+  onToggleChildren,
 }: {
   session: SessionSummary;
   /** Basename when flat, the row's own cwd under a repository heading. */
@@ -122,8 +128,14 @@ const SessionRow = memo(function SessionRow({
   device?: string | null;
   /** Another device's, shown from its copy: nothing can be changed from here. */
   readOnly?: boolean;
+  /** What its subagents' fold is remembered under (absent: not foldable here). */
+  expandKey?: string;
+  isOpen?: boolean;
+  onToggleChildren?: (expandKey: string, remote: boolean) => void;
 }) {
   const { t } = useTranslation();
+  const children = session.children ?? [];
+  const foldable = children.length > 0 && !!expandKey && !!onToggleChildren;
   return (
     <ContextMenu>
       <ContextMenuTrigger
@@ -141,12 +153,23 @@ const SessionRow = memo(function SessionRow({
             {/* The strongest state, on the edge: a long list can be scanned for
                 colour before a single word of it is read. */}
             <EdgeBar state={attentionState(session)} />
+            {/* The trunk its subagents hang off, from under its chevron down. */}
+            {foldable && isOpen && <TreeLine x={treeLineX(nested, 1)} top="title" />}
             <div className="flex items-center gap-1.5">
+              {foldable && (
+                <TreeChevron
+                  isOpen={isOpen}
+                  label={t(isOpen ? "hide {{n}} subagents" : "show {{n}} subagents", { n: childTally(children).total })}
+                  onToggle={() => onToggleChildren(expandKey, readOnly)}
+                />
+              )}
               {session.pinned && <span title={t("pinned session")} aria-label={t("pinned session")}><Pin className="size-3 shrink-0 text-fg" /></span>}
               <span className={cn("min-w-0 flex-1 truncate text-[13px] leading-4.5 text-fg max-md:text-sm max-md:leading-5", unreadCountOf(session) > 0 && "font-semibold")}>{session.title}</span>
               <StatusBadge session={session} unread={unreadCountOf(session)} />
             </div>
-            <div className="mt-0.5 flex items-center gap-1.5">
+            {/* Under a chevron, the meta line starts where the title does, which
+                leaves the column below the chevron to the trunk. */}
+            <div className={cn("mt-0.5 flex items-center gap-1.5", foldable && "pl-[18px]")}>
               {device && (
                 <span data-row-device={machine} className="max-w-[45%] shrink-0 truncate font-mono text-2xs text-muted">
                   {device}
@@ -154,6 +177,7 @@ const SessionRow = memo(function SessionRow({
               )}
               <SourceIcon source={session.source} className="text-muted" />
               {dirLabel && <span className="truncate font-mono text-2xs text-faint">{dirLabel}</span>}
+              {children.length > 0 && <SubagentCount list={children} isOpen={isOpen} />}
               <span className="ml-auto shrink-0 font-mono text-2xs text-faint">
                 <RelativeTime iso={session.updatedAt} />
               </span>
@@ -176,6 +200,205 @@ const SessionRow = memo(function SessionRow({
     </ContextMenu>
   );
 });
+
+/** How far each level of the tree steps in: a row's chevron sits on the line its own children hang off. */
+const TREE_STEP = 16;
+
+/**
+ * Where the line of tree level `level` runs (1: the line a session's own
+ * subagents hang off), from the row's left edge. The first runs through the
+ * centre of the session's chevron, which sits at the start of its title.
+ */
+function treeLineX(nested: boolean, level: number): number {
+  return (nested ? 32 : 12) + 6 + (level - 1) * TREE_STEP;
+}
+
+/**
+ * One stroke of the tree's connectors, in the strong rule colour so the tree
+ * reads as one shape over the rows' own hairlines. A vertical stroke runs from
+ * `top` to `bottom` — each a row's top or bottom edge, its middle, or (`title`)
+ * the middle of a two-line session row's title — and reaches 1px past the
+ * bottom, over the row's own border, so the line does not break between rows.
+ * A horizontal stroke (`across`) is the elbow into a child.
+ */
+function TreeLine({
+  x,
+  top = "edge",
+  bottom = "edge",
+  across,
+}: {
+  x: number;
+  top?: "edge" | "middle" | "title";
+  bottom?: "edge" | "middle";
+  across?: number;
+}) {
+  if (across !== undefined) {
+    return <span aria-hidden="true" data-tree-line="elbow" className="pointer-events-none absolute top-1/2 h-px bg-border-strong" style={{ left: x, width: across }} />;
+  }
+  return (
+    <span
+      aria-hidden="true"
+      data-tree-line=""
+      className={cn(
+        "pointer-events-none absolute w-px bg-border-strong",
+        top === "edge" ? "top-0" : top === "middle" ? "top-1/2" : "top-[17px] max-md:top-[18px]",
+        bottom === "edge" ? "-bottom-px" : "bottom-1/2",
+      )}
+      style={{ left: x }}
+    />
+  );
+}
+
+/**
+ * A row's fold, in front of its title: the tree's own chevron.
+ *
+ * A button inside the row's link, so it keeps the click to itself; its hit
+ * area reaches past the 12px glyph for a finger.
+ */
+function TreeChevron({ isOpen, label, onToggle }: { isOpen: boolean; label: string; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      data-tree-toggle=""
+      aria-expanded={isOpen}
+      aria-label={label}
+      title={label}
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onToggle();
+      }}
+      className="relative flex size-3 shrink-0 cursor-pointer items-center justify-center text-muted after:absolute after:-inset-2 hover:text-fg"
+    >
+      <ChevronRight className={cn("size-3 transition-transform", isOpen && "rotate-90")} />
+    </button>
+  );
+}
+
+/**
+ * How many subagents a session has, on its meta line, and — folded — the
+ * loudest of what they are doing: one of them running, asking or unread is
+ * otherwise invisible from the list. Only says; the chevron folds.
+ */
+function SubagentCount({ list, isOpen }: { list: readonly SessionChild[]; isOpen: boolean }) {
+  const { t } = useTranslation();
+  const tally = useMemo(() => childTally(list), [list]);
+  const label = t("{{n}} subagents", { n: tally.total });
+  return (
+    <span data-subagent-count="" title={label} aria-label={label} className="flex h-4 shrink-0 items-center gap-1 font-mono text-2xs text-muted tabular-nums">
+      <Bot className="size-3 shrink-0" />
+      {tally.total}
+      {!isOpen && tally.working > 0 && <LiveDot className="bg-ok" title={t("{{n}} subagents working", { n: tally.working })} />}
+      {!isOpen && tally.waiting > 0 && (
+        <span data-signal="warn" className="font-semibold text-warn-fg" title={t("{{n}} subagents asking you", { n: tally.waiting })}>?</span>
+      )}
+      {!isOpen && tally.unread > 0 && <UnreadMark title={t("{{n}} subagents unread", { n: tally.unread })} />}
+    </span>
+  );
+}
+
+/**
+ * One subagent under its session: a single line on the tree, its connector
+ * branching off its parent's line (`├`, or `└` for the last), with the lines
+ * of the levels above running on past it wherever they still have a sibling
+ * to reach.
+ *
+ * A Codex subagent is a thread of its own and opens as a session; a Claude one
+ * lives in its session's directory and opens under it. Either way, its page
+ * leads back here.
+ */
+const SessionChildRow = memo(function SessionChildRow({
+  child,
+  root,
+  depth,
+  expandKey,
+  isOpen,
+  nested,
+  onToggle,
+  machine,
+  remote,
+  last,
+  through,
+}: {
+  child: SessionChild;
+  root: SessionSummary;
+  depth: number;
+  expandKey: string;
+  isOpen: boolean;
+  /** Its session sits under a directory heading. */
+  nested: boolean;
+  onToggle: (expandKey: string, remote: boolean) => void;
+  machine?: MachineKey;
+  /** Another device's (its fold is not written down). */
+  remote: boolean;
+  /** The last of its siblings. */
+  last: boolean;
+  /** Whether each level above it still runs on past it. */
+  through: readonly boolean[];
+}) {
+  const { t } = useTranslation();
+  const own = treeLineX(nested, depth);
+  const link: { to: string; params: Record<string, string> } =
+    child.kind === "thread"
+      ? { to: "/sessions/$source/$id", params: { source: root.source, id: child.id } }
+      : { to: "/sessions/$source/$id/agents/$agentId", params: { source: root.source, id: root.id, agentId: child.id } };
+  return (
+    <MachineLink
+      {...link}
+      machine={machine}
+      data-subagent-row={child.kind}
+      title={child.role ? `${child.name} · ${child.role}` : child.name}
+      className={cn(
+        "relative flex h-7 items-center gap-1.5 border-b border-border pr-2.5 hover:bg-hover max-md:h-9",
+        nested && "before:pointer-events-none before:absolute before:inset-y-0 before:left-4 before:w-px before:bg-border",
+      )}
+      style={{ paddingLeft: own + 10 }}
+      activeOptions={{ exact: true }}
+      activeProps={{ className: "bg-hover" }}
+    >
+      {through.map((runs, level) => (runs ? <TreeLine key={level} x={treeLineX(nested, level + 1)} /> : null))}
+      <TreeLine x={own} bottom={last ? "middle" : "edge"} />
+      <TreeLine x={own} across={9} />
+      {isOpen && child.children.length > 0 && <TreeLine x={treeLineX(nested, depth + 1)} top="middle" />}
+      {child.children.length > 0 ? (
+        <TreeChevron
+          isOpen={isOpen}
+          label={t(isOpen ? "hide {{n}} subagents" : "show {{n}} subagents", { n: child.children.length })}
+          onToggle={() => onToggle(expandKey, remote)}
+        />
+      ) : (
+        <span aria-hidden="true" className="size-3 shrink-0" />
+      )}
+      <ChildStatusMark status={child.status} />
+      <span className={cn("min-w-0 flex-1 truncate text-xs text-fg max-md:text-[13px]", child.unread && "font-semibold")}>{child.name}</span>
+      {child.role && <span className="max-w-[30%] shrink-0 truncate font-mono text-2xs text-faint">{child.role}</span>}
+      {child.unread && <UnreadMark title={t("not read yet")} />}
+      <span className="shrink-0 font-mono text-2xs text-faint">
+        <RelativeTime iso={child.updatedAt} />
+      </span>
+    </MachineLink>
+  );
+});
+
+/** A machine's unfolded sessions and subagents ([`expandKey`]); folded is the default. */
+const EXPANDED_AGENTS = "sessions.expandedAgents";
+
+/** How many unfolds are remembered: the oldest go first, and a fold forgotten is only folded again. */
+const EXPANDED_LIMIT = 200;
+
+/** Other devices' unfolds, in a list of several devices': for this page only, as [`remoteCollapsed`]. */
+const remoteExpanded = new Set<string>();
+
+function loadExpanded(machine: MachineKey): Set<string> {
+  const out = new Set(remoteExpanded);
+  try {
+    const raw = readMachineItem(localStorage, machine, EXPANDED_AGENTS);
+    if (raw) for (const key of JSON.parse(raw) as string[]) out.add(key);
+  } catch {
+    // corrupted storage: start folded
+  }
+  return out;
+}
 
 /** The folded directories of a machine's list (`rh.sessions.collapsedDirs` on the local machine, as it always was). */
 const COLLAPSED_DIRS = "sessions.collapsedDirs";
@@ -417,6 +640,27 @@ function SessionsPanel({ detailOpen, unified, devices }: { detailOpen: boolean; 
     });
   }, [machine]);
 
+  const [expanded, setExpanded] = useState<Set<string>>(() => loadExpanded(machine));
+  const toggleExpanded = useCallback((key: string, remote: boolean) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      if (remote) {
+        if (next.has(key)) remoteExpanded.add(key);
+        else remoteExpanded.delete(key);
+        return next;
+      }
+      try {
+        const own = [...next].filter((k) => !remoteExpanded.has(k)).slice(-EXPANDED_LIMIT);
+        writeMachineItem(localStorage, machine, EXPANDED_AGENTS, JSON.stringify(own));
+      } catch {
+        // storage full/blocked: state still works for this session
+      }
+      return next;
+    });
+  }, [machine]);
+
   // The global feed streams both scopes — that is the server's one-stream
   // design, not something this view asks for — and the model drops the external
   // half. The detail route still wants those rows.
@@ -451,9 +695,10 @@ function SessionsPanel({ detailOpen, unified, devices }: { detailOpen: boolean; 
             query: q,
             grouped,
             collapsedDirs,
+            expanded,
             homeDir,
           }),
-    [unified, allSessions, q, grouped, collapsedDirs, homeDir],
+    [unified, allSessions, q, grouped, collapsedDirs, expanded, homeDir],
   );
   const deviceModel = useMemo(() => {
     if (!unified) return null;
@@ -473,8 +718,9 @@ function SessionsPanel({ detailOpen, unified, devices }: { detailOpen: boolean; 
       query: q,
       grouped,
       collapsedDirs,
+      expanded,
     });
-  }, [unified, shown, needs, lists, q, grouped, collapsedDirs, machine, homeDir]);
+  }, [unified, shown, needs, lists, q, grouped, collapsedDirs, expanded, machine, homeDir]);
   const model = unified ? deviceModel : singleModel;
   const shownInfo = shown !== "all" && shown !== "needs" && shown !== LOCAL ? infoOf.get(shown) : undefined;
   const isPending = model === null && connected;
@@ -487,7 +733,7 @@ function SessionsPanel({ detailOpen, unified, devices }: { detailOpen: boolean; 
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => listRef.current,
-    estimateSize: (i) => (rows[i]?.type === "session" ? 45 : 30),
+    estimateSize: (i) => (rows[i]?.type === "session" ? 45 : rows[i]?.type === "child" ? 28 : 30),
     overscan: 12,
     getItemKey: (i) => rowKey(rows[i]!, machine),
   });
@@ -575,6 +821,20 @@ function SessionsPanel({ detailOpen, unified, devices }: { detailOpen: boolean; 
                         onNewSessionHere={openNewSession}
                         device={row.machine && row.machine !== machine ? nameOf(row.machine) : null}
                       />
+                    ) : row.type === "child" ? (
+                      <SessionChildRow
+                        child={row.child}
+                        root={row.root}
+                        depth={row.depth}
+                        expandKey={row.expandKey}
+                        isOpen={row.isOpen}
+                        nested={grouped && shown !== "needs" && !row.root.pinned}
+                        onToggle={toggleExpanded}
+                        machine={row.machine}
+                        remote={!!row.machine && row.machine !== machine}
+                        last={row.last}
+                        through={row.through}
+                      />
                     ) : (
                       <SessionRow
                         session={row.session}
@@ -590,6 +850,9 @@ function SessionsPanel({ detailOpen, unified, devices }: { detailOpen: boolean; 
                         // (pin, rename, archive go to its server, `api`): any other
                         // device's row is read-only, whatever its runtime says.
                         readOnly={!!row.machine && row.machine !== machine}
+                        expandKey={row.expandKey}
+                        isOpen={row.isOpen}
+                        onToggleChildren={toggleExpanded}
                       />
                     )}
                   </div>

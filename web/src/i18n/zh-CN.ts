@@ -509,6 +509,20 @@ export const zhCN: Record<string, string> = {
   "this subagent was stopped": "这个子代理被中止了",
   "no result and nothing is minding it any more — how this subagent ended is unknown":
     "没有结果，也没人还在看着它 — 这个子代理最后怎么样了，无从得知",
+  /* a session's subagents, in the list and on their own page */
+  "subagent tree": "子代理树",
+  "list the subagents a session delegated to under it": "在会话列表里，把会话委派出去的子代理列在它下面",
+  "{{n}} subagents": "{{n}} 个子代理",
+  "show {{n}} subagents": "展开 {{n}} 个子代理",
+  "hide {{n}} subagents": "收起 {{n}} 个子代理",
+  "{{n}} subagents working": "{{n}} 个子代理工作中",
+  "{{n}} subagents asking you": "{{n}} 个子代理在问你",
+  "{{n}} subagents unread": "{{n}} 个子代理未读",
+  "not read yet": "未读",
+  "this subagent is still running": "这个子代理还在运行",
+  "this subagent is waiting for your answer": "这个子代理在等你回答",
+  "subagent of": "子代理，来自",
+  "back to {{name}}": "返回 {{name}}",
   "reported on the card that launched it, above": "上面发起它的卡片已经写了结果",
   /* what the CLI's progress stream says a background child is doing */
   "the tool it is running now": "它当前正在跑的工具",

@@ -3344,6 +3344,10 @@
             "$ref": "#/components/schemas/SessionGrouping",
             "description": "How the session list is grouped."
           },
+          "subagentTree": {
+            "$ref": "#/components/schemas/SubagentTree",
+            "description": "Whether the session list shows each session's subagents; a body\nwithout it means `off`."
+          },
           "transcriptStyle": {
             "$ref": "#/components/schemas/TranscriptStyle",
             "description": "How transcripts render."
@@ -4511,6 +4515,76 @@
         ],
         "type": "object"
       },
+      "SessionChild": {
+        "description": "One delegated subagent of a session.",
+        "properties": {
+          "children": {
+            "description": "The subagents it delegated to in turn.",
+            "items": {
+              "$ref": "#/components/schemas/SessionChild"
+            },
+            "type": "array"
+          },
+          "id": {
+            "description": "Its id: a thread id, or an agent id within the parent; see `kind`.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SessionChildKind",
+            "description": "How it is opened."
+          },
+          "name": {
+            "description": "What to call it: the name the runtime gave it, or what it was asked to do.",
+            "type": "string"
+          },
+          "role": {
+            "description": "What it was spawned as (an agent type or role), when the runtime says.",
+            "nullable": true,
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SessionChildStatus",
+            "description": "Where it is."
+          },
+          "unread": {
+            "description": "Whether it has output nobody has looked at: it wrote after the reader\nlast opened it or anything above it — its parent's conversation shows\nwhat it delegated — whichever was latest.",
+            "type": "boolean"
+          },
+          "updatedAt": {
+            "description": "When it last wrote, ISO-8601.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "role",
+          "status",
+          "updatedAt",
+          "unread",
+          "children"
+        ],
+        "type": "object"
+      },
+      "SessionChildKind": {
+        "description": "How a child is opened.",
+        "enum": [
+          "thread",
+          "agent"
+        ],
+        "type": "string"
+      },
+      "SessionChildStatus": {
+        "description": "Where a child is.",
+        "enum": [
+          "working",
+          "waiting",
+          "done",
+          "failed"
+        ],
+        "type": "string"
+      },
       "SessionContinue": {
         "description": "`POST /api/sessions/{source}/{id}/continue` body.",
         "properties": {
@@ -4963,6 +5037,13 @@
             "nullable": true,
             "type": "string"
           },
+          "children": {
+            "description": "The subagents this session delegated work to, as a tree: each child\nwith its own children, when the agent runtime records who spawned whom.\n\nAn overlay like `unread` ([`subagents::apply`]), never cached with the\nrow: a child writes to a file of its own, so the parent's transcript can\nsit still while its children change. Empty for a session with none, and\nfor a runtime that keeps no parent links. Forks are not children — only\nwork a session delegated is.",
+            "items": {
+              "$ref": "#/components/schemas/SessionChild"
+            },
+            "type": "array"
+          },
           "claudeRoot": {
             "$ref": "#/components/schemas/ClaudeRoot",
             "description": "Which Claude config root holds the session file (claude sessions only).\n\nAdded with the accounts subsystem (`crate::claude_roots`); `None` for\ncodex, which has one root."
@@ -4987,6 +5068,11 @@
           },
           "id": {
             "description": "The CLI's session id.",
+            "type": "string"
+          },
+          "parentId": {
+            "description": "The session this one is a delegated subagent of, for a thread the\nruntime keeps as a session of its own (Codex), when it is opened by id:\nthe way back to the conversation that spawned it. `null` otherwise.",
+            "nullable": true,
             "type": "string"
           },
           "pinned": {
@@ -5613,6 +5699,14 @@
           "wrap"
         ],
         "type": "object"
+      },
+      "SubagentTree": {
+        "description": "Whether the session list shows the subagents each session delegated to.\n\nOpt-in: off until somebody turns it on, and while it is off the list is\nexactly what it was before the tree existed — the subagents are not even\nlooked for ([`crate::sessions::subagents`]).",
+        "enum": [
+          "off",
+          "on"
+        ],
+        "type": "string"
       },
       "SubscribeBody": {
         "description": "A new subscription.\n\nDeliberately the exact shape of `PushSubscription.toJSON()`, so a client\nposts what the browser handed it rather than unpacking and re-packing it —\none fewer place the two keys can be swapped.",
@@ -10843,6 +10937,61 @@
           }
         },
         "summary": "Subagent transcript",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/sessions/{source}/{id}/agents/{agentId}/seen": {
+      "post": {
+        "deprecated": false,
+        "description": "Mark one of a session's subagents as read, as of now.\n\nFor a subagent that is not a session of its own (Claude's), whose read mark\nlives within its parent's: the tree under a session shows it unread until\nit, or the session, is opened after it last wrote. A subagent that is a\nsession (a Codex thread) is marked through the session route.",
+        "operationId": "mark_agent_seen",
+        "parameters": [
+          {
+            "description": "Which CLI the parent session belongs to.",
+            "in": "path",
+            "name": "source",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Source",
+              "description": "Which CLI the parent session belongs to."
+            }
+          },
+          {
+            "description": "The parent session's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "The parent session's id.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The subagent's id.",
+            "in": "path",
+            "name": "agentId",
+            "required": true,
+            "schema": {
+              "description": "The subagent's id.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeenResult"
+                }
+              }
+            },
+            "description": "The subagent is now marked read"
+          }
+        },
+        "summary": "Mark a subagent read",
         "tags": [
           "sessions"
         ]

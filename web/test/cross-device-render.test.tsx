@@ -445,6 +445,7 @@ test("S2: font size and language are set on the main device's settings, and anot
   await flush();
   assert.match(onMain.text(), /font size/);
   assert.match(onMain.text(), /language/);
+  assert.match(onMain.text(), /subagent tree/, "the opt-in for the session list's subagents");
   assert.equal((container as FakeNode).findAll("data-appearance-on-main").length, 0);
   await onMain.root.unmount();
   const onOther = await draw("m-b");

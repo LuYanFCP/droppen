@@ -655,6 +655,8 @@ mod tests {
             unread: false,
             unread_count: 0,
             asking: false,
+            children: Vec::new(),
+            parent_id: Nullable(None),
         }
     }
 

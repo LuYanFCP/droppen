@@ -16,6 +16,7 @@ pub mod owned_sessions;
 pub mod pins;
 pub mod reference;
 pub mod repo;
+pub mod subagents;
 pub mod tool_display;
 pub mod transcript;
 pub mod util;
@@ -636,6 +637,21 @@ pub struct SessionSummary {
     /// this field existed; the live overlay fills it in.
     #[serde(default)]
     pub asking: bool,
+    /// The subagents this session delegated work to, as a tree: each child
+    /// with its own children, when the agent runtime records who spawned whom.
+    ///
+    /// An overlay like `unread` ([`subagents::apply`]), never cached with the
+    /// row: a child writes to a file of its own, so the parent's transcript can
+    /// sit still while its children change. Empty for a session with none, and
+    /// for a runtime that keeps no parent links. Forks are not children — only
+    /// work a session delegated is.
+    #[serde(default)]
+    pub children: Vec<subagents::SessionChild>,
+    /// The session this one is a delegated subagent of, for a thread the
+    /// runtime keeps as a session of its own (Codex), when it is opened by id:
+    /// the way back to the conversation that spawned it. `null` otherwise.
+    #[serde(default)]
+    pub parent_id: Nullable<String>,
 }
 
 /// The session list response.
@@ -1120,6 +1136,9 @@ pub async fn list_and_filter(
     // resident is mid-turn has to be known to be mid-turn before the badge is
     // decided, or the phone lights up for a session that is busy working.
     drivers.apply(&mut sessions);
+    // After the driver: a Claude child counts as working only while its
+    // parent is, and that is the driver's answer.
+    subagents::apply(paths, &mut sessions).await;
     crate::attention::apply(paths, &mut sessions).await;
     repo::apply(&mut sessions).await;
     pins::apply(paths, &mut sessions);
@@ -1363,6 +1382,8 @@ mod tests {
             unread: false,
             unread_count: 0,
             asking: false,
+            children: Vec::new(),
+            parent_id: Nullable(None),
         }
     }
 

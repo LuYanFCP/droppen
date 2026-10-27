@@ -1672,6 +1672,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{source}/{id}/agents/{agentId}/seen": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark a subagent read
+         * @description Mark one of a session's subagents as read, as of now.
+         *
+         *     For a subagent that is not a session of its own (Claude's), whose read mark
+         *     lives within its parent's: the tree under a session shows it unread until
+         *     it, or the session, is opened after it last wrote. A subagent that is a
+         *     session (a Codex thread) is marked through the session route.
+         */
+        post: operations["mark_agent_seen"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{source}/{id}/archive": {
         parameters: {
             query?: never;
@@ -4280,6 +4305,11 @@ export interface components {
             math?: components["schemas"]["MathStyle"];
             /** @description How the session list is grouped. */
             sessionGrouping: components["schemas"]["SessionGrouping"];
+            /**
+             * @description Whether the session list shows each session's subagents; a body
+             *     without it means `off`.
+             */
+            subagentTree?: components["schemas"]["SubagentTree"];
             /** @description How transcripts render. */
             transcriptStyle: components["schemas"]["TranscriptStyle"];
         };
@@ -5017,6 +5047,39 @@ export interface components {
             /** @description Most recently written first. */
             agents: components["schemas"]["SessionAgent"][];
         };
+        /** @description One delegated subagent of a session. */
+        SessionChild: {
+            /** @description The subagents it delegated to in turn. */
+            children: components["schemas"]["SessionChild"][];
+            /** @description Its id: a thread id, or an agent id within the parent; see `kind`. */
+            id: string;
+            /** @description How it is opened. */
+            kind: components["schemas"]["SessionChildKind"];
+            /** @description What to call it: the name the runtime gave it, or what it was asked to do. */
+            name: string;
+            /** @description What it was spawned as (an agent type or role), when the runtime says. */
+            role: string | null;
+            /** @description Where it is. */
+            status: components["schemas"]["SessionChildStatus"];
+            /**
+             * @description Whether it has output nobody has looked at: it wrote after the reader
+             *     last opened it or anything above it — its parent's conversation shows
+             *     what it delegated — whichever was latest.
+             */
+            unread: boolean;
+            /** @description When it last wrote, ISO-8601. */
+            updatedAt: string;
+        };
+        /**
+         * @description How a child is opened.
+         * @enum {string}
+         */
+        SessionChildKind: "thread" | "agent";
+        /**
+         * @description Where a child is.
+         * @enum {string}
+         */
+        SessionChildStatus: "working" | "waiting" | "done" | "failed";
         /** @description `POST /api/sessions/{source}/{id}/continue` body. */
         SessionContinue: {
             /** @description The stored claude account the new session runs under. */
@@ -5283,6 +5346,17 @@ export interface components {
              */
             attentionAt: string | null;
             /**
+             * @description The subagents this session delegated work to, as a tree: each child
+             *     with its own children, when the agent runtime records who spawned whom.
+             *
+             *     An overlay like `unread` ([`subagents::apply`]), never cached with the
+             *     row: a child writes to a file of its own, so the parent's transcript can
+             *     sit still while its children change. Empty for a session with none, and
+             *     for a runtime that keeps no parent links. Forks are not children — only
+             *     work a session delegated is.
+             */
+            children?: components["schemas"]["SessionChild"][];
+            /**
              * @description Which Claude config root holds the session file (claude sessions only).
              *
              *     Added with the accounts subsystem (`crate::claude_roots`); `None` for
@@ -5306,6 +5380,12 @@ export interface components {
             gitBranch: string | null;
             /** @description The CLI's session id. */
             id: string;
+            /**
+             * @description The session this one is a delegated subagent of, for a thread the
+             *     runtime keeps as a session of its own (Codex), when it is opened by id:
+             *     the way back to the conversation that spawned it. `null` otherwise.
+             */
+            parentId?: string | null;
             /** @description Pinned above the ordinary sidebar list in this server instance. */
             pinned?: boolean;
             /**
@@ -5672,6 +5752,15 @@ export interface components {
             /** @description 04 · Finishing up. */
             wrap: components["schemas"]["StepState"];
         };
+        /**
+         * @description Whether the session list shows the subagents each session delegated to.
+         *
+         *     Opt-in: off until somebody turns it on, and while it is off the list is
+         *     exactly what it was before the tree existed — the subagents are not even
+         *     looked for ([`crate::sessions::subagents`]).
+         * @enum {string}
+         */
+        SubagentTree: "off" | "on";
         /**
          * @description A new subscription.
          *
@@ -9391,6 +9480,33 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    mark_agent_seen: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Which CLI the parent session belongs to. */
+                source: components["schemas"]["Source"];
+                /** @description The parent session's id. */
+                id: string;
+                /** @description The subagent's id. */
+                agentId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The subagent is now marked read */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SeenResult"];
                 };
             };
         };
