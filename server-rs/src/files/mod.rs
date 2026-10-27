@@ -65,8 +65,10 @@ const PRIVATE_TO_THIS_COMPUTER: &str = "this device's Droppen data and settings 
 
 /// Extensions the download route is willing to serve inline, and their mime types.
 ///
-/// Narrower than [`IMAGE_EXT`] — this list decides what the browser is invited
-/// to render in place rather than save — but note what it still contains: an
+/// Narrower than the allowlist behind
+/// [`is_image_ext`](crate::sessions::util::is_image_ext) — this list decides
+/// what the browser is invited to render in place rather than save — but note
+/// what it still contains: an
 /// `svg` served as `image/svg+xml` with `Content-Disposition: inline` is a
 /// *document*, and a script inside it would otherwise run on this server's
 /// origin. That was survivable while the API had no credentials to steal; with
@@ -84,10 +86,6 @@ const INLINE_IMAGE_MIME: &[(&str, &str)] = &[
     ("webp", "image/webp"),
     ("svg", "image/svg+xml"),
 ];
-
-/// Extensions an attachment is flagged as an image for. Only drives whether the
-/// composer draws a thumbnail, so it can be broader than [`INLINE_IMAGE_MIME`].
-const IMAGE_EXT: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico"];
 
 /// What every inline response carries, so that "render this in place" cannot
 /// mean "run this in place".
@@ -948,11 +946,13 @@ async fn save_attachment(paths: &Paths, file: &UploadedFile) -> Result<Attachmen
     let target = dir.join(&name);
     tokio::fs::write(&target, &file.bytes).await.map_err(|_| FsError::Other)?;
 
+    // This route's own extraction: `extension()` is `split('.').last()`, so a
+    // name with no dot is its own extension (and "png" is an image here).
     let extension = extension(&name);
     Ok(Attachment {
         path: target.to_string_lossy().into_owned(),
         size_bytes: size as i64,
-        is_image: IMAGE_EXT.contains(&extension.as_str()),
+        is_image: crate::sessions::util::is_image_ext(&extension),
         name,
     })
 }
@@ -1244,6 +1244,14 @@ mod tests {
         assert_eq!(extension(".png"), "png");
         // No dot at all: `split(".").pop()` returns the whole name, not "".
         assert_eq!(extension("file"), "file");
+    }
+
+    /// The upload route's extraction: a name with no dot is its own extension.
+    #[test]
+    fn an_upload_whose_whole_name_is_an_extension_counts_as_an_image() {
+        assert!(crate::sessions::util::is_image_ext(&extension("png")));
+        assert!(crate::sessions::util::is_image_ext(&extension("JPG")));
+        assert!(!crate::sessions::util::is_image_ext(&extension("notes")));
     }
 
     #[test]
