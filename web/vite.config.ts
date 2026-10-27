@@ -1,11 +1,12 @@
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
+import { readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig, type Plugin, type Rollup } from "vite";
 import { cloudBuild, cloudConfig } from "./build/cloud-mode";
 import { devTools } from "./build/dev-tools";
 import { droppenPlugins } from "./build/droppen-plugins";
-import { fillServiceWorker } from "./build/service-worker";
+import { fillServiceWorker, type LanguageFiles } from "./build/service-worker";
 import { thirdPartyNotices } from "./build/third-party-notices.mjs";
 import { guardBootChunks, vendorChunk } from "./build/vendor-chunks";
 
@@ -97,12 +98,15 @@ function katexWoff2Only(): Plugin {
  * checks — on returning to the tab, or when the version banner appears — and
  * the install fetches the new chunks in the background, before the reload that
  * needs them. Only the entry chunk, its static imports and their CSS: lazy
- * chunks are fetched when used, not on every install over a weak link. The
- * hashes are what the worker checks every asset against before it caches or
- * serves it.
+ * chunks are fetched when used, not on every install over a weak link. A
+ * page also boots from its language's translations, which are a chunk per
+ * language: those the worker precaches only for the languages the browser
+ * shows ({@link languageChunks}). The hashes are what the worker checks every
+ * asset against before it caches or serves it.
  */
 function precacheBootSet(): Plugin {
   let boot: string[] = [];
+  let languages: LanguageFiles = {};
   return {
     name: "rh-precache-boot-set",
     apply: "build",
@@ -119,15 +123,47 @@ function precacheBootSet(): Plugin {
         if (chunk.type === "chunk" && chunk.isEntry) visit(chunk.fileName);
       }
       boot = [...files].sort().map((file) => `/${file}`);
+      languages = languageChunks(bundle, files);
     },
     // After every file is written and the public directory copied, so `sw.js`
     // is there to edit and the hashes are of the bytes as served. In a cloud
     // build the worker is told the marker origin too; the marker itself goes
     // in later (`cloudBuild`), so the shell it hashes is the build's own.
     writeBundle(options) {
-      fillServiceWorker(options.dir ?? "dist", boot, { hubOrigin: cloud?.hubOrigin });
+      fillServiceWorker(options.dir ?? "dist", boot, { hubOrigin: cloud?.hubOrigin, languages });
     },
   };
+}
+
+/**
+ * Each language's translations (`src/i18n/lang-*.ts`, a chunk each): its
+ * files beyond the boot set, which a page in that language boots from too,
+ * and how the chunk's name starts in any build, by which the worker knows an
+ * earlier build's chunk of the same language in its cache (`public/sw.js`).
+ * A language with no chunk fails the build: the worker would never keep it.
+ */
+function languageChunks(bundle: Rollup.OutputBundle, boot: ReadonlySet<string>): LanguageFiles {
+  const out: LanguageFiles = {};
+  for (const chunk of Object.values(bundle)) {
+    if (chunk.type !== "chunk" || !chunk.isDynamicEntry) continue;
+    const lang = /\/src\/i18n\/lang-([\w-]+)\.ts$/.exec(chunk.facadeModuleId ?? "")?.[1];
+    if (!lang) continue;
+    const prefix = `assets/lang-${lang}-`;
+    if (!chunk.fileName.startsWith(prefix)) throw new Error(`${chunk.fileName}: the ${lang} translations' chunk is not named ${prefix}…`);
+    const files: string[] = [];
+    const visit = (fileName: string) => {
+      const c = bundle[fileName];
+      if (!c || c.type !== "chunk" || boot.has(fileName) || files.includes(`/${fileName}`)) return;
+      files.push(`/${fileName}`);
+      for (const imported of c.imports) visit(imported);
+    };
+    visit(chunk.fileName);
+    out[lang] = { prefix: `/${prefix}`, files };
+  }
+  const languages = readdirSync(fileURLToPath(new URL("./src/i18n", import.meta.url))).flatMap((file) => /^lang-([\w-]+)\.ts$/.exec(file)?.[1] ?? []);
+  const missing = languages.filter((lang) => !out[lang]);
+  if (languages.length === 0 || missing.length > 0) throw new Error(`no chunk for the translations of ${missing.join(", ") || "any language"} (src/i18n/lang-*.ts)`);
+  return out;
 }
 
 export default defineConfig({
