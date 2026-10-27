@@ -112,7 +112,6 @@ import {
   fromHex,
   generateEnrollCode,
   genesis3Draft,
-  genesisDraft,
   HandshakeError,
   hex,
   type HostRotation,
@@ -2764,7 +2763,7 @@ export class CloudAccount {
     const writable = opts.writable ?? chainV3Writable(await this.api.me(this.session.token));
     if (!writable) throw noNewAccounts();
     try {
-      return await this.foundAccount(withRecovery, CHAIN_VERSION_3);
+      return await this.foundAccount(withRecovery);
     } catch (error) {
       // The hub stopped taking v3 entries since it said it did.
       if (error instanceof HubApiError && error.status === 409 && error.code === "chain_v3_not_ready") throw noNewAccounts();
@@ -2816,12 +2815,8 @@ export class CloudAccount {
     return checkpoints(trust).every((mark) => state.seq >= mark.seenThrough && hex(state.hashAt(mark.seenThrough)!) === mark.head);
   }
 
-  /**
-   * The genesis and `UK` epoch 0 in one call, as chain `version`: 3 for
-   * every account made here ({@link createGenesis}); 2 only where a test
-   * stands for an account made before chain v3.
-   */
-  private async foundAccount(withRecovery: boolean, version: typeof CHAIN_VERSION | typeof CHAIN_VERSION_3): Promise<string[] | null> {
+  /** The v3 genesis and `UK` epoch 0 in one call ({@link createGenesis}). */
+  private async foundAccount(withRecovery: boolean): Promise<string[] | null> {
     // AK: generated for this one signature and never stored.
     const ak = (await crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign", "verify"])) as CryptoKeyPair;
     const akPublic = new Uint8Array(await crypto.subtle.exportKey("raw", ak.publicKey));
@@ -2837,15 +2832,18 @@ export class CloudAccount {
       }
     }
     const now = Date.now();
-    const draft =
-      version === CHAIN_VERSION_3
-        ? genesis3Draft(this.account, akPublic, { id: this.deviceId, signKey: this.keys.signPublic, dhKey: this.keys.dhPublic, flags: { host: false, admin: true } }, recoveryKey, now)
-        : genesisDraft(this.account, akPublic, this.info(), recoveryKey, now);
+    const draft = genesis3Draft(
+      this.account,
+      akPublic,
+      { id: this.deviceId, signKey: this.keys.signPublic, dhKey: this.keys.dhPublic, flags: { host: false, admin: true } },
+      recoveryKey,
+      now,
+    );
     const genesis = await signDraft(draft, ak.privateKey);
     const uk = random32();
     try {
       const commit: Draft = {
-        version,
+        version: CHAIN_VERSION_3,
         account: this.account,
         seq: 1,
         prev: await entryHash(genesis),
@@ -4334,115 +4332,6 @@ export class CloudAccount {
     const exposed = hostsToRotate(chain, (h) => this.renews(h));
     this.exposureCache = { chain, seq: chain.seq, exposed };
     return exposed;
-  }
-
-  /**
-   * Write the accept lists `changes` makes for the chain as it stands (built
-   * again on a newer head) in ONE batch (§4.1: a group's narrowing, or its
-   * restoring): each list that shuts a device out followed by that host's
-   * next machine key epoch (`hostKeyNext`), which is put in the keyring,
-   * sealed to the devices still let in and handed to the agent; a list that
-   * lets a device in seals it the host's keys. A host that must renew first is
-   * let in nowhere. Returns the lists written — none when `changes` has
-   * nothing to change on the newest head (another page did it).
-   */
-  async setAccepts(changes: (chain: ChainState) => { host: string; from: Accept }[], courier: MachineKeyCourier): Promise<{ host: string; from: Accept }[]> {
-    const chain0 = this.requireAdmin();
-    this.requireUpgraded(chain0);
-    const stale = userKeyStale(chain0);
-    const wrapEpoch = stale ? null : await this.ensureUserKey();
-    if (!stale && wrapEpoch === null) throw this.noUserKey();
-    const mks = new Map<string, Bytes>();
-    const fresh: { uk: Bytes | null } = { uk: null };
-    let written: { host: string; from: Accept; admitted: string[] }[] = [];
-    const zero = () => {
-      for (const mk of mks.values()) mk.fill(0);
-      mks.clear();
-      fresh.uk?.fill(0);
-      fresh.uk = null;
-    };
-    try {
-      let entries: Entry[];
-      try {
-        entries = await this.appendBatch(async (chain) => {
-          zero();
-          written = [];
-          const actions: Action[] = [];
-          for (const c of changes(chain)) {
-            if (!chain.machine(c.host)) continue;
-            let from = c.from;
-            if (from.type === "devices") {
-              const ids = [...new Set(from.ids)].filter((id) => id !== c.host && chain.device(id)).sort((x, y) => compareBytes(utf8(x), utf8(y)));
-              from = ids.length ? { type: "devices", ids } : { type: "admins" };
-            }
-            if (sameAccept(chain.acceptPolicy(c.host), from)) continue;
-            const { admitted, shutOut } = acceptChange(chain, c.host, from);
-            const risky = admitted.filter((id) => this.mustRenewFirstOn(chain, id));
-            if (risky.length) {
-              throw new AccountError("exposed", "renew the identity key of {{ids}} first: a device that could control it no longer can, and may have copied it", undefined, undefined, {
-                ids: risky.join(", "),
-              });
-            }
-            actions.push({ type: "setAccept", host: c.host, from });
-            written.push({ host: c.host, from, admitted });
-            if (!shutOut.length) continue;
-            // Shutting a device out: its next key epoch in the very next entry (review D2), sealed only to who is still let in.
-            // The batch's first key epoch carries a new user key when the newest is stale (as `commitHostKey`).
-            let carried: { epoch: number; hash: Bytes } | null = null;
-            if (mks.size === 0 && (userKeyStale(chain) || wrapEpoch === null || chain.latestUserEpoch() !== wrapEpoch)) {
-              fresh.uk = random32();
-              const ukEpoch = chain.userKeyEpochs();
-              carried = { epoch: ukEpoch, hash: await userKeyCommit(this.account, ukEpoch, fresh.uk) };
-            }
-            const mk = random32();
-            mks.set(c.host, mk);
-            const epoch = chain.machineKeyEpochs(c.host);
-            actions.push({ type: "keyEpochs", user: carried, machines: [{ machine: c.host, epoch, hash: await machineKeyCommit(this.account, c.host, epoch, mk) }] });
-          }
-          if (!actions.length) throw new NothingToWrite();
-          return actions;
-        });
-      } catch (error) {
-        if (error instanceof NothingToWrite) return [];
-        throw error;
-      }
-      const committed = entries.flatMap((e) => (e.draft.action.type === "keyEpochs" ? [e.draft.action] : []));
-      const freshEpoch = committed.find((a) => a.user)?.user?.epoch ?? null;
-      const newUk = freshEpoch !== null ? fresh.uk : null;
-      const recovery = newUk ? await this.keepUserKey(freshEpoch!, newUk) : false;
-      const ukEpoch = freshEpoch ?? wrapEpoch!;
-      if (newUk) await this.mailUserKey(freshEpoch!, newUk);
-      void recovery;
-      for (const [host, mk] of mks) {
-        const mkEpoch = committed.flatMap((a) => a.machines).find((m) => m.machine === host)?.epoch ?? this.state!.latestMachineEpoch(host)!;
-        try {
-          await this.keyring.put(keyName.machine(host, mkEpoch, ukEpoch), await wrapMachineKey(await this.vault.key(ukEpoch), this.account, host, mkEpoch, ukEpoch, mk));
-        } catch (error) {
-          console.error(`cloud account: the keyring did not take ${host}'s new key; handing it over all the same:`, error);
-        }
-        await this.mailHostKey(host, mkEpoch, mk);
-        try {
-          await this.handOver(host, mkEpoch, ukEpoch, mk, courier, false);
-        } catch (error) {
-          console.warn(`cloud account: could not hand ${host} its new key (it asks again):`, error);
-        }
-      }
-      // Let in: the host's committed keys, so it reads what the host wrote.
-      for (const w of written) {
-        for (const id of w.admitted) {
-          try {
-            await this.sendHostKeys(id, w.host);
-          } catch (error) {
-            const to = this.state?.device(id);
-            if (!to || !noDeviceRoleYet(to, error)) console.warn(`cloud account: could not send ${id} ${w.host}'s keys (it asks again):`, error);
-          }
-        }
-      }
-      this.emit();
-      return written.map(({ host, from }) => ({ host, from }));
-    } finally {
-      zero();
-    }
   }
 
   /** Whether host `id` renews its identity key (rather than being re-enrolled): see {@link noteRenewals}. Never on a v2 chain. */
@@ -6615,13 +6504,6 @@ export interface Exposure {
   blockedBy: Map<string, number>;
 }
 
-/** Whether two accept lists say the same. */
-export function sameAccept(x: Accept, y: Accept): boolean {
-  if (x.type !== y.type) return false;
-  if (x.type !== "devices" || y.type !== "devices") return true;
-  return [...x.ids].sort().join("\n") === [...y.ids].sort().join("\n");
-}
-
 /**
  * The exposed hosts `host` lets control it (§4.1 「次序先于收窄」): each must have
  * renewed before `host` does — its old key is dead by then. Not `host` itself.
@@ -7041,7 +6923,7 @@ export function hostsExposedBy(chain: ChainState, device: string, from?: readonl
   return [...out].filter((id) => !already.has(id)).sort();
 }
 
-/** `CloudAccount.setAccepts`: nothing left to write on the newest head. */
+/** `CloudAccount.writePause`: nothing left to write on the newest head. */
 class NothingToWrite extends Error {}
 
 /** A renewal this page verified a dispute of: its host, and the disputed `rotateHostKey`'s seq (§3.8). */
@@ -7441,9 +7323,3 @@ function compareBytes(a: Uint8Array, b: Uint8Array): number {
   return a.length - b.length;
 }
 
-/** Whether two key byte strings are the same (for presence lists vs the chain). */
-export function sameMachineKey(a: Uint8Array, b: Uint8Array): boolean {
-  return equal(a, b);
-}
-
-export { fromHex };

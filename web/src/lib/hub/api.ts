@@ -19,7 +19,7 @@
  */
 import { createHubClient, type HubClient } from "@/api/hub";
 import type { components } from "@/api/hub-schema";
-import { type Bytes, fromHex, hex, sha256, utf8 } from "@/lib/e2e";
+import { type Bytes, fromHex, hex, MAX_PAGE_LEN, RecordError, sha256, utf8 } from "@/lib/e2e";
 import { hubHttpOrigin } from "./config";
 import type { AuthenticationResponseJSON, CreationOptionsJSON, PasskeyChallenge, RegistrationResponseJSON, RequestOptionsJSON } from "./passkey";
 import type { RelayDirectory } from "./relays";
@@ -183,23 +183,15 @@ export type SignupMode = "invite" | "open" | "closed";
 /** Whether this hub requires accounts to verify their e-mail. */
 export type Verification = "required" | "off";
 
-/** The Turnstile widget's page, on its own origin (never the app's: its script must not load here). */
-export interface TurnstileConfig {
-  siteKey: string;
-  /** e.g. `https://verify.droppen.app`, normalised to a bare origin. */
-  origin: string;
-}
-
 /** Passkeys at this hub (docs/passkeys.md §3.1): the RP ID they are made for. */
 export interface PasskeysConfig {
   rpId: string;
 }
 
-/** What sign-up asks for (`GET /v1/signup/config`). */
+/** What sign-up asks for, as droppen.app answers it ([`SIGNUP_CONFIG`]). */
 export interface SignupConfig {
   signup: SignupMode;
   inviteRequired: boolean;
-  turnstile: TurnstileConfig | null;
   verification: Verification;
   /** `null`: this hub offers no passkeys (or predates them), and the page says nothing of them. */
   passkeys: PasskeysConfig | null;
@@ -207,7 +199,24 @@ export interface SignupConfig {
   deletion?: DeletionConfig | null;
 }
 
-/** What deleting an account leaves behind (`GET /v1/signup/config` `deletion`). */
+/**
+ * droppen.app's answers, written here instead of asked of the hub: sign-up is
+ * open (an invite code is optional — it may give the account a plan), the
+ * e-mail must be verified before a device joins, passkeys are made for
+ * `droppen.app`, and a deleted account's address is held for seven days.
+ * The hub no longer answers
+ * `GET /v1/signup/config`, and a site served by another hub shows these same
+ * answers.
+ */
+export const SIGNUP_CONFIG: SignupConfig = {
+  signup: "open",
+  inviteRequired: false,
+  verification: "required",
+  passkeys: { rpId: "droppen.app" },
+  deletion: { emailHoldDays: 7 },
+};
+
+/** What deleting an account leaves behind ([`SIGNUP_CONFIG`]'s `deletion`). */
 export interface DeletionConfig {
   /** For how many days a deleted account's address cannot sign up again (0: it can at once). */
   emailHoldDays: number;
@@ -848,20 +857,14 @@ export class HubApi {
     return (out.data ?? null) as T;
   }
 
-  /** Who may sign up, the Turnstile widget's page, whether e-mail must be verified, and passkeys (public). */
+  /**
+   * What sign-up asks for, as droppen.app answers it ([`SIGNUP_CONFIG`]). It
+   * used to be asked of the hub (`GET /v1/signup/config`); one service, one
+   * page, so the answers are written here and the request is gone. Sites
+   * served by another hub show the same answers.
+   */
   async signupConfig(): Promise<SignupConfig> {
-    const r = await this.typed<components["schemas"]["SignupConfig"]>((headers) => this.client.GET("/v1/signup/config", { headers }));
-    const signup: SignupMode = r?.signup === "open" || r?.signup === "closed" ? (r.signup as SignupMode) : "invite";
-    const deletion = deletionConfig(r?.deletion);
-    return {
-      signup,
-      inviteRequired: typeof r?.invite_required === "boolean" ? r.invite_required : signup === "invite",
-      turnstile: turnstileConfig(r?.turnstile),
-      verification: r?.verification === "required" ? "required" : "off",
-      passkeys: passkeysConfig(r?.passkeys),
-      // Only from a hub that says it (one from before account deletion says nothing).
-      ...(deletion ? { deletion } : {}),
-    };
+    return { ...SIGNUP_CONFIG, passkeys: SIGNUP_CONFIG.passkeys && { ...SIGNUP_CONFIG.passkeys }, deletion: SIGNUP_CONFIG.deletion && { ...SIGNUP_CONFIG.deletion } };
   }
 
   /**
@@ -1101,7 +1104,7 @@ export class HubApi {
   }
 
   logout(token: string): Promise<void> {
-    return this.call("POST", "/v1/logout", { token, noRenew: true });
+    return this.typed<void>((headers) => this.client.POST("/v1/logout", { headers }), { token, noRenew: true });
   }
 
   /**
@@ -1263,7 +1266,10 @@ export class HubApi {
     const body: components["schemas"]["NewKeyWrap"] = { blob: hex(blob) };
     // Left on `call`: a name is several path segments (`mk/m-1/0/0/dev`), and openapi-fetch would
     // percent-encode its `/` — the hub's route is `{*name}` and takes the name as written.
-    const r = await this.call<components["schemas"]["KeyPut"]>("PUT", `/v1/keys/${name}`, { token, body });
+    const r = await this.typed<components["schemas"]["KeyPut"]>(
+      (headers) => this.client.PUT("/v1/keys/{name}", { params: { path: { name } }, body, headers }),
+      { token },
+    );
     return { stored: r?.stored !== false };
   }
 
@@ -1298,13 +1304,6 @@ export class HubApi {
 
   async closePairing(token: string, id: string): Promise<void> {
     await this.typed<void>((headers) => this.client.DELETE("/v1/pairings/{id}", { params: { path: { id } }, headers }), { token });
-  }
-
-  /** The account's main device (`GET /v1/main-device`; a hub from before it answers 404). */
-  async mainDevice(token: string): Promise<AccountMain> {
-    const main = accountMain(await this.typed<components["schemas"]["MainDevice"]>((headers) => this.client.GET("/v1/main-device", { headers }), { token }));
-    if (!main) throw new HubApiError(502, "bad_main_device", "the hub's main device is not one");
-    return main;
   }
 
   /**
@@ -1355,10 +1354,13 @@ export class HubApi {
    * `needs_assurance`), 409 `not_a_host`, 429 `rate`.
    */
   async putRotation(token: string, host: string, opts: { nonceHash?: Uint8Array; assurance: 0 | 1 }): Promise<HostRotationView> {
-    const body: { nonce_hash?: string; assurance: 0 | 1 } = { assurance: opts.assurance };
+    const body: components["schemas"]["PutRotation"] = { assurance: opts.assurance };
     if (opts.nonceHash) body.nonce_hash = hex(opts.nonceHash);
-    // Left on `call`: the schema models this 200 as an empty object, not the host's view `hostRotationView` reads.
-    const row = hostRotationView(await this.call<unknown>("PUT", `/v1/rotations/${encodeURIComponent(host)}`, { token, body }));
+    const r = await this.typed<components["schemas"]["RotationPut"]>(
+      (headers) => this.client.PUT("/v1/rotations/{host}", { params: { path: { host } }, body, headers }),
+      { token },
+    );
+    const row = hostRotationView(r);
     if (!row || row.host !== host) throw new HubApiError(502, "bad_rotation", "the hub answered for another renewal");
     return row;
   }
@@ -1373,19 +1375,54 @@ export class HubApi {
    */
   async deleteRotation(token: string, host: string, only?: { nonceHash: Uint8Array | string } | { requestedMs: number }): Promise<void> {
     const body = !only ? undefined : "nonceHash" in only ? { nonce_hash: typeof only.nonceHash === "string" ? only.nonceHash : hex(only.nonceHash) } : { requested_ms: only.requestedMs };
-    // Left on `call`: the schema models this 200 as an empty object, not the per-host view the hub sends.
-    await this.call<unknown>("DELETE", `/v1/rotations/${encodeURIComponent(host)}`, body ? { token, body } : { token });
+    // The response is the documented `{}`; the withdrawal body stays a raw
+    // bytes compatibility path (`#[api(skip)]` in the hub), so it is sent as it is.
+    await this.call<components["schemas"]["Empty"]>("DELETE", `/v1/rotations/${encodeURIComponent(host)}`, body ? { token, body } : { token });
   }
 
   /**
    * One snapshot page of a stream, as the hub stores it: sealed bytes it
    * cannot open. Unchecked here — the reader checks it against the signed
    * manifest that names it (`openManifestPage`) before using a byte of it.
+   *
+   * At most {@link MAX_PAGE_LEN} bytes, whatever the hub sends (the same cap
+   * as the Rust device's `read_capped`): a `Content-Length` over it is refused
+   * before the body is touched, and a larger body is refused and its reader
+   * cancelled as the bytes come in — never buffered whole first. Refused as a
+   * `tooLarge` page, which a stream reader handles like any other page it
+   * cannot use.
    */
   async streamPage(token: string, stream: Uint8Array, page: Uint8Array): Promise<Bytes> {
     const res = await this.send("GET", `/v1/streams/${hex(stream)}/pages/${hex(page)}`, { token });
     if (!res.ok) return HubApi.fail(res);
-    return new Uint8Array(await res.arrayBuffer());
+    const tooLarge = () => new RecordError("tooLarge", `a page larger than ${MAX_PAGE_LEN} bytes`);
+    const declared = res.headers.get("content-length");
+    if (declared !== null && Number(declared) > MAX_PAGE_LEN) throw tooLarge();
+    if (!res.body) return new Uint8Array();
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.length;
+        if (total > MAX_PAGE_LEN) {
+          await reader.cancel().catch(() => undefined);
+          throw tooLarge();
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const out = new Uint8Array(total);
+    let at = 0;
+    for (const chunk of chunks) {
+      out.set(chunk, at);
+      at += chunk.length;
+    }
+    return out;
   }
 
   /** The relays this account may use, its set and `relay.max`, and its machines' round trips (`GET /v1/relays`). */
@@ -1606,20 +1643,6 @@ function signedIn(r: components["schemas"]["SignedIn"]): SignedIn {
   return { account: r.account, token: r.token, expiresMs: r.expires_ms, emailVerified: verification === "off" || r.email_verified !== false, verification };
 }
 
-/** `signup/config`'s `passkeys` (absent, from an older hub, or not of its shape: none). */
-function passkeysConfig(raw: unknown): PasskeysConfig | null {
-  if (!raw || typeof raw !== "object") return null;
-  const rpId = (raw as { rp_id?: unknown }).rp_id;
-  return typeof rpId === "string" && rpId ? { rpId } : null;
-}
-
-/** `signup/config`'s `deletion` (absent, from an older hub, or not of its shape: `null`). */
-function deletionConfig(raw: unknown): DeletionConfig | null {
-  if (!raw || typeof raw !== "object") return null;
-  const days = (raw as { email_hold_days?: unknown }).email_hold_days;
-  return typeof days === "number" && Number.isInteger(days) && days >= 0 ? { emailHoldDays: days } : null;
-}
-
 /** `{challenge, options}` of the shape `create()` (or `get()`) needs, else a 502: nothing is asked of the browser. */
 function passkeyChallenge(raw: unknown, kind: "create" | "get"): PasskeyChallenge<unknown> {
   const bad = () => new HubApiError(502, "bad_options", "the hub's passkey options are not usable");
@@ -1672,18 +1695,6 @@ function reauthBody(proof: Reauth): components["schemas"]["Proof"] {
   return "currentPassword" in proof
     ? { current_password: proof.currentPassword }
     : { passkey: proof.passkey as unknown as components["schemas"]["ReauthPasskey"] };
-}
-
-/** The widget's page, if the hub names a usable one: an http(s) origin, nothing more. */
-function turnstileConfig(raw: { site_key?: unknown; origin?: unknown } | null | undefined): TurnstileConfig | null {
-  if (!raw || typeof raw.site_key !== "string" || !raw.site_key || typeof raw.origin !== "string") return null;
-  try {
-    const url = new URL(raw.origin);
-    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
-    return { siteKey: raw.site_key, origin: url.origin };
-  } catch {
-    return null;
-  }
 }
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);

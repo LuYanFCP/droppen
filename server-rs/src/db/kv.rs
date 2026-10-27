@@ -73,10 +73,6 @@ pub mod scope {
     /// `{"enabled", "by", "at", "reason"}` (see [`crate::plugins`]). Instance
     /// state only — never the machine-wide database two instances share.
     pub const PLUGINS: &str = "plugins";
-    /// Problems a plugin's host wants the user to see (a failed Excel
-    /// write-back, a merged ledger): `<plugin id>` to `{kind: {text, at}}`.
-    /// Kept here, not in memory, so a restart does not hide them.
-    pub const PLUGIN_NOTICES: &str = "plugin-notices";
     /// The first-run guide's own state ([`crate::setup`]): `progress` (where
     /// the guide stands), `pathOverlay` (the directories the user adopted for
     /// a CLI found off the `PATH`), `tasks` (the last install, update or
@@ -189,7 +185,7 @@ impl Db {
                 // this build has never written to.
                 tx.execute(
                     "INSERT OR IGNORE INTO kv (scope, key, value) VALUES (?1, ?2, ?3)",
-                    (marker_scope(marker), key.as_str(), value.as_str()),
+                    (marker, key.as_str(), value.as_str()),
                 )?;
             }
             tx.execute(
@@ -204,12 +200,6 @@ impl Db {
             Err(error) => tracing::error!(store = marker, %error, "cannot import a JSON store; it stays the source of truth this boot"),
         }
     }
-}
-
-/// The scope a marker's rows land in. The marker *is* the scope, which keeps the
-/// two from drifting apart.
-fn marker_scope(marker: &str) -> &str {
-    marker
 }
 
 fn kv_set_in(tx: &rusqlite::Transaction<'_>, scope: &str, key: &str, value: &str) -> rusqlite::Result<()> {

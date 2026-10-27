@@ -1,6 +1,6 @@
 [package]
 name = "remote-hand-server"
-version = "0.2.132"
+version = "0.2.133"
 edition = "2021"
 publish = false
 description = "Phase-1 feasibility probe: remote-hand's server on the gotcha framework"
@@ -66,6 +66,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util
 tokio-util = { version = "0.7", features = ["rt"] }
 futures-util = "0.3"
 tower-service = "0.3"
+# Compressing the web app's answers (`static_files`), brotli and gzip only: the
+# crate is already in the graph (reqwest's), and these are its pure-Rust
+# codecs; zstd would link a C library.
+tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "map-response-body"] }
 libc = "0.2"
 
 serde = { version = "1", features = ["derive"] }
@@ -152,12 +156,6 @@ croner = { version = "4", default-features = false, features = ["chrono"] }
 # does not run. Default features, because `clock` is what gives `Local` its
 # offset and the local zone *is* the contract (see `schedule::cron`).
 chrono = "0.4"
-# The legacy Excel task ledger: read once to import it into the `tasks`
-# plugin's store, and written back after each change for one more release so a
-# rolled-back binary still reads current data (`plugins::legacy_tasks`).
-rust_xlsxwriter = { version = "0.99", features = ["chrono"] }
-calamine = "0.35"
-
 # An unoptimized argon2 at 64 MiB and three passes takes seconds rather than
 # milliseconds, which would put minutes on every `cargo test` run that touches a
 # login. Optimizing just the hash — and the compression function under it —
@@ -173,6 +171,3 @@ tempfile = "3"
 # `start_paused` runtimes, so the websocket heartbeat's minute-scale schedule can
 # be asserted without a test that actually takes minutes.
 tokio = { version = "1", features = ["test-util"] }
-# The integration tests build a synthetic Codex state database, which means
-# linking SQLite from the test binary as well as from the library.
-rusqlite = { version = "0.32", features = ["bundled"] }

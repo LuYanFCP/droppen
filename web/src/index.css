@@ -22,8 +22,10 @@
 /* "Drafting sheet" (docs/ui-spec.md): one ink on white
    paper, 1px hairlines, and colour kept for state signals only. Token names are
    unchanged — tests and ~1500 class names use them — only their values moved.
-   `panel` equals `bg` (regions are separated by lines, not tinted panels) and
-   `accent` equals `fg` (there is no blue: focus and primary actions are ink). */
+   The ink is the dark theme's canvas (#1a1e23), so the two themes are inverses
+   rather than black vs white; `panel` equals `bg` (regions are separated by
+   lines, not tinted panels) and `accent` equals `fg` (there is no blue: focus
+   and primary actions are ink). */
 @theme {
   --color-bg: #ffffff;
   --color-panel: #ffffff;
@@ -31,18 +33,18 @@
   --color-hover: #f0f0f0;
   --color-border: #e5e5e5;
   --color-border-strong: #a3a3a3;
-  --color-fg: #0a0a0a;
+  --color-fg: #1a1e23;
   --color-muted: #666666;
   --color-faint: #8f8f8f;
-  --color-mark: #0a0a0a;
-  --color-accent: #0a0a0a;
+  --color-mark: #1a1e23;
+  --color-accent: #1a1e23;
   --color-ok: #128a3c;
   /* "Asking you": the one coloured fill. Ink text on it in both themes. */
   --color-warn: #f2a20c;
   --color-warn-fg: #8f5600;
   --color-danger: #d42a1f;
   /* Text on a signal fill (the amber "asking you" chip): ink in both themes. */
-  --color-on-signal: #0a0a0a;
+  --color-on-signal: #1a1e23;
   /* The security page's formulas (security/formula.tsx): a token's kind,
      always with a weight or an underline style beside the hue. Checked for
      colour-vision deficiency and for text contrast, in both themes. */
@@ -51,7 +53,7 @@
   --color-key-public: #047857;
   /* Unread is ink — a solid square, the second loudest thing after asking —
      so a count never reads as working (ok) or asking (warn). */
-  --color-unread: #0a0a0a;
+  --color-unread: #1a1e23;
   /* Sources are told apart by their words, not by a tint. */
   --color-claude: #666666;
   --color-codex: #666666;
@@ -88,25 +90,26 @@
   color-scheme: light;
 }
 
-/* The dark sheet is graphite, not the void: #0f1115 keeps a trace of blue so
-   the surface reads as a material under the ink, and so the hairlines and the
-   raised wells have somewhere to sit. Pure (or 10/255) black turns every large
-   area into a hole and makes 18:1 body text halo on OLED; this lands at ~16:1
-   with a softer white. `faint` is lifted to 5.07:1 against `bg` because it is
-   used at 11px; the old 6f6f6f sat at 3.94:1. The ramp keeps `panel` = `bg`,
-   `accent` = `fg`, and colour only for state, as in light. */
+/* The dark sheet is a lifted graphite, not the void: #1a1e23 is a cool neutral
+   with room for a base well (#23282f), a hover (#2b3138) and two hairlines
+   (#343b43, #626b76) above it, so large areas read as material instead of a
+   hole. The ramp is adapted from AnyStorage's dark theme (canvas/base/surface
+   at roughly 30%, 26%, 35% lightness) without its shadows or rounded cards:
+   `panel` stays `bg`, `accent` stays `fg`, colour only for state. Body text is
+   14.0:1, muted 7.4:1 and 11px `faint` 5.4:1 against `bg`; border-strong is
+   3.1:1. The terminal keeps its own deeper #0f1115. */
 .dark {
   color-scheme: dark;
 
-  --color-bg: #0f1115;
-  --color-panel: #0f1115;
-  --color-raised: #161920;
-  --color-hover: #1e222a;
-  --color-border: #2b313a;
-  --color-border-strong: #5c6470;
+  --color-bg: #1a1e23;
+  --color-panel: #1a1e23;
+  --color-raised: #23282f;
+  --color-hover: #2b3138;
+  --color-border: #343b43;
+  --color-border-strong: #626b76;
   --color-fg: #e9ebee;
-  --color-muted: #a4abb5;
-  --color-faint: #7d8590;
+  --color-muted: #a6adb7;
+  --color-faint: #8b939e;
   --color-mark: #e9ebee;
   --color-accent: #e9ebee;
   --color-ok: #3ed273;
@@ -117,8 +120,8 @@
   --color-key-secret: #fb923c;
   --color-key-derived: #c084fc;
   --color-key-public: #34d399;
-  --color-claude: #a4abb5;
-  --color-codex: #a4abb5;
+  --color-claude: #a6adb7;
+  --color-codex: #a6adb7;
 }
 
 /* Keyboard focus is ink, never blue, and always visible: a 2px outline from
@@ -237,30 +240,17 @@ body {
 
 /* The soft keyboard on iOS: WebKit draws it over a layout viewport it never
    shrinks, so `inset: 0` would leave the bottom of the shell — the composer —
-   under it. By default WebKit's own pan to the focused field brings the
-   composer above it (lib/kb-native.ts). Under ?kb=legacy, while it is up,
-   lib/kb-inset.ts pins the shell to the visual viewport instead (the part of
-   the page above the keyboard), and only then is the class set. Android shrinks
-   the layout viewport itself (interactive-widget=resizes-content) and desktop
-   has no keyboard to cover anything: neither ever gets the class. */
-html.kb-open body {
-  top: var(--app-top, 0px);
-  bottom: auto;
-  height: var(--app-height, 100%);
-}
+   under it. WebKit's own pan to the focused field brings the composer above it
+   (lib/kb-native.ts); the shell is never resized for a keyboard. Android
+   shrinks the layout viewport itself (interactive-widget=resizes-content) and
+   desktop has no keyboard to cover anything.
 
-/* The bottom-most chrome (mobile nav bar, session composer) pads itself out of
-   the home-indicator strip that viewport-fit=cover let it slide under. While
-   the soft keyboard is up that strip is covered by the keyboard, so the padding
-   is dead space — under ?kb=legacy, lib/kb-inset.ts sets html.kb-open and it
-   collapses. By default it stays: WebKit's pan ends at the shell's foot, so the
-   strip sits between the composer and the keyboard. */
+   The bottom-most chrome (mobile nav bar, session composer) pads itself out of
+   the home-indicator strip that viewport-fit=cover let it slide under. That
+   padding stays while the keyboard is up: WebKit's pan ends at the shell's
+   foot, so the strip sits between the composer and the keyboard. */
 .pb-safe {
   padding-bottom: env(safe-area-inset-bottom, 0px);
-}
-
-html.kb-open .pb-safe {
-  padding-bottom: 0;
 }
 
 * {
@@ -294,6 +284,48 @@ html.kb-open .pb-safe {
    alone so the wheel keeps scrolling the pane behind them. */
 .overflow-x-auto {
   overscroll-behavior-x: contain;
+}
+
+/* Displayed math (`components/markdown-math.ts`); KaTeX's own stylesheet
+   comes with the formulas. A formula wider than the message scrolls on its
+   own, as a wide code block does, with the same pinned x axis; and half
+   KaTeX's 1em above and below, in step with the transcript's paragraphs. */
+.math-display > .katex-display {
+  margin: 0.5em 0;
+  padding: 0.125em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+}
+
+/* A typeset formula is a button that copies its TeX (`components/markdown.tsx`):
+   the hover a button gets, and "copied" in a small ink tag above its right
+   edge for the moment after. */
+.math[data-tex] {
+  position: relative;
+  cursor: pointer;
+}
+/* All of an inline formula answers the pointer. As an inline box only its
+   line did: the space around a fraction's bar, above and below the text,
+   belonged to the paragraph, and a click there copied nothing. An inline
+   block shrinks to the width there is, so a long formula still wraps. */
+.math-inline[data-tex] {
+  display: inline-block;
+}
+.math[data-tex]:hover {
+  background: var(--color-hover);
+}
+.math[data-copied]::after {
+  content: attr(data-copied);
+  position: absolute;
+  right: 0;
+  bottom: 100%;
+  padding: 0 4px;
+  background: var(--color-fg);
+  color: var(--color-bg);
+  font: 10px/16px var(--font-mono);
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 /* Exactly one thing may move the transcript under the reader, and it is the

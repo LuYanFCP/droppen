@@ -7,6 +7,9 @@ import { join } from "node:path";
  * (vite.config.ts `precacheBootSet`, after the files are written):
  *
  * - `PRECACHE`: the assets the app boots from, fetched by the worker's install;
+ * - `PRECACHE_CLOUD`: the cloud app's chunks, which a page a hub serves boots
+ *   from too (`build/local-boot.ts`), fetched by the install where a hub
+ *   serves the shell;
  * - `INTEGRITY`: every file under `assets/` → the sha256 (hex) of its bytes on
  *   disk, sorted by path;
  * - `SHELL_SHA256`: the sha256 of `index.html` as built, before a hub writes
@@ -17,7 +20,11 @@ import { join } from "node:path";
  * - `HUB_ORIGIN`: in a cloud build (`DROPPEN_WEB_MODE=cloud`), the canonical
  *   machine origin its shell's marker names (`wss://api.droppen.app`), which
  *   the worker accepts in place of this origin's own; empty otherwise, so a
- *   normal build accepts the marker only from the host it was served by.
+ *   normal build accepts the marker only from the host it was served by;
+ * - `LANGUAGES`: each language's translations but English's (`src/i18n/lang-*.ts`),
+ *   `{prefix, files}` — its chunk and what that imports beyond the boot set,
+ *   and how the chunk's name starts in any build — for the worker to precache
+ *   the languages the browser shows (vite.config.ts `languageChunks`).
  *
  * The worker serves and caches an asset only when its bytes have the sha256
  * listed here, and keeps an offline shell only when it is this one, so
@@ -27,7 +34,9 @@ import { join } from "node:path";
  * disagrees with its files, and `scripts/verify-web.mjs` checks it against
  * the attested manifest (docs/web-integrity.md).
  */
-export function fillServiceWorker(dir: string, boot: readonly string[], opts: { hubOrigin?: string } = {}): void {
+export type LanguageFiles = Record<string, { prefix: string; files: string[] }>;
+
+export function fillServiceWorker(dir: string, boot: readonly string[], opts: { hubOrigin?: string; cloudBoot?: readonly string[]; languages?: LanguageFiles } = {}): void {
   const file = join(dir, "sw.js");
   let text = readFileSync(file, "utf8");
   const integrity: Record<string, string> = {};
@@ -35,10 +44,12 @@ export function fillServiceWorker(dir: string, boot: readonly string[], opts: { 
   const shell = readFileSync(join(dir, "index.html"));
   const fills: [marker: string, value: string][] = [
     ["const PRECACHE = [];", `const PRECACHE = ${JSON.stringify(boot)};`],
+    ["const PRECACHE_CLOUD = [];", `const PRECACHE_CLOUD = ${JSON.stringify(opts.cloudBoot ?? [])};`],
     ["const INTEGRITY = {};", `const INTEGRITY = ${JSON.stringify(integrity)};`],
     ['const SHELL_SHA256 = "";', `const SHELL_SHA256 = ${JSON.stringify(sha256(shell))};`],
     ["const SHELL_SCRIPTS = [];", `const SHELL_SCRIPTS = ${JSON.stringify(inlineScriptSources(shell.toString("utf8")))};`],
     ['const HUB_ORIGIN = "";', `const HUB_ORIGIN = ${JSON.stringify(opts.hubOrigin ?? "")};`],
+    ["const LANGUAGES = {};", `const LANGUAGES = ${JSON.stringify(opts.languages ?? {})};`],
   ];
   for (const [marker, value] of fills) {
     if (!text.includes(marker)) throw new Error(`${file} has no \`${marker}\` to fill in`);

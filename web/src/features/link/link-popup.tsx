@@ -3,14 +3,14 @@ import { useTranslation } from "react-i18next";
 import { Check, Loader2 } from "lucide-react";
 import { CHECKBOX_INPUT, CHECKBOX_LABEL, CheckboxMark } from "@/components/ui/checkbox";
 import { cn } from "@/lib/cn";
-import { base32, formatEnrollCode, fromHex, hex, type KeyStore, sealLinkReturn, utf8 } from "@/lib/e2e";
+import { base32, formatEnrollCode, fromHex, hex, sealLinkReturn, utf8 } from "@/lib/e2e";
 import type { CloudAccount } from "@/lib/hub/account";
 import { chainV3Writable } from "@/lib/hub/api";
 import { linkCourier } from "@/lib/hub/deliver";
 import { addHost, type AddStep } from "./add-host";
 import type { HubLink } from "@/lib/hub/link";
 import { atLimit, HOSTS_KEY, limitOf, type LimitHit } from "@/lib/hub/plan";
-import { hubShell } from "@/features/cloud/hub-shell";
+import { hubShell } from "@/features/machines/shells";
 import { DOWNLOAD_PATH } from "@/features/landing/get-droppen";
 import { publicHref } from "@/features/landing/route";
 import { hubHosts } from "@/lib/hub/hosts";
@@ -217,7 +217,7 @@ function primeHandoffTab(tab: Window | null, text: string): void {
 }
 
 /** The consent page and what follows it, once this browser is a device of the account. */
-export function LinkFlow({ account, link }: { account: CloudAccount; link: HubLink; store: KeyStore }) {
+export function LinkFlow({ account, link }: { account: CloudAccount; link: HubLink }) {
   const { t } = useTranslation();
   const hs = useHandshake();
   const me = useMe(account, link);

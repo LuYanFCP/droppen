@@ -1,33 +1,17 @@
 // Sign-up at a public hub (M3a-3): the hub API's sign-up, sign-in and e-mail
-// verification wrappers, the Turnstile frame's message filter, and the
-// verification link's token.
+// verification wrappers, and the verification link's token.
 //
-// What these pin: sign-up sends an invite only when there is one, the
-// widget's token and the mail's language; an answer from a hub that predates
-// verification verifies nothing; every refusal the hub gives comes back as a
-// kind (a 429 with how long to wait); `/v1/me` is typed, `email` and `plan`
-// included; the verification POST carries no session; a message from the
-// Turnstile frame counts only from its origin, its very frame and its action;
-// the frame is sandboxed and sends no Referer; and only a token of the hub's
-// shape is read from `#t=…`.
-import * as React from "react";
+// What these pin: sign-up sends an invite only when there is one and the
+// mail's language; an answer from a hub that predates verification verifies
+// nothing; every refusal the hub gives comes back as a kind (a 429 with how
+// long to wait); `/v1/me` is typed, `email` and `plan` included; the
+// verification POST carries no session; and only a token of the hub's shape
+// is read from `#t=…`.
 import assert from "node:assert/strict";
 import test from "node:test";
-import i18next from "i18next";
-import { renderToStaticMarkup } from "react-dom/server";
-import { I18nextProvider, initReactI18next } from "react-i18next";
 import { authErrorKind, HubApi, HubApiError, hubErrorKind } from "../src/lib/hub/api.js";
 import { verifyTokenFromHash } from "../src/features/cloud/email-verify.js";
-import { Turnstile, turnstileAnswer, turnstileSrc } from "../src/features/cloud/turnstile.js";
 import { authErrorText } from "../src/features/cloud/ui.js";
-
-void i18next.use(initReactI18next).init({
-  lng: "en",
-  resources: { en: { translation: {} } },
-  interpolation: { escapeValue: false },
-  keySeparator: false,
-  nsSeparator: false,
-});
 
 type Sent = { url: string; method: string; headers: Record<string, string>; body: unknown };
 
@@ -52,32 +36,16 @@ function fakeHub(...answers: { status?: number; body?: unknown; headers?: Record
 
 const SIGNED = { account: "a-1", token: "login-token", expires_ms: 1_000 };
 
-test("sign-up config: who may sign up, the widget's page as a bare origin, whether e-mail is verified, and passkeys", async () => {
-  const { api, sent } = fakeHub(
-    {
-      body: {
-        signup: "open",
-        invite_required: false,
-        turnstile: { site_key: "1x00000000000000000000AA", origin: "https://verify.hub.test/" },
-        verification: "required",
-        passkeys: { rp_id: "hub.test" },
-      },
-    },
-    { body: { signup: "invite", invite_required: true, turnstile: null, verification: "off", passkeys: null } },
-    { body: { signup: "weird", turnstile: { site_key: "k", origin: "javascript:alert(1)" }, passkeys: { rp_id: "" } } },
-  );
-  assert.deepEqual(await api.signupConfig(), {
-    signup: "open",
-    inviteRequired: false,
-    turnstile: { siteKey: "1x00000000000000000000AA", origin: "https://verify.hub.test" },
-    verification: "required",
-    passkeys: { rpId: "hub.test" },
-  });
-  assert.equal(sent[0]!.url, "https://hub.test/v1/signup/config");
-  assert.equal(sent[0]!.method, "GET");
-  assert.deepEqual(await api.signupConfig(), { signup: "invite", inviteRequired: true, turnstile: null, verification: "off", passkeys: null });
-  // An unknown mode is the strictest one; a widget page that is not http(s) is no widget; passkeys with no RP are none.
-  assert.deepEqual(await api.signupConfig(), { signup: "invite", inviteRequired: true, turnstile: null, verification: "off", passkeys: null });
+test("sign-up config: droppen.app's answers, written in the page, with no request", async () => {
+  const { api, sent } = fakeHub();
+  const answers = { signup: "open", inviteRequired: false, verification: "required", passkeys: { rpId: "droppen.app" }, deletion: { emailHoldDays: 7 } };
+  assert.deepEqual(await api.signupConfig(), answers);
+  assert.deepEqual(await api.signupConfig(), answers);
+  assert.deepEqual(sent, [], "no request is made");
+  // A copy each time: a caller cannot change the page's answers.
+  const config = await api.signupConfig();
+  config.passkeys!.rpId = "elsewhere.test";
+  assert.equal((await api.signupConfig()).passkeys?.rpId, "droppen.app");
 });
 
 test("sign-up sends the invite only when there is one, the widget's token and the mail's language", async () => {
@@ -237,48 +205,6 @@ test("/v1/me is typed: the e-mail's standing and the plan with its entitlements 
   assert.deepEqual(old.email, { address: "old@example.test", verified: false, verification: "off", dueMs: null, delivery: null, deliveryError: null });
   assert.equal(old.plan, null);
   assert.equal(old.chainSeq, 4);
-});
-
-test("the Turnstile frame's message counts only from its origin, its very frame and its action", () => {
-  const frame = { name: "the widget's window" };
-  const other = { name: "another window" };
-  const expected = { origin: "https://verify.hub.test", source: frame, action: "signup" as const };
-  const ok = { origin: "https://verify.hub.test", source: frame, data: { t: "turnstile", action: "signup", token: "tok" } };
-  assert.deepEqual(turnstileAnswer(ok, expected), { token: "tok", expired: false, error: false });
-  // Another origin (the app's own, a look-alike), another window, another action, another shape: ignored.
-  assert.equal(turnstileAnswer({ ...ok, origin: "https://hub.test" }, expected), null);
-  assert.equal(turnstileAnswer({ ...ok, origin: "https://verify.hub.test.evil.example" }, expected), null);
-  assert.equal(turnstileAnswer({ ...ok, origin: "http://verify.hub.test" }, expected), null);
-  assert.equal(turnstileAnswer({ ...ok, source: other }, expected), null);
-  assert.equal(turnstileAnswer({ ...ok, source: null }, { ...expected, source: null }), null, "no frame yet: nothing counts");
-  assert.equal(turnstileAnswer({ ...ok, data: { ...ok.data, action: "login" } }, expected), null);
-  assert.equal(turnstileAnswer({ ...ok, data: { ...ok.data, t: "turnstile-reset" } }, expected), null);
-  assert.equal(turnstileAnswer({ ...ok, data: "tok" }, expected), null);
-  assert.equal(turnstileAnswer({ ...ok, data: null }, expected), null);
-  assert.equal(turnstileAnswer({ ...ok, data: { ...ok.data, token: 42 } }, expected), null);
-  assert.equal(turnstileAnswer({ ...ok, data: { ...ok.data, token: "" } }, expected), null);
-  assert.equal(turnstileAnswer({ ...ok, data: { ...ok.data, token: "x".repeat(2049) } }, expected), null);
-  // Expiry and errors take the token back.
-  assert.deepEqual(turnstileAnswer({ ...ok, data: { t: "turnstile", action: "signup", token: null, expired: true } }, expected), { token: null, expired: true, error: false });
-  assert.deepEqual(turnstileAnswer({ ...ok, data: { t: "turnstile", action: "signup", token: null, error: true } }, expected), { token: null, expired: false, error: true });
-});
-
-test("the Turnstile frame: the widget's own origin, sandboxed, no Referer", () => {
-  assert.equal(turnstileSrc("https://verify.hub.test", "resend", true), "https://verify.hub.test/turnstile?action=resend&theme=dark");
-  const html = renderToStaticMarkup(
-    <I18nextProvider i18n={i18next}>
-      <Turnstile config={{ siteKey: "k", origin: "https://verify.hub.test" }} action="login" onToken={() => undefined} />
-    </I18nextProvider>,
-  );
-  assert.match(html, /<iframe [^>]*src="https:\/\/verify\.hub\.test\/turnstile\?action=login&amp;theme=light"/);
-  assert.match(html, /sandbox="allow-scripts allow-same-origin allow-popups"/);
-  assert.match(html, /referrerPolicy="no-referrer"|referrerpolicy="no-referrer"/);
-  assert.match(html, /title="human check"/);
-  // Never handed the app's passkeys (docs/passkeys.md §3.8 rule 2): no
-  // `allow` at all, so no `publickey-credentials-*` (a cross-origin frame
-  // cannot use WebAuthn without one).
-  assert.doesNotMatch(html, /\ballow=/i);
-  assert.doesNotMatch(html, /publickey-credentials/i);
 });
 
 test("the verification link's token is read from #t=…, and only in the hub's shape", () => {

@@ -4,12 +4,11 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import { useTranslation } from "react-i18next";
 import { LiveDot } from "@/components/live-dot";
-import { useShowingCopy } from "@/features/cloud/context";
+import { useShowingCopy } from "@/features/machines/copy-mode";
 import { isTerminalGoneFrame, RECONNECT_STABLE_MS, reconnectDelay } from "@/features/terminals/reconnect";
 import { useEnsureLive, useMachineRuntime } from "@/lib/machines/context";
 import type { SocketLike } from "@/lib/transport";
 import { noteWsFailure } from "@/lib/ws-url";
-import { kbMode } from "@/lib/kb-mode";
 import { holdInView } from "@/lib/kb-native";
 import "@xterm/xterm/css/xterm.css";
 
@@ -73,9 +72,8 @@ export function XtermPane({ id, visible }: { id: string; visible: boolean }) {
     fit.fit();
     // The phone keyboard: WebKit never reveals xterm's transparent textarea,
     // so while the terminal has focus it ends where the screen does and the
-    // observer below refits it (`lib/kb-native.ts`). Under `?kb=legacy` the
-    // whole shell is sized above the keyboard instead.
-    const unhold = kbMode() === "native" ? holdInView(el) : () => {};
+    // observer below refits it (`lib/kb-native.ts`).
+    const unhold = holdInView(el);
 
     let socket: SocketLike | null = null;
     let disposed = false;

@@ -19,10 +19,10 @@ import { OldKeyNotice } from "../src/features/cloud/cloud-bar.js";
 import { ApiError, errorText as apiErrorText, hostRefusalText } from "../src/api/errors.js";
 import { deliverMachineKey, type MachineKeyCourier } from "../src/lib/hub/deliver.js";
 import { RenameError, renameErrorText } from "../src/features/cloud/machine-name.js";
+import { formatAsOf } from "../src/lib/format.js";
 import {
   alertLevel,
   alertText,
-  asOfTime,
   blockedByHold,
   ChainAlerts,
   ConfirmCandidate,
@@ -269,7 +269,7 @@ test("a machine on an old key is amber, needs-you; a refused device keeps its ke
 });
 
 test("every string these screens use is translated into zh-CN, zh-TW and ja", () => {
-  const files = ["devices.tsx", "renewal.tsx", "add-computer.tsx", "pairing-screen.tsx", "recovery.tsx", "qr.tsx", "ui.tsx", "cloud-app.tsx", "cloud-bar.tsx", "machine-name.tsx", "device-row.tsx", "my-devices.tsx", "email-verify.tsx", "turnstile.tsx", "plan.tsx", "onboarding-hints.tsx", "browser-support.tsx"].map((f) => readFileSync(new URL(`../src/features/cloud/${f}`, import.meta.url), "utf8"));
+  const files = ["devices.tsx", "renewal.tsx", "add-computer.tsx", "pairing-screen.tsx", "recovery.tsx", "qr.tsx", "ui.tsx", "cloud-app.tsx", "cloud-bar.tsx", "machine-name.tsx", "device-row.tsx", "my-devices.tsx", "email-verify.tsx", "plan.tsx", "onboarding-hints.tsx", "browser-support.tsx"].map((f) => readFileSync(new URL(`../src/features/cloud/${f}`, import.meta.url), "utf8"));
   const keys = new Set<string>();
   for (const src of files) for (const m of src.matchAll(/\bt\(\s*"((?:[^"\\]|\\.)*)"/g)) keys.add(m[1]!);
   assert.ok(keys.size > 50);
@@ -344,9 +344,9 @@ test("my devices: a computer that runs AI shows the badge, where it is, and — 
   const at = new Date(2026, 9, 17, 14, 2).getTime();
   const away = list(<DeviceRow view={row({ id: "m-1", kind: "computer", host: true, presence: "offline", copyAsOf: at })} viewerAdmin upgraded writable />);
   assert.match(away, /data-testid="copy-as-of"/);
-  assert.ok(away.includes(`offline copy · as of ${asOfTime(at, at)}`) || away.includes(`offline copy · as of ${asOfTime(at)}`), away);
-  assert.match(asOfTime(at, at), /02/, "a time of day the same day");
-  assert.ok(asOfTime(at, at + 3 * 86_400_000).length > asOfTime(at, at).length, "with the date on another day");
+  assert.ok(away.includes(`offline copy · as of ${formatAsOf(at, at)}`) || away.includes(`offline copy · as of ${formatAsOf(at)}`), away);
+  assert.match(formatAsOf(at, at), /02/, "a time of day the same day");
+  assert.ok(formatAsOf(at, at + 3 * 86_400_000).length > formatAsOf(at, at).length, "with the date on another day");
   // A browser: no badge, no hosting controls.
   const browser = list(<DeviceRow view={row()} viewerAdmin upgraded writable />);
   assert.ok(!browser.includes("can run AI"));
@@ -360,6 +360,17 @@ test("my devices: a computer that runs AI shows the badge, where it is, and — 
   const stopped = list(<DeviceRow view={row({ id: "m-2", kind: "computer", stoppedHost: true })} viewerAdmin upgraded writable />);
   assert.ok(stopped.includes(">stopped running AI<"));
   assert.equal(item(menu(row({ id: "m-2", kind: "computer", stoppedHost: true })), "host-m-2")?.label, "run AI again");
+});
+
+test("at a wide container a device is a framed card, and hover marks the frame and the name, never a full-row fill", () => {
+  const html = list(<DeviceRow view={row({ id: "m-1", kind: "computer", host: true, presence: "online" })} viewerAdmin upgraded writable />);
+  assert.match(html, /@min-\[44rem\]\/devices:border/);
+  assert.match(html, /@min-\[44rem\]\/devices:p-4/);
+  assert.match(html, /@min-\[44rem\]\/devices:hover:border-border-strong/);
+  assert.match(html, /group-hover\/summary:underline/);
+  const summary = html.slice(html.indexOf("<summary"), html.indexOf("</summary>"));
+  assert.ok(!summary.includes("hover:bg-hover"), "hover does not paint the 1101px row");
+  assert.match(html, /grid-cols-\[1rem_minmax\(0,1fr\)_auto\]/, "icon, name and one action column");
 });
 
 test("a row's actions are in its 「⋯」 menu, not a row of buttons; a device that runs AI keeps 「打开」 at hand", () => {
@@ -764,8 +775,8 @@ test("D3: each device a host should be re-enrolled for, with what the host's own
   const html = drawRow(lines);
   assert.match(html, /data-testid="re-enroll-m-1"[^>]*data-signal="warn"/, "still the warning, whatever the record says");
   assert.match(html, /data-testid="re-enroll-m-1-d-a"[^>]*data-evidence="connected"/);
-  assert.ok(html.includes(`d-a connected to it (first seen ${asOfTime(at)}) — re-enrolling is strongly recommended`), html);
-  assert.ok(html.includes(`no record of d-b connecting since ${asOfTime(at)} — though a device that did connect could have erased itself from that record`));
+  assert.ok(html.includes(`d-a connected to it (first seen ${formatAsOf(at)}) — re-enrolling is strongly recommended`), html);
+  assert.ok(html.includes(`no record of d-b connecting since ${formatAsOf(at)} — though a device that did connect could have erased itself from that record`));
   assert.ok(html.includes("d-c could control it; whether it ever connected is not known"));
   assert.ok(!html.includes("re-enroll-dismiss-m-1-d-a"), "no dismissing a device its record says connected");
   assert.match(html, /data-testid="re-enroll-dismiss-m-1-d-b"[^>]*>I&#x27;m sure it never connected — don&#x27;t warn about it</);

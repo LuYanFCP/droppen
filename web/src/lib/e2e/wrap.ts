@@ -93,8 +93,6 @@ export function encodeSealContext(c: SealContext): Bytes {
 export const context = {
   machineKeyUnderUserKey: (account: string, machine: string, mkEpoch: number, ukEpoch: number): Bytes =>
     new Writer().raw(utf8("rh/v1 MK under UK\0")).raw(utf8(account)).u8(0).raw(utf8(machine)).u8(0).u32(mkEpoch).u32(ukEpoch).finish(),
-  userKeyUnderRecovery: (account: string, ukEpoch: number): Bytes =>
-    new Writer().raw(utf8("rh/v1 UK under RK\0")).raw(utf8(account)).u8(0).u32(ukEpoch).finish(),
 };
 
 type KekUse = "encrypt" | "decrypt" | "unwrapKey";
@@ -384,12 +382,6 @@ export async function unwrapUnder(key: Uint8Array | CryptoKey, ctx: Uint8Array, 
   } catch {
     throw new WrapError("open", "the wrapped key does not open (wrong key, wrong context, or tampered)");
   }
-}
-
-/** Unwrap under a symmetric key (an HKDF `CryptoKey` such as `UK`) into a non-extractable key. */
-export async function unwrapUnderToKey(key: Uint8Array | CryptoKey, ctx: Uint8Array, wrapped: Uint8Array, target: Target): Promise<CryptoKey> {
-  const [nonce, ct] = split(wrapped, 12);
-  return unwrapWith(await symKek(key, ctx, ["unwrapKey"]), nonce, ct, copy(ctx), target);
 }
 
 async function pairingMac(s: Uint8Array, fields: Uint8Array[]): Promise<Bytes> {

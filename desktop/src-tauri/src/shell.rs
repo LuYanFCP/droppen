@@ -14,8 +14,9 @@
 //!    in as soon as it answers; a stored login of another name (installs that
 //!    named the account after the macOS login name) is replaced by a
 //!    `droppen-app` one ([`accounts::ready_login`]); until the instance's
-//!    marker records it done, remove the accounts it inherited from the device
-//!    so only the app's can log in;
+//!    marker records it done, finish removing the accounts an older build's
+//!    first start may have inherited from the device, so only the app's can
+//!    log in;
 //! 6. start the server under the [`Supervisor`];
 //! 7. [`Shell::connect`]: wait for it, prove the listener is the child, log in,
 //!    check the instance, and hand the login to the windows; once signed in,
@@ -452,9 +453,10 @@ impl Shell {
             None => {}
         }
         let credential = ready.credential;
-        // Until the marker records it, every start removes the accounts the
-        // instance inherited — a first start cut short in between must not
-        // leave them for good.
+        // Until the marker records it, every start finishes the cleanup an
+        // older build's first start may have left: that build inherited the
+        // machine-wide accounts, and a start cut short before removing them
+        // must not leave them for good. A new instance has none.
         if fresh || instance::needs_pruning(&self.instance_dir) {
             let removed = cli.prune_others(&credential.username)?;
             if !removed.is_empty() {
@@ -1020,8 +1022,9 @@ fn handed_off_since(handed_off: Option<Instant>, asked: Instant) -> bool {
     handed_off.is_some_and(|at| at > asked)
 }
 
-/// Log that the app's account was a user account and is now app-internal: on
-/// a new instance, an inherited account that happened to have the app's name.
+/// Log that the app's account was a user account and is now app-internal: an
+/// account made before the app's login was app-internal can carry the app's
+/// name.
 fn log_migrated(username: &str, password_reset: bool) {
     log::info!(
         "account {username} was a user account; it is now the app's app-internal one (user mark-app), {}",

@@ -16,7 +16,7 @@ after(() => void setTimeout(() => process.exit(), 50));
 
 const { createRoot } = await import("react-dom/client");
 const { I18nextProvider } = await import("react-i18next");
-const { default: i18n } = await import("../src/i18n/index.js");
+const { default: i18n } = await import("./i18n-all.js");
 const { AuthScreen } = await import("../src/features/cloud/cloud-app.js");
 const { BringItOver, afterPull, reloadOnArrival } = await import("../src/features/move/bring-it-over.js");
 const { pageTabs } = await import("../src/lib/move/env.js");
@@ -56,7 +56,7 @@ test("the sign-in screen offers to bring the device over, and a pull from its cl
     pulls.push(req);
     return new Promise<MoveOutcome>((resolve) => (answer = resolve));
   };
-  const api = { signupConfig: async () => ({ signup: "open", inviteRequired: false, turnstile: null, verification: "off", passkeys: null }) };
+  const api = {};
   const root = createRoot(container as never);
   root.render(
     <I18nextProvider i18n={i18n}>
@@ -83,7 +83,7 @@ test("the sign-in screen offers to bring the device over, and a pull from its cl
 
 test("the offer is on the sign-in tab only: sign-up makes a new account, which has nothing to bring over", async () => {
   await i18n.changeLanguage("en");
-  const api = { signupConfig: async () => ({ signup: "open", inviteRequired: false, turnstile: null, verification: "off", passkeys: null }) };
+  const api = {};
   const pull = async () => ({ kind: "cancelled" }) as MoveOutcome;
   // A deep link's sign-in form (the tabs do not move the address there: this stand-in has no history).
   const place = globalThis.location as { pathname: string };

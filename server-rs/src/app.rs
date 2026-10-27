@@ -104,6 +104,11 @@ impl GotchaApp for RemoteHandApp {
             // path and `prepare`'s agree by construction: both read the same two
             // config fields.
             let instance = Arc::new(instance_dirs(&paths, &instance)?);
+            // The pre-chain-v3 pending aggregator key is deleted once at boot,
+            // whatever the link and cloud state: nothing writes it any more,
+            // and while it exists the status route would keep reporting
+            // `pending` for ever.
+            crate::aggregator::sweep_legacy_key(paths.as_ref());
             // Attachments uploaded but never sent accumulate; sweep the stale
             // ones once at boot, off the startup path so a slow disk cannot
             // delay the listener (the former TypeScript server's `files.ts`
@@ -250,26 +255,6 @@ impl RemoteHandApp {
                 // servers could be reading is an owner's move, so it sits behind
                 // the same lock every adoption below does.
                 crate::claude_roots::migrate_legacy_managed_root(&paths);
-                // Same shape, one directory over: the layouts and the push
-                // subscriptions used to be shared by every instance and are now
-                // this one's own. A copy, so the file the older build still
-                // reads is left alone. Before the router exists, because the
-                // first `GET /api/screens` must already see what this instance
-                // inherited.
-                //
-                // The desktop app's instance is the exception for the layouts
-                // (`instance::Heir::DesktopApp`), and an app an older build
-                // already gave them to has them taken back here, untouched ones
-                // only (`screens::forget_inherited`).
-                let heir = if state.desktop_app {
-                    crate::instance::Heir::DesktopApp
-                } else {
-                    crate::instance::Heir::CommandLine
-                };
-                crate::instance::migrate_shared_sidecars(&paths, heir);
-                if state.desktop_app {
-                    crate::screens::forget_inherited(&paths).await;
-                }
                 // After the move, so a legacy root's leftovers are swept too:
                 // an adoption (a feature earlier builds had) interrupted between
                 // its copy and its rename left a full transcript nothing will
@@ -287,16 +272,6 @@ impl RemoteHandApp {
                 // PATH is the whole process's: a throwaway in-process server
                 // must not rewrite it.
                 state.setup.apply_overlay();
-                // The plugins' boot step, today only the legacy task ledger's
-                // import and reconciliation (`plugins::legacy_tasks`), and only
-                // when the build bundles that plugin. Before the listener, so
-                // the first `GET /api/settings` already reports the plugin on
-                // where the ledger was taken in; behind the lock, because it
-                // writes this instance's state and stores.
-                let plugins = state.plugins.clone();
-                if let Err(error) = tokio::task::spawn_blocking(move || plugins.boot()).await {
-                    tracing::error!(%error, "the plugins' boot step panicked");
-                }
                 // The registry is the one piece of ownership state that cannot
                 // be rebuilt from the filesystem, so the owner tidies it here
                 // rather than on every list refresh.

@@ -36,7 +36,11 @@
  * - precache: the build writes the assets it boots from into PRECACHE.
  *   Installing it fetches whatever of the boot set is not cached (and good)
  *   yet — the release's new app chunk, in the background, before the reload
- *   that needs it;
+ *   that needs it. A page boots from its language's translations too (a
+ *   chunk per language but English, LANGUAGES): those of the languages this
+ *   browser shows are precached with it, and no other. A page a hub serves
+ *   boots from the cloud app's chunks as well (PRECACHE_CLOUD): precached
+ *   there, and only there;
  * - only real assets are kept under /assets/: never the HTML a server answers
  *   for a path it does not have, which cached under a script's name would be
  *   handed to the module loader for good.
@@ -46,6 +50,7 @@ const CACHE = "rh-sw-v1";
 
 /* Filled in by the build; empty under `vite dev`, which never registers this. */
 const PRECACHE = [];
+const PRECACHE_CLOUD = [];
 const INTEGRITY = {};
 const SHELL_SHA256 = "";
 /* The CSP sources of the shell's inline scripts ('sha256-…'), as a hub allows them. */
@@ -54,6 +59,10 @@ const SHELL_SCRIPTS = [];
  * machine origin its shell's marker names. Empty in a normal build, whose
  * shell marker is this origin's own. */
 const HUB_ORIGIN = "";
+/* Filled in by the build: each language's translations but English's (its
+ * words are the keys), `{prefix, files}` — the files, and how the chunk's
+ * name starts in every build (`/assets/lang-ja-`). */
+const LANGUAGES = {};
 
 /* Where the offline shell is kept: every SPA route is served the same index.html. */
 const SHELL = "/";
@@ -197,6 +206,52 @@ async function fetchListed(req, path) {
   return null;
 }
 
+/* The files of the languages this browser shows, as much a part of its boot
+ * set as PRECACHE: the one its own languages pick (what a page shows unless
+ * told otherwise), one whose chunk is in the cache from an earlier build (a
+ * page showed it), and one whose chunk of this build the browser's HTTP
+ * cache has (a page fetched it before any worker saw its requests: the first
+ * install), which `only-if-cached` asks without going to the network. A
+ * language this browser has not shown is fetched when a page first shows
+ * it, and kept then, as a lazy chunk is. */
+async function shownLanguages(cache) {
+  const kept = (await cache.keys()).map((req) => new URL(req.url).pathname);
+  const own = browserLanguage();
+  const out = [];
+  for (const [lang, { prefix, files }] of Object.entries(LANGUAGES)) {
+    if (lang === own || kept.some((path) => path.startsWith(prefix)) || (await httpCached(files[0]))) out.push(...files);
+  }
+  return out;
+}
+
+/* The language the browser's languages pick, by the page's rule for `auto`
+ * (src/i18n/match.ts `pickLanguage`, which test/sw-integrity.test.ts holds
+ * this to): the first of them the app speaks, else English. Chinese in
+ * Traditional script (`zh-Hant`, else Taiwan, Hong Kong or Macao) is zh-TW,
+ * any other Chinese zh-CN, `ja…` ja and `en…` en; the script decides over
+ * the region. */
+function browserLanguage() {
+  const tags = [...(Array.isArray(navigator.languages) ? navigator.languages : []), navigator.language];
+  for (const tag of tags) {
+    if (typeof tag !== "string" || !tag) continue;
+    const [primary, ...rest] = tag.trim().replace(/_/g, "-").toLowerCase().split("-");
+    if (primary === "en" || primary === "ja") return primary;
+    if (primary !== "zh") continue;
+    if (rest.includes("hant")) return "zh-TW";
+    if (rest.includes("hans")) return "zh-CN";
+    return rest.some((part) => part === "tw" || part === "hk" || part === "mo") ? "zh-TW" : "zh-CN";
+  }
+  return "en";
+}
+
+async function httpCached(url) {
+  try {
+    return (await fetch(url, { cache: "only-if-cached", mode: "same-origin" })).ok;
+  } catch {
+    return false;
+  }
+}
+
 /* What the page gets instead of an asset whose bytes are not this build's. */
 function refused(path) {
   return new Response(`${path}: its bytes are not the ones this build lists (sha256); not served\n`, {
@@ -204,6 +259,26 @@ function refused(path) {
     statusText: "Integrity check failed",
     headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
   });
+}
+
+/* Whether a hub serves this origin's shell (cloud mode), whose page boots from
+ * PRECACHE_CLOUD too: the shell kept for offline says. A first install has
+ * none yet: there a page a hub serves has just loaded those chunks, before
+ * any worker saw its requests, and the browser's HTTP cache has the first of
+ * them (what a hub serves), which `only-if-cached` asks without going to the
+ * network; a local page never loads it. Only which listed assets the install
+ * fetches ahead hangs on it; each is still checked against INTEGRITY. */
+async function servedByHub(cache) {
+  if (PRECACHE_CLOUD.length === 0) return false;
+  try {
+    const res = await cache.match(SHELL);
+    if (res === undefined) return httpCached(PRECACHE_CLOUD[0]);
+    const text = await res.text();
+    const head = text.indexOf("<head>");
+    return head >= 0 && text.startsWith('<meta name="rh-hub"', head + "<head>".length);
+  } catch {
+    return false;
+  }
 }
 
 /* The SPA's full route set (app/router.tsx), plus cloud mode's sign-in,
@@ -223,7 +298,8 @@ self.addEventListener("install", (e) => {
     (async () => {
       try {
         const cache = await caches.open(CACHE);
-        for (const url of PRECACHE) {
+        const hub = await servedByHub(cache);
+        for (const url of [...PRECACHE, ...(hub ? PRECACHE_CLOUD : []), ...(await shownLanguages(cache))]) {
           const hit = await cache.match(url);
           if (hit !== undefined && (await assetMatches(url, hit))) continue;
           const res = await fetchListed(url, url);

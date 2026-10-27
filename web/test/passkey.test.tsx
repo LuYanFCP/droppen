@@ -915,7 +915,7 @@ test("the autofill's withdrawal waits for the browser to let go, but not for eve
 
 // ------------------------------------------------------------ the form
 
-const CONFIG: SignupConfig = { signup: "open", inviteRequired: false, turnstile: null, verification: "required", passkeys: { rpId: "hub.test" } };
+const CONFIG: SignupConfig = { signup: "open", inviteRequired: false, verification: "required", passkeys: { rpId: "hub.test" } };
 
 test("the form: a passkey first only where both the browser and the hub can; the password otherwise, or when asked for", () => {
   assert.equal(authMethod(true, CONFIG, false), "passkey");
@@ -945,7 +945,7 @@ test("a browser without WebAuthn gets the password form as it was, with no word 
   }
 });
 
-test("a browser with WebAuthn, before the hub has said: no password field and no passkey wording yet", () => {
+test("a browser with WebAuthn gets the passkey form at once: the answers are written in the page", () => {
   const g = globalThis as unknown as Record<string, unknown>;
   const before = { pkc: g.PublicKeyCredential, nav: Object.getOwnPropertyDescriptor(globalThis, "navigator") };
   g.PublicKeyCredential = function PublicKeyCredential() {};
@@ -957,8 +957,8 @@ test("a browser with WebAuthn, before the hub has said: no password field and no
       </I18nextProvider>,
     );
     assert.doesNotMatch(html, /data-testid="auth-password"/);
-    assert.match(html, /data-testid="auth-pending"[^>]*disabled/);
-    assert.doesNotMatch(html, /passkey/i);
+    assert.match(html, /data-testid="passkey-signin"/);
+    assert.ok(html.toLowerCase().includes("passkey"));
   } finally {
     if (before.pkc === undefined) delete g.PublicKeyCredential;
     else g.PublicKeyCredential = before.pkc;

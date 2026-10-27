@@ -33,13 +33,13 @@ import type { components } from "@/api/schema";
 import { FileChip } from "@/components/file-chip";
 import { LightboxImage } from "@/components/image-lightbox";
 import { LiveDot } from "@/components/live-dot";
-import { Markdown } from "@/components/markdown";
+import { DiagramRendering, drawsDiagrams, Markdown, MathRendering } from "@/components/markdown";
 import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Spinner } from "@/components/ui/spinner";
 import { SessionHeader } from "@/features/sessions/session-header";
-import { useShowingCopy } from "@/features/cloud/context";
-import { CopyWindowNotice } from "@/features/cloud/plan";
+import { useShowingCopy } from "@/features/machines/copy-mode";
+import { cloudParts } from "@/app/cloud-parts";
 import { SessionActionsMenu } from "@/features/sessions/session-actions-menu";
 import {
   ChecklistChip,
@@ -67,7 +67,6 @@ import {
   type FeedState,
 } from "@/features/sessions/session-feed-pool";
 import {
-  holdBottomEdge,
   NO_UNREAD,
   pinAfterScroll,
   pinOnSettle,
@@ -189,7 +188,6 @@ import { sessionKey, type MachineKey, type SessionRef } from "@/lib/machines/key
 import { machineStorageKey, readMachineItem } from "@/lib/machines/storage";
 import { mq } from "@/lib/machines/query";
 import { apiFor, perMachine, transportFor } from "@/lib/machines/registry";
-import { onKeyboardResize } from "@/lib/kb-inset";
 import { useTicker } from "@/lib/ticker";
 import { noteWsFailure } from "@/lib/ws-url";
 
@@ -1475,32 +1473,25 @@ function Composer({
       claimSessionDraft(localStorage, session);
       return readSessionDraftSnapshot(localStorage, draftKey);
     } catch {
-      return { text: "", revision: null, pending: false };
+      return { text: "" };
     }
   });
-  const [text, setTextState] = useState(
-    initialDraft.pending ? "" : initialDraft.text,
-  );
-  const [draftPending, setDraftPending] = useState(initialDraft.pending);
+  const [text, setTextState] = useState(initialDraft.text);
   // The machine's offline copy is read-only: nothing is queued for later
   // (architecture doc §4: no offline queue), so the composer is shut, not deferred.
   const readOnlyCopy = useShowingCopy();
   // Another device's session in the local app (its gateway, S1-7): nothing
   // here can go to it — not a message, a model or an attachment — until S2.
   const otherDevice = useInfoOf(useMachine()).readOnly === true;
-  const draftRevisionRef = useRef(initialDraft.revision);
   useEffect(() => {
     return subscribeSessionDraft(draftKey, (snapshot) => {
-      draftRevisionRef.current = snapshot.revision;
-      setDraftPending(snapshot.pending);
-      setTextState(snapshot.pending ? "" : snapshot.text);
+      setTextState(snapshot.text);
     });
   }, [draftKey]);
   const setText = (value: string) => {
     setTextState(value);
     try {
-      const snapshot = writeSessionDraft(localStorage, draftKey, value);
-      draftRevisionRef.current = snapshot.revision;
+      writeSessionDraft(localStorage, draftKey, value);
     } catch {
       // Accessing localStorage itself can be blocked; the in-memory draft still works.
     }
@@ -1714,7 +1705,6 @@ function Composer({
     canSend: detail.canSend,
     injectionRunning,
     sending: send.isPending,
-    draftPending,
     steering: codexSteering,
   });
   // The agent is blocked on a question, so what goes in next is its answer:
@@ -1763,7 +1753,7 @@ function Composer({
   // The entry stays in the outbox, marked `sending`, until the server answers:
   // a page closed mid-send then knows to ask about it, rather than forgetting it.
   const dispatchEntry = (entry: OutgoingMessage | undefined) => {
-    if (dispatching.current || entry === undefined || !detail.canSend || send.isPending || draftPending) {
+    if (dispatching.current || entry === undefined || !detail.canSend || send.isPending) {
       return;
     }
     // `unsent` keeps its id, `failed` gets a new one; see `prepareResend`.
@@ -1795,7 +1785,6 @@ function Composer({
         failed,
         sendFailed: sendRefused,
         sending: send.isPending,
-        draftPending,
         // Never past a message whose fate is unknown, or one waiting on a decision.
         headBlocked: !headSendable(queue),
       })
@@ -1812,7 +1801,6 @@ function Composer({
     if (
       (!message && attachments.length === 0) ||
       send.isPending ||
-      draftPending ||
       readOnlyCopy ||
       anyFailed
     ) {
@@ -1974,7 +1962,7 @@ function Composer({
           text={text}
           onText={setText}
           onTextLive={setTextState}
-          disabled={draftPending || readOnlyCopy}
+          disabled={readOnlyCopy}
           onSubmit={submit}
           placeholder={
             readOnlyCopy
@@ -1990,9 +1978,9 @@ function Composer({
             <ChecklistChip source={source} id={id} toolTick={toolTick} />
           </>}
           send={{
-            disabled: send.isPending || draftPending || readOnlyCopy || anyFailed || (!text.trim() && attachments.length === 0),
+            disabled: send.isPending || readOnlyCopy || anyFailed || (!text.trim() && attachments.length === 0),
             label: sendsAnswer ? t("send as your answer") : willQueue ? t("add to queue") : t("send"),
-            busy: send.isPending || draftPending || sendQueued,
+            busy: send.isPending || sendQueued,
             queues: willQueue,
           }}
         />
@@ -2225,6 +2213,7 @@ export function SessionDetailInner({
   const api = useApi();
   const machine = useMachine();
   const session = useSessionRef(source, id);
+  const CopyWindowNotice = cloudParts()?.CopyWindowNotice;
   // Another device's session in the local app, from its copy (S1-7): read-only here.
   const readOnly = useInfoOf(machine).readOnly === true;
   // A transcript open is the machine itself in use: live, not only its copy.
@@ -2332,6 +2321,10 @@ export function SessionDetailInner({
     staleTime: 5 * 60_000,
   });
   const transcriptStyle: TranscriptStyle = prefs?.transcriptStyle ?? "flat";
+  // Typeset unless asked not to: a server from before the pref sends none.
+  const renderMath = prefs?.math !== "source";
+  // Drawn unless asked not to, and only once the prefs are in (`drawsDiagrams`).
+  const renderDiagrams = drawsDiagrams(prefs);
   // Recomputed only when the window itself changes; item identity is what the
   // renderer consults, so it must come from this exact array.
   const pairing = useMemo(() => pairToolResults(data?.items ?? []), [data?.items]);
@@ -2608,28 +2601,6 @@ export function SessionDetailInner({
     observer.observe(rows);
     return () => observer.disconnect();
   }, [hasFeed, publishPin]);
-
-  /**
-   * The phone keyboard opening or closing resizes the whole shell
-   * (`lib/kb-inset.ts`), and with it this box, from below. The observer above
-   * would re-stick a pinned view, but a reader partway up would see the lines
-   * they were reading slide under the composer. So the bottom edge holds: the
-   * gap to the end of the rows is measured before the resize and put back
-   * after it (`holdBottomEdge`), a pinned view's gap being none.
-   */
-  useEffect(
-    () =>
-      onKeyboardResize(() => {
-        const el = scrollRef.current;
-        if (!el) return;
-        const settle = holdBottomEdge(el, stickToBottom.current);
-        return () => {
-          lastScrollTop.current = settle();
-          publishPin(stickToBottom.current, boxOf(el));
-        };
-      }),
-    [publishPin],
-  );
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
@@ -2911,7 +2882,7 @@ export function SessionDetailInner({
           }}
         />
         {/* The top of an offline copy the plan's retention trimmed: the rest is on the computer (cloud mode only). */}
-        {!data.hasMoreBefore && <CopyWindowNotice source={summary.source} id={id} />}
+        {!data.hasMoreBefore && CopyWindowNotice && <CopyWindowNotice source={summary.source} id={id} />}
         {data.hasMoreBefore && (
           <>
             <button
@@ -2943,6 +2914,8 @@ export function SessionDetailInner({
         <RunningTasksContext.Provider value={residentTasks}>
         <QuestionsContext.Provider value={questionIndex}>
         <LiveContext.Provider value={live}>
+        <MathRendering.Provider value={renderMath}>
+        <DiagramRendering.Provider value={renderDiagrams}>
         {items.length === 0 && (pendingSends > 0 ? (
           // A first message is on its way in (a session just started, its
           // message pending below): it is starting, not empty.
@@ -2973,6 +2946,8 @@ export function SessionDetailInner({
             transcript only grows by written entries and nothing in it changes
             height under the reader while a turn runs (`turn-status.tsx`). */}
         <div ref={rowsRef} className="transcript-rows">{rows}</div>
+        </DiagramRendering.Provider>
+        </MathRendering.Provider>
         </LiveContext.Provider>
         </QuestionsContext.Provider>
         </RunningTasksContext.Provider>

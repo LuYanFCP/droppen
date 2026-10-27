@@ -21,7 +21,6 @@ import { cn } from "@/lib/cn";
  * an `aria-label`.
  */
 export const Select = BaseSelect.Root;
-export const SelectGroup = BaseSelect.Group;
 
 /** The chosen item's label. `Select` needs `items` for it to say the label rather than the value. */
 export function SelectValue({ className, ...props }: React.ComponentProps<typeof BaseSelect.Value>) {
@@ -171,20 +170,6 @@ export function SelectItem({ className, children, ...props }: React.ComponentPro
       </BaseSelect.ItemIndicator>
     </BaseSelect.Item>
   );
-}
-
-export function SelectGroupLabel({ className, ...props }: React.ComponentProps<typeof BaseSelect.GroupLabel>) {
-  return (
-    <BaseSelect.GroupLabel
-      data-label=""
-      className={cn("px-3 pt-2 pb-1 font-mono text-[10px] tracking-label text-muted uppercase", className)}
-      {...props}
-    />
-  );
-}
-
-export function SelectSeparator({ className, ...props }: React.ComponentProps<typeof BaseSelect.Separator>) {
-  return <BaseSelect.Separator className={cn("my-1.5 h-px bg-border", className)} {...props} />;
 }
 
 /**

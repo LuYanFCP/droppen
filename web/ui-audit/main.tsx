@@ -1,13 +1,13 @@
 /*
- * `scripts/ui-audit` renders this: the real primitives and the real
- * settings-row composition, with no API, router or machine context. It is a
- * fixture, not a product page; keep it in step with `features/settings/` and
- * `components/ui/` when either changes.
+ * `scripts/ui-audit` renders this: real components in their real composition,
+ * with no API, router or machine context. It is a fixture, not a page; keep it
+ * in step with `features/settings/`, `features/cloud/` and `components/ui/`.
  *
+ * `?fixture=settings` (default) or `?fixture=devices`, plus `?theme=dark`.
  * `web/src/index.css` excludes this directory from Tailwind's scan
  * (`@source not`), so nothing here can change the production stylesheet. That
  * also means every class below must already occur in `web/src`; the layout
- * strings are imported from the settings skeleton for exactly that reason.
+ * strings are imported from the page that owns them.
  */
 import "@/index.css";
 import { createRoot } from "react-dom/client";
@@ -17,10 +17,13 @@ import { Input } from "@/components/ui/input";
 import { SelectField } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
+import { DeviceRow, type DeviceRowView } from "@/features/cloud/devices";
+import { SectionHead } from "@/features/cloud/ui";
 import { PREFERENCE_ROW, ROW_HINT, ROW_LABEL, SECTION_TITLE } from "@/features/settings/layout";
 
 const query = new URLSearchParams(location.search);
 document.documentElement.classList.toggle("dark", query.get("theme") === "dark");
+const fixture = query.get("fixture") ?? "settings";
 
 function Row({ id, label, hint, children }: { id: string; label: string; hint: string; children: React.ReactNode }) {
   return (
@@ -51,7 +54,7 @@ const efforts = [
   { value: "xhigh", label: "Extra high" },
 ];
 
-function App() {
+function SettingsFixture() {
   return (
     <div className="@container/settings mx-auto max-w-3xl p-4">
       <header className="mb-3 flex h-8 items-center border-b border-border px-4 text-[13px] font-semibold">Settings</header>
@@ -113,4 +116,52 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+const noop = () => undefined;
+const device = (over: Partial<DeviceRowView>): DeviceRowView => ({
+  id: "d-1",
+  fingerprint: "ABCD-EFGH-IJKL-MNOP",
+  name: null,
+  self: false,
+  kind: "browserOrPhone",
+  status: "active",
+  host: false,
+  stoppedHost: false,
+  presence: null,
+  path: null,
+  copyAsOf: null,
+  lastSeenMs: null,
+  limited: null,
+  accept: null,
+  ...over,
+});
+const devicesFixture: DeviceRowView[] = [
+  device({ id: "m-1", name: "kilerd's Mac mini", self: true, kind: "computer", host: true, presence: "online", path: { relay: "sin-1", rttMs: 32 } }),
+  device({ id: "m-2", name: "studio", kind: "computer", host: true, presence: "online", path: { relay: "sin-2", rttMs: 74 } }),
+  device({ id: "m-3", name: "macbook-air", kind: "computer", host: true, presence: "offline", copyAsOf: Date.now() - 3_600_000 }),
+  device({ id: "d-1", name: "iPhone · Safari", presence: "online" }),
+  device({ id: "d-2", status: "pending" }),
+];
+
+function DevicesFixture() {
+  return (
+    <div data-fixture-root="" className="@container/devices mx-auto max-w-[1200px] p-4">
+      <div className="px-4">
+        <SectionHead index="03" title="Devices">
+          <span className="font-mono text-xs text-faint tabular-nums">{devicesFixture.length}</span>
+        </SectionHead>
+      </div>
+      <ul
+        data-testid="device-list"
+        className="mt-4 grid grid-cols-1 gap-2.5 px-4 @min-[44rem]/devices:grid-cols-[repeat(auto-fill,minmax(20rem,1fr))] @min-[44rem]/devices:gap-3"
+      >
+        {devicesFixture.map((view) => (
+          <DeviceRow key={view.id} view={view} viewerAdmin upgraded writable onOpen={noop} onRemove={noop} onHost={noop} onControl={noop} onRename={noop} onTerminal={noop} onResend={noop} onOpenSession={noop} onReEnroll={noop} onDismissReEnroll={noop} onWarnAgain={noop} onRenew={noop} onRenewCode={noop} onEndPause={noop} onRenewRetry={noop} onAddComputer={noop}>
+            {view.id === "m-1" ? <div className="border-t border-border px-4 py-3 text-xs text-muted">The renewal panel lives here; it makes this card taller than its neighbours.</div> : null}
+          </DeviceRow>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+createRoot(document.getElementById("root")!).render(fixture === "devices" ? <DevicesFixture /> : <SettingsFixture />);

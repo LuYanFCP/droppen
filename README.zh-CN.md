@@ -4,7 +4,7 @@
 
 Droppen —— 远程浏览与管理本机的 Claude Code / Codex 会话。
 
-> Droppen 原名 remote-hand。产品改了名，有些内部名字没改：可执行文件 `remote-hand-server`（`droppen` 是同一个程序的另一个名字）、数据目录 `~/.local/share/remote-hand` 与 `~/.config/remote-hand`、`APP_*` 环境变量都照旧，下文的命令请原样输入。服务端自己的环境变量已改叫 `DROPPEN_*`；原来的 `RH_*` / `REMOTE_HAND_*` 仍然认，用到时提示一次：加上同值的新名字；还可能回滚到改名前的版本时，旧名字也留着。
+> Droppen 原名 remote-hand。产品改了名，有些内部名字没改：可执行文件 `remote-hand-server`（`droppen` 是同一个程序的另一个名字）、数据目录 `~/.local/share/remote-hand` 与 `~/.config/remote-hand`、`APP_*` 环境变量都照旧，下文的命令请原样输入。服务端自己的环境变量已改叫 `DROPPEN_*`；原来的 `RH_*` / `REMOTE_HAND_*` 已弃用，到 v0.2.134 为止仍然认（用到时提示一次），**v0.2.135 起不再生效**：现在就改用同值的 `DROPPEN_*` 名字。
 
 ## 功能
 
@@ -30,7 +30,7 @@ Droppen —— 远程浏览与管理本机的 Claude Code / Codex 会话。
   - **思考计数（只追加的 transcript）**：claude 写完一个块（thinking、正文、工具调用）要等整个 API 响应结束才写进 transcript，思考中更是什么都不写。常驻进程跟着 stdout 的 `system:thinking_tokens` 记下正在进行的 thinking 的 token 数，经会话 websocket 的 `draft` 帧推给页面（约 80 ms 节流，接入时随首帧补发；帧里只有这一个计数块，思考结束就是空帧，codex 会话没有）。输入框上方的状态条把「最近活动」换成「思考中… ~50 tokens」（「28 条消息 · 思考中… ~50 tokens · 7m14s」，计数在固定宽度的槽里右对齐，手机上省掉「tokens」字样），思考结束后「最近活动」从计数最后一次变化算起。transcript 只追加已经写入的条目，不再在最后一条消息下方画临时气泡——那个气泡一轮里反复出现、变高、变矮、消失，整个信息流跟着跳；代价是大文件 `Write` 之前说的那句话要等 transcript 写入才出现。计数不进 transcript 窗口，不算未读、搜不到、不影响断线续传。旧版页面收到新帧只画一行「思考中…」，新版页面收到旧版 agent 带正文和工具调用的帧只读其中的计数。一轮开始和结束也会立即推送 `state` 帧，不再等 2 秒轮询。
   - **弱网下的会话切换**：会话 feed 不再各开一条 websocket，而是挂在页面本来就有的 `/api/events` 上（`?v=2`：先收到 `hello`，再用 `sub`/`unsub`/`resync` 按订阅号收发，帧带 `"sub":N`；`ping`/`pong` 识别看似还开着、其实已断的连接），切到新会话不用再握手、不用再换 ticket；断线重连时所有订阅在一条消息里各自带断点续传。`&z=1` 时 ≥1 KB 的帧以 raw deflate 二进制帧发送（经 tunnel 的 websocket 没有任何压缩），新会话首屏只发最新 100 条，更早的照旧按页加载。最近看过的 8 个会话窗口留在内存里，切回去立即显示、只补差量，其中最近 3 个保持订阅；最近 5 个窗口和会话列表另存一份在本机 IndexedDB，冷启动先画这份副本（标明「正在显示本机保存的副本」）再从它续传，登出时清空。前端：第三方库单独分包，设置、统计、终端按需加载；service worker 预缓存当前版本的启动资源，服务端报告新版本时提前在后台拉好，点「重新加载」不用再等；`index.html` 和图标带 ETag（未变就 304），带 `?v=` 的图标长期缓存。旧页面继续走 `/api/sessions/{source}/{id}/ws`，新页面遇到不认识 `v=2` 的旧服务端会自动退回每会话一条 socket。实测（400 ms RTT、800 kbps）：首次打开一个会话约 5 s → 1.1 s（330 KB → 52 KB）、打开含 3 个会话的分屏 6.6 s → 1.2 s，刷新页面 5.9 s → 1.4 s 出内容，发版后刷新 7.7 s → 1.4–2.0 s。
   - **会话内搜索**：会话页按 Cmd+F（macOS）/ Ctrl+F，或点标题栏的放大镜，打开搜索条。搜的是**整个** transcript（`GET /api/sessions/{source}/{id}/search?q=&limit=`），不只是页面里已加载的那几百条：空格分隔的词须同时出现在同一条里，不区分大小写，中日文按子串匹配；覆盖消息正文、thinking、工具名与调用摘要、工具输入和输出。计数从最新的一条数起，Enter 跳到更早的一条、Shift+Enter 跳回更新的一条，也可以从下拉列表点选；目标还没加载时沿用「加载更早」逐页补齐（可取消），自动展开所在的折叠步骤并高亮命中。会话在跑时新消息不会把你拉走，再按一次 Enter 或改一下关键词才刷新计数。搜索框已有焦点时再按一次 Cmd+F 交还给浏览器自带的查找；分屏时作用于最近操作过的那个会话窗格。external 会话同样可搜。
-- **Screens**：sidebar 可新建持久化的分屏工作区，把 session / 终端 / 聊天任意拼在一起（Cmd+D 左右分屏、Cmd+Shift+D 上下分屏）。布局存在服务端（`~/.local/share/remote-hand/instances/<instance>/screens.json`，每个实例各存各的：布局里引用的终端 id 只有本实例认得），切走、刷新、换浏览器都不丢；已打开的屏幕在会话内保持挂载，终端滚动位置和连接切回来原样还在。同一个屏幕在手机和电脑上同时打开时，一边的改动会实时推到另一边；两边同时改，后保存的一方不会悄悄覆盖先保存的，而是同步到最新并提示一句，保存失败会在屏幕标签上标「未保存」并自动重试。删除屏幕只删布局，不会关闭里面引用的资源。
+- **Screens**：sidebar 可新建持久化的分屏工作区，把 session / 终端 / 聊天任意拼在一起（Cmd+D 左右分屏、Cmd+Shift+D 上下分屏）。布局存在服务端该实例自己的 `state.db`（`~/.local/share/remote-hand/instances/<instance>/state.db`，每个实例各存各的：布局里引用的终端 id 只有本实例认得），切走、刷新、换浏览器都不丢；已打开的屏幕在会话内保持挂载，终端滚动位置和连接切回来原样还在。同一个屏幕在手机和电脑上同时打开时，一边的改动会实时推到另一边；两边同时改，后保存的一方不会悄悄覆盖先保存的，而是同步到最新并提示一句，保存失败会在屏幕标签上标「未保存」并自动重试。删除屏幕只删布局，不会关闭里面引用的资源。
 - **定时任务（Scheduled tasks）**：给一条 cron 表达式、一个目录和一句 prompt，到点自动**新开一个会话**跑它。设置页里配置，存在 `~/.local/share/remote-hand/instances/<instance>/scheduled-tasks.json`（mode 0600，每个实例各存各的——共用一份会让机器上每个 server 都触发一遍，一次到点跑出两个会话）。
   - **表达式是五段**（分 时 日 月 周），**按服务器本地时区解释**：`0 9 * * *` 就是服务器所在时区的早上九点。若一律按 UTC 算，东八区用户的「早九点」会跑在下午五点。不引 `chrono-tz`、不做 per-task 时区：表单上多一个字段、二进制里多一份时区库，换来的只是「人和自己的服务器不在同一个时区」这个对本地 CLI 工具来说并不常见的场景。带秒的六段表达式会被**拒绝**而不是被当成秒来解释——每次触发都是一个真实的 CLI 进程和真实的 token。夏令时不做特殊处理，交给 croner 按 wall clock 解析：跳过的那一小时里没有触发点，重复的那一小时只匹配一次，和 `cron` 本身的行为一致。
   - **错过的不补跑**。服务器起来时会按**当前时间**重算每个任务的下次触发，文件里存的旧时间直接丢弃；笔记本睡了一觉醒来，超过 5 分钟没人管的触发点记一笔 `skippedMissed` 而不是补一发。理由是同一件事说两遍：早上九点的「过一遍昨晚的改动」在下午四点跑出来，问的已经是一个别人替你过完了的昨晚；停机一夜之后一口气补上一打，就是一打 CLI 同时开跑、同时烧额度。
@@ -74,7 +74,7 @@ Droppen —— 远程浏览与管理本机的 Claude Code / Codex 会话。
   - **限额日志与休息状态（第一阶段：记录）**：claude 一轮的 `result` 报错（含 CLI 标成 success 的 `You've hit your session limit · resets 2:30am (Asia/Tokyo)`）、被拒的 `rate_limit_event`、因鉴权失败退出的进程，以及 codex 失败的 turn 和满额的 `account/rateLimits/updated`，都会被分类成 `session` / `weekly` / `rate` / `credit` / `auth` / `other`，原文脱敏后截到 500 字记进本实例 `state.db` 的 `account_limit_events`（最多留 500 条），并给该账号（本机登录记为 `local:claude` / `local:codex`）写一条 `account_rest`：有重置时间就休到那时，没有就按类别默认（session 30 分钟、weekly 60 分钟、rate 1 分钟、credit 30 分钟、auth 直到手动清除或换凭据、other 连续出现才休并从 1 分钟翻倍到 10 分钟封顶）。上下文超长一类错误先被排除，不算限额。休息范围默认是整个账号（`all`，含普通的 weekly limit——它就是所有模型共用的 `seven_day` 窗口），只有文案或事件点名了模型家族（`Opus weekly limit`、`You've reached your Fable limit`、`seven_day_opus`）才按家族记；`seven_day_overage_included` 这类没写明覆盖哪些模型的周窗口只记事件（scope `unknown`）、不单独休息，由同一会话 10 秒内紧随其后的 `result` 定范围、借用它的重置时间。同一会话 10 秒内同类同范围的重复上报（CLI 一次被拒会先发 `rate_limit_event` 再发 `result`）只记一条，休息取更晚的结束时间。`GET /api/accounts` 的每个账号带 `rest`（仅生效中的），`GET /api/accounts/limit-events`、`GET /api/accounts/{id}/limit-events` 看日志，`DELETE /api/accounts/{id}/rest[?scope=]` 手动清除；重新授权会清掉 `auth` 休息。这些记录本身不重试、不动队列；换号由下一条（第二阶段）决定。休息状态按实例各记各的，不跨实例共享。
   - **自动轮换（第二阶段）**：claude 会话**自己的一轮**以 `session` / `weekly` / `credit` / `auth` 类限额结束时（`rate` / `other` 不换；子任务失败不算），driver 先扣住队列——不再把排队消息喂给刚拒绝的账号——再决定换到哪个号。**轮换池**是账号上的 `rotation` 开关（`POST/PATCH /api/accounts` 可设）：claude OAuth 账号默认在池里，env 账号和所有 codex 账号默认不在；只在池内账号之间换，**codex 会话和本机登录的会话不换**。若进程还在旧账号上时会话已被手动绑到别的账号，就直接换到那个账号（它也在休息时才回到常规挑选）。候选排除当前账号和休息范围覆盖本会话模型家族（`all` 或 `fable` / `opus` / `sonnet` / `haiku`，先看 `system:init` 报的模型名；认不出家族时，任何按家族记的休息都算覆盖）的账号，30 分钟内有读数且 `5h`、`weekly`（及该家族的周窗口）都低于 98% 的按最紧窗口的剩余排前，没读数或读数过期的按列表顺序其后，≥98% 的垫底。**等待策略**：整号范围的限额（5 小时、普通周额度、余额、凭据）立即切换，不等后台子任务（它们用的是同一份耗尽的凭据）；只限某个模型家族的（如 Fable 周额度）先让后台子任务跑完，沿用改设置时的等待（`DROPPEN_AWAIT_BACKGROUND_MS` 封顶）。切换 = 把会话绑到新账号、排队消息改用新账号的环境、用 `--resume` 在新账号下重开进程，然后不重发原消息（它已在 transcript 里），而是在队首放一条中文续写提示（被中断的后台子任务逐条列出，附输出文件），沿用原消息的模型/effort/权限。同一条消息链最多自动换 3 次；到上限或没有可换的账号时，这一轮照旧 Failed，队列保持扣住（不丢）：扣住期间同一账号再报限额不算新决定、不再推送；每个 watchdog 周期（60 秒）以及有账号的休息被清除、账号新增或重新授权、读数显示有余量时重新挑选，一出现可换的账号就换过去；该账号自己的限额恢复（休息到期或被清除）而没换号时，先在队首放一条同账号的续写提示（`账号 A 的额度已恢复……请从中断处继续`）再放行；有人发新消息或插队也会放行。扣住状态和挂起中的续写提示都写进 run journal，服务端重启（自我更新）后照样扣住 / 在绑定的新账号下重开。每次决定写进本实例 `state.db` 的 `session_rotations`（每会话留 20 条），`SessionDetail.rotation` 和会话 feed 的 state 帧带最新一条，并推送一条不受 60 秒节流的通知（Web Push，以及配置了的 Bark）。新建会话 / 定时任务 / 即时聊天用默认账号时，若默认账号（在池内）正休息且范围覆盖所请求的模型，改用第一个候选。已知限制：已经 steer 进旧进程 stdin 的消息仍在旧账号上跑（管道里的内容收不回来）；一次限额会推送两条通知（先是 Run failed，再是轮换结果）；切换中途失败（新账号的 recipe 或绑定写不进去）按 `no_candidate` 记，会话留在原账号扣住。立即切换时，已插队进旧进程的消息会被放回队列，但旧进程退出前可能还会为它开一轮（同样被拒），于是新进程里会再收到同一条消息（未对照 CLI 在 stdin 关闭时的行为验证）；切换时按旧账号**当前**的 env 块移除变量，若进程启动后从块里删过某个键（如 `ANTHROPIC_BASE_URL`），它的旧值会留在新环境里。
   - **提前轮换**：池内账号的某个相关窗口（`5h`、`weekly`，及会话模型家族自己的周窗口）在 15 分钟内的读数里已用到 `DROPPEN_ROTATE_AHEAD_PERCENT`（默认 95，设 `0` 关闭）且尚未重置时，会话在安静点（一轮正常结束后、或空闲会话开始下一轮前，且没有后台子任务在跑）就换到所有相关窗口都低于阈值 −10 的已知读数账号，下一条消息用 `--resume` 在新账号下跑、不加续写提示，每会话 30 分钟最多一次、手动改绑后 30 分钟内不动，记录为 `SessionRotation.trigger: "ahead"` 并推送「已提前从 A 切换到 B（A 的 5 小时额度已用 96%，23:10 重置）」；新建会话的默认账号快用完时同样改用这样的账号。
-  - 账号数据存在机器级的 SQLite 库 `~/.config/remote-hand/state.db`（mode 0600）的 `accounts` / `session_accounts` 表里；老的 `~/.config/remote-hand/accounts.json` 只在升级后的第一次启动被读入一次，之后再不写它（留在原地，方便从备份重建）。Droppen 永远不读、不写、不复制 `~/.claude/.credentials.json` 和 `~/.codex/auth.json`——codex 账号靠自定义 provider 的 `env_key` 注入，正是为了不碰后者。
+  - 账号数据存在机器级的 SQLite 库 `~/.config/remote-hand/state.db`（mode 0600）的 `accounts` / `session_accounts` 表里；老的 `~/.config/remote-hand/accounts.json` 不再被读入（0.2.125 及更新的安装早已把这些数据放进数据库，更老的安装需要重新添加账号）。Droppen 永远不读、不写、不复制 `~/.claude/.credentials.json` 和 `~/.codex/auth.json`——codex 账号靠自定义 provider 的 `env_key` 注入，正是为了不碰后者。
 
 ## 架构
 
@@ -299,7 +299,7 @@ ticket 只活 60 秒。
 
 - `POST /api/auth/login` `{username, password}` → `{token, expiresAt, username}`。token 是
   32 字节随机数的 base64url(43 字符),**服务端只存 `sha256(token)`**(在
-  `instances/<name>/auth-sessions.json`,mode 0600),所以它自己也拿不出你的 token,
+  `instances/<name>/state.db`,mode 0600),所以它自己也拿不出你的 token,
   「列出我的会话」这个接口在原理上就漏不了。
 - 之后每个请求带 `Authorization: Bearer <token>`。有效期 **7 天绝对过期**,用它不会续期——
   滑动过期正是「泄漏一次 = 永久有效」的成因(攻击者自己的轮询就能把它续活)。
@@ -345,8 +345,9 @@ ticket 只活 60 秒。
 > ⚠️ 鉴权不等于可以裸奔上公网:登录是明文 POST,token 也是明文 header。远程访问仍然应该放在
 > TLS 反向代理 / SSH 隧道 / Tailscale 之后。默认绑定 `127.0.0.1`。
 
-环境变量(服务端自己的是 `DROPPEN_*`;改名前的 `RH_*` / `REMOTE_HAND_*` 仍然认,用到时提示一次(加上同值的
-新名字;还可能回滚到改名前的版本时旧名字也留着),两个都设而值不同时以新名为准,见 `server-rs/src/env.rs`):
+环境变量(服务端自己的是 `DROPPEN_*`;改名前的 `RH_*` / `REMOTE_HAND_*` 已弃用,到 v0.2.134 为止仍然认,
+用到时提示一次,v0.2.135 起不再生效——请改用同值的 `DROPPEN_*` 名字;两个都设而值不同时以新名为准,
+见 `server-rs/src/env.rs`):
 
 - `APP_SERVER__HOST` / `APP_SERVER__PORT`:监听地址(默认 `127.0.0.1:8700`)。`APP_` 前缀与
   `__` 分隔是 gotcha 的配置约定。
@@ -528,7 +529,7 @@ curl -sS -X POST http://127.0.0.1:8700/api/server/self-upgrade \
 本仓库的 [Releases](https://github.com/getdroppen/droppen/releases)，由 GitHub Actions 从本仓库构建并发布，
 每个文件都附构建来源证明（[`docs/releasing.md`](docs/releasing.md)）。新装和升级都可以直接（重）跑
 `curl -fsSL https://droppen.app/install.sh | sh`。二进制的版本号形如 `0.1.0+g<commit>`：构建时
-取环境变量 `DROPPEN_BUILD_REV`（旧名 `RH_BUILD_REV` 照样认），没有就用 `git rev-parse --short HEAD`
+取环境变量 `DROPPEN_BUILD_REV`，没有就用 `git rev-parse --short HEAD`
 （树里有未提交的改动时加 `-dirty`）。自我更新正是靠这个后缀区分同一个 crate 版本的两次构建，
 所以在没有 `.git` 的源码目录里构建时请自己传 `DROPPEN_BUILD_REV`，否则版本号只有光秃秃的 `0.1.0`。
 
@@ -548,6 +549,8 @@ docker run -p 8080:8080 \
   -e DROPPEN_RELAY_TRUST_PROXY=railway \
   droppen-relay
 ```
+
+改名前的 `RH_RELAY_*` 名字已弃用，v0.2.135 起不再生效：请改用同值的 `DROPPEN_RELAY_*` 名字。
 
 注册令牌只在第一次启动时被 Hub 接受一次；之后也请留着它，因为中继的 id 就取自它，或者改设 `DROPPEN_RELAY_ID`。
 中继按地址限流，要拿到每个客户端自己的地址：放在反向代理后面时设 `DROPPEN_RELAY_TRUST_PROXY=railway`，并让代理用客户端的地址

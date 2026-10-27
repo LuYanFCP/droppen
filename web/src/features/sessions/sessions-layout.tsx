@@ -20,7 +20,7 @@ import { LiveDot } from "@/components/live-dot";
 import { Content, Panel, PanelHeader } from "@/components/panel";
 import { useFeedConnected, useFeedSessions, useFeedSettings, useMachineFeedSelector, type GlobalFeedState } from "@/app/global-feed";
 import { LinkFirstRun } from "@/features/link/first-run";
-import { useNewSessionShortcut, useOpenNewSession } from "@/features/sessions/new-session-view";
+import { useNewSessionShortcut, useOpenNewSession } from "@/features/sessions/new-session-open";
 import { RenameSessionDialog, type RenameTarget } from "@/features/sessions/rename-dialog";
 import { useSessionPin } from "@/features/sessions/session-pin";
 import { ActivityChipView, EdgeBar, EDGE_CLASS, UnreadPill } from "@/features/sessions/attention-badges";
@@ -39,7 +39,7 @@ import {
   type SessionListRow,
 } from "@/features/sessions/session-list-model";
 import { copyNote, type DeviceChoice, DeviceFilterBar, deviceLabel, loadDeviceChoice, saveDeviceChoice } from "@/features/sessions/device-filter";
-import { gatewayShell, gatewayShellStore } from "@/features/gateway/gateway-shell";
+import { gatewayShell, gatewayShellStore } from "@/features/machines/shells";
 import { useDeviceSessions, useShellDevices } from "@/features/machines/device-sessions";
 import { type DeviceSessions, needsYou } from "@/features/machines/needs-you";
 import { NeedsYouLedger } from "@/features/machines/needs-you-ledger";

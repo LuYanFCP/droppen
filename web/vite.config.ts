@@ -1,12 +1,15 @@
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
+import { readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig, type Plugin, type Rollup } from "vite";
 import { cloudBuild, cloudConfig } from "./build/cloud-mode";
 import { devTools } from "./build/dev-tools";
-import { droppenPlugins, isPluginModule } from "./build/droppen-plugins";
-import { fillServiceWorker } from "./build/service-worker";
+import { droppenPlugins } from "./build/droppen-plugins";
+import { hubPagesSet, localBoot } from "./build/local-boot";
+import { fillServiceWorker, type LanguageFiles } from "./build/service-worker";
 import { thirdPartyNotices } from "./build/third-party-notices.mjs";
+import { guardBootChunks, vendorChunk } from "./build/vendor-chunks";
 
 /**
  * Which server `pnpm dev` talks to.
@@ -33,36 +36,72 @@ const probeHub = process.env.RH_DEV_HUB;
 const cloud = cloudConfig();
 
 /**
- * Third-party code in a chunk of its own.
- *
- * Every release rehashes the app chunk; if the libraries lived in it too, each
- * deploy would make every browser fetch ~1.8 MB again, which on a weak link is
- * the whole wait. Split out, they keep their hash across releases and stay in
- * the browser's immutable cache.
- *
- * Deliberately coarse: finer library groups import each other, and a cycle
- * between chunks runs one before the other's exports exist (a finer split
- * failed to boot). xterm imports nothing else, so it alone gets its own chunk.
- * The QR encoder and decoder (pairing a device, cloud mode only) import
- * nothing either and are loaded on demand, so they stay out of it altogether,
- * as do compatibility mode's curves (`@noble/curves` and its hashes, reached
- * only from `lib/e2e/soft25519.ts`, on a browser without them natively).
+ * Packages and views the app loads on demand, which no boot chunk may hold
+ * (`guardBootChunks`). Third-party code goes to the vendor chunks only when
+ * the entry reaches it statically (`build/vendor-chunks.ts`), so a package
+ * used only by lazy code stays out of the boot set without being listed here.
+ * The list is the alarm for these becoming eager by an import in the wrong
+ * place: the views loaded when first shown (`src/app/lazy-views.ts`) and the
+ * markdown they draw messages with, the terminal (xterm, with the first
+ * terminal view), the QR encoder and decoder (pairing a device, cloud mode
+ * only), compatibility mode's curves (`@noble/curves` and its hashes, reached
+ * only from `lib/e2e/soft25519.ts`, on a browser without them natively), math:
+ * KaTeX and the parsing around it (`components/markdown-math.ts`), fetched by
+ * the first message that may hold a formula, and diagrams: Mermaid
+ * (`lib/mermaid-render.ts`), fetched by the first ```mermaid fence a message
+ * draws, with the largest packages only it uses: its parser's chevrotain,
+ * cytoscape and cytoscape's layouts.
  */
-const LAZY_PACKAGES = ["jsqr/", "qrcode-generator/", "@noble/"];
+const ON_DEMAND = [
+  "src/features/sessions/session-detail.tsx",
+  "src/features/sessions/new-session-view.tsx",
+  "src/features/chat/chat-home.tsx",
+  "src/features/chat/claude-chat-view.tsx",
+  "src/features/chat/api-chat-view.tsx",
+  "src/features/files/files-view.tsx",
+  "src/features/terminals/terminals-view.tsx",
+  "src/features/screens/screen-view.tsx",
+  "src/features/apps/app-view.tsx",
+  "src/features/auth/login-view.tsx",
+  "src/features/auth/setup-view.tsx",
+  "src/components/markdown.tsx",
+  "react-markdown",
+  "remark-gfm",
+  "@xterm/",
+  "jsqr",
+  "qrcode-generator",
+  "@noble/",
+  "katex",
+  "remark-math",
+  "micromark-extension-math",
+  "mdast-util-math",
+  "hast-util-from-html-isomorphic",
+  "hast-util-from-dom",
+  "mermaid",
+  "@mermaid-js/",
+  "chevrotain",
+  "cytoscape",
+  "layout-base",
+  "cose-base",
+];
 
 /**
- * Bundled plugins (`build/droppen-plugins.ts`) live in `node_modules` too, but
- * they are lazy chunks of their own: in `vendor` they would be downloaded by
- * every page, enabled or not. `droppenPlugins()` fails the build if one ever
- * ends up statically reachable from the entry.
+ * KaTeX's stylesheet offers each of its twenty fonts as woff2, woff and ttf.
+ * Every browser the app runs in takes woff2, so the other forty would be
+ * files the build emits, the server embeds and the worker hashes, and no page
+ * ever fetches. Before `vite:css`, so the fonts it no longer names are never
+ * emitted.
  */
-function vendorChunk(id: string): string | undefined {
-  if (isPluginModule(id)) return undefined;
-  const at = id.lastIndexOf("/node_modules/");
-  if (at < 0) return undefined;
-  const pkg = id.slice(at + "/node_modules/".length);
-  if (LAZY_PACKAGES.some((p) => pkg.startsWith(p))) return undefined;
-  return pkg.startsWith("@xterm/") ? "vendor-xterm" : "vendor";
+function katexWoff2Only(): Plugin {
+  return {
+    name: "rh-katex-woff2-only",
+    apply: "build",
+    enforce: "pre",
+    transform(code, id) {
+      if (!/\/katex\/dist\/katex(?:\.min)?\.css(?:\?|$)/.test(id)) return null;
+      return code.replace(/,\s*url\([^)]*\.(?:woff|ttf)\)\s*format\("(?:woff|truetype)"\)/g, "");
+    },
+  };
 }
 
 /**
@@ -76,12 +115,18 @@ function vendorChunk(id: string): string | undefined {
  * checks — on returning to the tab, or when the version banner appears — and
  * the install fetches the new chunks in the background, before the reload that
  * needs them. Only the entry chunk, its static imports and their CSS: lazy
- * chunks are fetched when used, not on every install over a weak link. The
- * hashes are what the worker checks every asset against before it caches or
- * serves it.
+ * chunks are fetched when used, not on every install over a weak link —
+ * but for the cloud app's, which a page a hub serves boots from too
+ * (`PRECACHE_CLOUD`, `build/local-boot.ts`). A page also boots from its
+ * language's translations, which are a chunk per language: those the worker
+ * precaches only for the languages the browser shows ({@link languageChunks}).
+ * The hashes are what the worker checks every asset against before it caches
+ * or serves it.
  */
 function precacheBootSet(): Plugin {
   let boot: string[] = [];
+  let cloudBoot: string[] = [];
+  let languages: LanguageFiles = {};
   return {
     name: "rh-precache-boot-set",
     apply: "build",
@@ -98,15 +143,48 @@ function precacheBootSet(): Plugin {
         if (chunk.type === "chunk" && chunk.isEntry) visit(chunk.fileName);
       }
       boot = [...files].sort().map((file) => `/${file}`);
+      cloudBoot = hubPagesSet(bundle);
+      languages = languageChunks(bundle, files);
     },
     // After every file is written and the public directory copied, so `sw.js`
     // is there to edit and the hashes are of the bytes as served. In a cloud
     // build the worker is told the marker origin too; the marker itself goes
     // in later (`cloudBuild`), so the shell it hashes is the build's own.
     writeBundle(options) {
-      fillServiceWorker(options.dir ?? "dist", boot, { hubOrigin: cloud?.hubOrigin });
+      fillServiceWorker(options.dir ?? "dist", boot, { hubOrigin: cloud?.hubOrigin, cloudBoot, languages });
     },
   };
+}
+
+/**
+ * Each language's translations (`src/i18n/lang-*.ts`, a chunk each): its
+ * files beyond the boot set, which a page in that language boots from too,
+ * and how the chunk's name starts in any build, by which the worker knows an
+ * earlier build's chunk of the same language in its cache (`public/sw.js`).
+ * A language with no chunk fails the build: the worker would never keep it.
+ */
+function languageChunks(bundle: Rollup.OutputBundle, boot: ReadonlySet<string>): LanguageFiles {
+  const out: LanguageFiles = {};
+  for (const chunk of Object.values(bundle)) {
+    if (chunk.type !== "chunk" || !chunk.isDynamicEntry) continue;
+    const lang = /\/src\/i18n\/lang-([\w-]+)\.ts$/.exec(chunk.facadeModuleId ?? "")?.[1];
+    if (!lang) continue;
+    const prefix = `assets/lang-${lang}-`;
+    if (!chunk.fileName.startsWith(prefix)) throw new Error(`${chunk.fileName}: the ${lang} translations' chunk is not named ${prefix}…`);
+    const files: string[] = [];
+    const visit = (fileName: string) => {
+      const c = bundle[fileName];
+      if (!c || c.type !== "chunk" || boot.has(fileName) || files.includes(`/${fileName}`)) return;
+      files.push(`/${fileName}`);
+      for (const imported of c.imports) visit(imported);
+    };
+    visit(chunk.fileName);
+    out[lang] = { prefix: `/${prefix}`, files };
+  }
+  const languages = readdirSync(fileURLToPath(new URL("./src/i18n", import.meta.url))).flatMap((file) => /^lang-([\w-]+)\.ts$/.exec(file)?.[1] ?? []);
+  const missing = languages.filter((lang) => !out[lang]);
+  if (languages.length === 0 || missing.length > 0) throw new Error(`no chunk for the translations of ${missing.join(", ") || "any language"} (src/i18n/lang-*.ts)`);
+  return out;
 }
 
 export default defineConfig({
@@ -119,6 +197,10 @@ export default defineConfig({
     droppenPlugins({ webRoot: fileURLToPath(new URL(".", import.meta.url)) }),
     react(),
     tailwindcss(),
+    katexWoff2Only(),
+    guardBootChunks(ON_DEMAND),
+    // No cloud code in the local app's boot; the shell preloads the cloud app's chunks where a hub serves it.
+    localBoot(),
     precacheBootSet(),
     // Static-hosting output, only with `DROPPEN_WEB_MODE=cloud` (a no-op otherwise).
     cloudBuild(cloud),
@@ -128,9 +210,15 @@ export default defineConfig({
     devTools(fileURLToPath(new URL("./dev", import.meta.url))),
   ],
   resolve: {
-    alias: {
-      "@": fileURLToPath(new URL("./src", import.meta.url)),
-    },
+    alias: [
+      { find: "@", replacement: fileURLToPath(new URL("./src", import.meta.url)) },
+      // Mermaid registers its ELK layouts behind a lazy loader that imports
+      // elkjs, which is EPL-2.0: not a licence this app ships (the allow-list
+      // in `build/third-party-notices.mjs`). The diagrams are laid out with
+      // dagre (`lib/mermaid-render.ts`); this stub is what that loader gets,
+      // and it refuses, so the block stays its code.
+      { find: /^elkjs(?:\/.*)?$/, replacement: fileURLToPath(new URL("./src/lib/elk-stub.ts", import.meta.url)) },
+    ],
   },
   server: {
     port: Number(process.env.RH_DEV_PORT ?? 5180),

@@ -1120,8 +1120,8 @@ crate 名不改。本机包名暂不改，只把 `[[bin]]` 改名为 `droppen`�
 | 两个名字 | 同一个二进制，行为不看 `argv[0]`；只有说法看：用 `droppen` 运行时帮助、用法和错误里建议的命令都写 `droppen`，帮助注明旧名仍可用；用旧名运行时一字不改 |
 | `<数据>/bin` 下的托管副本 | **不改名**：仍是 `bin/remote-hand-server` 与 `.prev`、`.bad`、`.staging-*` 阶梯，旁边加一个 `bin/droppen` 相对符号链接（安装脚本加）。长驻的 `up` 监督进程只认旧路径 |
 | 自升级 | 推送式上传，与文件名无关，不改 |
-| 数据与配置目录 | 已有安装永远用旧目录。解析顺序：`DROPPEN_DATA_DIR` > `REMOTE_HAND_DATA_DIR` > 旧目录存在就用旧目录 > `~/.local/share/droppen`。从不自动搬 |
-| 环境变量 | `RH_*`、`APP_*` 不改；`REMOTE_HAND_*` 加 `DROPPEN_*` 别名 |
+| 数据与配置目录 | 已有安装永远用旧目录。解析顺序：`DROPPEN_DATA_DIR` > `REMOTE_HAND_DATA_DIR`（旧名，v0.2.135 起不再生效） > 旧目录存在就用旧目录 > `~/.local/share/droppen`。从不自动搬 |
+| 环境变量 | 服务端自己的名字改为 `DROPPEN_*`；改名前的 `RH_*` / `REMOTE_HAND_*` 已弃用，v0.2.135 起不再生效（`APP_*` 不改） |
 | launchd | 已有的标签与 plist 不动；以后 `droppen service install` 只给新安装写 `app.droppen.<实例>.plist` |
 | 协议标识 | 不改：`rh/v1 …` 标签、`x-rh-*` 头、`"agent":"remote-hand"`、`rh-*` 存储名。三种码读的时候已经同时认 `DR1-`/`DRP1-`/`DRR1-`（和 `RH1-`/`RHP1-`/`RHR1-` 是同一个版本，大小写规则照旧），写出来的仍是 `RH1-`/`RHP1-`/`RHR1-`；什么时候改写新前缀见下面的切换顺序 |
 | 「添加能运行 AI 的电脑」的命令 | `droppen agent enroll …`，作为备用路径 |
@@ -1136,7 +1136,7 @@ crate 名不改。本机包名暂不改，只把 `[[bin]]` 改名为 `droppen`�
 2. 过一两个版本再改配对文本（`RHP1-` → `DRP1-`）。读它的是另一台设备上的页面，可能是缓存的旧页面或旧的 PWA，会说「不是配对码」；所以同时加一句提示，让对方刷新页面。
 3. 本机「登录 Droppen」弹窗交回本机页面的码，只在知道打开它的本机服务（agent）版本够新时才写 `DR1-`。旧的本机页面会把这条消息当成无效，直接忽略。
 4. 「用别的方式装的」那条从标准输入读码的命令（对方服务的版本不知道）放到最后，也可以一直不改。
-5. 中继令牌：Hub 先认（已经认了），中继都升级以后 Hub 才开始发 `DRR1-`。旧中继拿到 `DRR1-` 令牌时要另外设 `RH_RELAY_ID`。只影响运营者。
+5. 中继令牌：Hub 先认（已经认了），中继都升级以后 Hub 才开始发 `DRR1-`。旧中继（改名前的版本）拿到 `DRR1-` 令牌时要另外设 `RH_RELAY_ID`；v0.2.135 起的中继改用 `DROPPEN_RELAY_ID`。只影响运营者。
 6. 永远不去掉对 `RH1-`/`RHP1-`/`RHR1-` 的接受。
 
 ### 7.3 Tauri 应用：高保障路径（以后）
@@ -1188,7 +1188,7 @@ droppen.app 网页适合随手打开；要高保障的人用本机界面或 Taur
 - **安装脚本**：先读 `SHA256SUMS`，列了新包就下新包（取 `droppen` 成员），否则（或下载失败）下旧包（取 `remote-hand-server`）。装出来的仍是 `<数据>/bin/remote-hand-server`，与以前完全相同；plist、systemd unit、数据目录一律不动。旁边建 `droppen -> remote-hand-server`（相对链接，自升级换文件后照样指向新的；已有一个不是链接的 `droppen` 就不动它，并提示）。打印给人敲的命令（改密码、最后的 `Command:`）用 `droppen`；手动启动的 `up -- serve` 命令仍用旧路径，脚本靠这个路径认出手动启动的监督进程。卸载时连这个链接一起删。只认旧资产名的旧版脚本照常能装，所以旧资产要继续发。
 - **网页里让人敲的命令**：`GET /api/auth/status` 加 `droppenPath`——运行中二进制旁边的 `droppen`（是同一个文件才算），否则二进制本身；家目录写成 `~`，因为这个接口不登录也能读，不把账户名放出去。登录页的提示与「设置 → 访问」里的 `user add` 用它（需要时加引号）；旧服务器没有这个字段，网页说 `remote-hand-server`。
 - **droppen.app「已经用别的方式装了」的 stdin 命令**：对面服务器的版本未知（还没进账户），所以仍是 `~/.local/share/remote-hand/bin/remote-hand-server`；等 Hub 报告的账户内 agent 最低版本到了这一版再换成 `droppen`（`web/src/features/landing/get-droppen.ts` 里有 TODO）。
-- **会话里的通知命令**：`PATH` 上有 `droppen-notify` 和 `rh-notify` 两个名字（同一个脚本；脚本用 `DROPPEN_NOTIFY_AS` 把自己的名字告诉二进制，用法和错误说被敲的那个名字）。技能改名 `droppen-notify`，每次启动会话时删掉旧的 `skills/rh-notify`，CLI 只列一个。降级到旧版时旧版不认识新目录，两个会同时列出，直到再升级。
+- **会话里的通知命令**：`PATH` 上只有 `droppen-notify`；脚本 `exec` 本服务器的 `notify` 子命令，技能写在 `$CLAUDE_CONFIG_DIR/skills/droppen-notify`。0.2.125 写下的旧 `rh-notify` 脚本按绝对路径调用同一个子命令，仍然可用，只是下次启动会话时不再重写。
 - **没做**：桌面应用的 sidecar 改名；设置页的 `setup-code`、`open` 也改用 `droppenPath`；`[[bin]]` 改名、数据目录、`DROPPEN_*` 环境变量别名、`droppen service install` 留给以后。
 
 ## 8. 里程碑（按 PR 拆）
@@ -1224,7 +1224,7 @@ droppen.app 网页适合随手打开；要高保障的人用本机界面或 Taur
 
 **S1-4 实现计划**（先写计划再实现；D1–D4 照旧）
 
-- **身份**：本机这台设备就是它注册的那台 host，一个 id、一对钥：`agent/machine-key.json` 的种子展开的 Ed25519 + X25519（`DK`，§3.3）。设备角色用 `HubLogin{DeviceSession}` 换设备会话（SC-2 已允许 host 以设备身份登录；Hub 第一次时给它建 `kind: host` 的设备行）。agent 角色与设备角色靠签名标签分开，不再生成第二对钥；旧版留下的 `aggregator/device-key.json` 照旧删掉。
+- **身份**：本机这台设备就是它注册的那台 host，一个 id、一对钥：`agent/machine-key.json` 的种子展开的 Ed25519 + X25519（`DK`，§3.3）。设备角色用 `HubLogin{DeviceSession}` 换设备会话（SC-2 已允许 host 以设备身份登录；Hub 第一次时给它建 `kind: host` 的设备行）。agent 角色与设备角色靠签名标签分开，不再生成第二对钥；旧版留下的 `aggregator/device-key.json` 不再写入，每次启动（不论链接与云端状态）时删掉。
 - **交钥：谁封、何时、Hub 存什么**
   - 本机控制端（`S/aggregator/`，随链接一起起停）在三件事都成立时运行：链上它是当前设备、链接在跑、所有者没关掉聚合（命令行注册、从没在本机设置里登录过的安装默认开）。它换设备会话 → 读信箱（`GET /v1/mailbox`；Hub 只把用途 2 以外的信给设备角色）→ 用途 5 逐封用 `open_host_key` 打开：发信者必须是当前 admin、收件者是自己、钥对得上链上那一轮的提交，并且那台 host 的接受策略放它进来（D2），否则丢弃；成立的存进 `aggregator/keys.json`（目录 0700，文件 0600），再确认（`DELETE`）。链还没追上的信（提交或发信者未知）留在信箱里，链前进后再试。其它用途一律确认丢弃（它不是 admin，收不到 `UK`）。
   - **自动索钥**：接受它的某台 host 的最新一轮它没有，且这个缺口持续 20 秒（留给 admin 主动投递的时间）时，向每台当前 admin 发用途 4（无秘密，epoch 0），10 分钟至多一次；时间记在 `keys.json` 里，重启不重发。链变化时立刻再看一次信箱；有缺口时每 5 秒看一次，没有时每分钟一次（S1-5 换成 `/v1/client` 的 `mail` 推送）。

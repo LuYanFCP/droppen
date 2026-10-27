@@ -10,23 +10,19 @@
 //!
 //! # Where the accounts live
 //!
-//! In [`crate::db`], at `<config>/state.db`. `accounts.json` is read exactly
-//! once, by the import on the first boot after the upgrade, and never written
-//! again. It was a mirror for one version — `0600`, tmp+rename, key names and
-//! pretty printing kept compatible with the TypeScript store — so that a build
-//! rolled back onto this machine would still find the logins. The rollback floor
-//! has since risen to a build that reads the database, and a second copy of
-//! every OAuth refresh token is not a thing to keep on disk for a reason that no
-//! longer exists.
+//! In [`crate::db`], at `<config>/state.db`. `accounts.json` was a mirror for
+//! one version — `0600`, tmp+rename, key names and pretty printing kept
+//! compatible with the TypeScript store — so that a build rolled back onto this
+//! machine would still find the logins. The rollback floor has since risen to a
+//! build that reads the database, and a second copy of every OAuth refresh token
+//! is not a thing to keep on disk for a reason that no longer exists. Nothing
+//! reads the file any more.
 //!
-//! [`crate::auth::users`] kept its file and this one did not, which looks like
-//! an inconsistency and is not: that store's copy stopped being a rollback
-//! bridge and became a *second opinion*, because an empty users table means
-//! authentication is switched off. An empty accounts table means the user has
-//! not added a login yet, which is an ordinary answer, so nothing here needs a
-//! vote from a file. The file is left where it is rather than deleted: it is
-//! inert, and it is the cheapest way to seed a database that has to be rebuilt
-//! from scratch.
+//! [`crate::auth::users`] keeps its file and this one does not, which looks like
+//! an inconsistency and is not: that store's copy is a *second opinion*, because
+//! an empty users table means authentication is switched off. An empty accounts
+//! table means the user has not added a login yet, which is an ordinary answer,
+//! so nothing here needs a vote from a file.
 //!
 //! The split is the interesting part. Accounts are rows in `accounts`, and
 //! `sessionAccounts` is a table of its own, because the two have nothing in
@@ -39,7 +35,7 @@
 //! strings, and nothing else on the machine moves.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gotcha::Schematic;
@@ -52,17 +48,6 @@ use super::rest::{AccountRest, LimitLog};
 use crate::db::{self, Db};
 use crate::openapi_ext::{Nullable, Optional};
 use crate::sessions::{iso8601, Paths};
-
-/// The name this store's JSON file goes by in `kv`'s record of what has already
-/// been drained, and the scope its rows are staged in on the way through; see
-/// [`AccountsStore::ensure_imported`].
-const IMPORT_MARKER: &str = "accounts.json";
-
-/// What the staged rows call an account, a binding and the default, so the drain
-/// can tell three kinds of row apart in one flat map.
-const STAGED_ACCOUNT: &str = "account:";
-const STAGED_BINDING: &str = "session:";
-const STAGED_DEFAULT: &str = "default";
 
 /// Where the one setting in this store that is not a row lives.
 ///
@@ -650,8 +635,8 @@ impl StoredAccount {
     }
 }
 
-/// The shape `accounts.json` had, which is still the shape the three tables are
-/// assembled back into and the shape the import reads.
+/// The shape the three tables are assembled back into, which is the shape
+/// `accounts.json` had.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AccountsFile {
@@ -660,8 +645,8 @@ struct AccountsFile {
     accounts: Vec<StoredAccount>,
     /// Session id -> account id, for either CLI.
     session_accounts: BTreeMap<String, String>,
-    /// The other CLI's default. Never in the file — it is younger than the
-    /// import — but this shape is what the three tables are assembled into.
+    /// The other CLI's default. Never in the old file — it is younger than that
+    /// shape — but this shape is what the three tables are assembled into.
     #[serde(default)]
     default_codex_account_id: Option<String>,
 }
@@ -690,9 +675,6 @@ impl Default for AccountsFile {
 pub struct AccountsStore {
     paths: Arc<Paths>,
     db: Arc<Db>,
-    /// The JSON file is drained once per process at most; the marker in the
-    /// database makes it once per machine.
-    imported: std::sync::Once,
 }
 
 const MAX_SECRET_LENGTH: usize = 4096;
@@ -771,41 +753,6 @@ fn normalize_label(raw: &str) -> Result<String, AccountError> {
         return Err(AccountError::Invalid("the label is empty".into()));
     }
     Ok(label.chars().take(MAX_LABEL_LENGTH).collect())
-}
-
-/// Rebuild a file from arbitrary JSON, dropping anything unusable.
-///
-/// A hand-edited store must degrade to "the entries that still make sense"
-/// rather than failing every request, which is what the TypeScript's
-/// `sanitize` does.
-fn sanitize(raw: &serde_json::Value, now: &str) -> AccountsFile {
-    let mut file = AccountsFile::default();
-    let Some(object) = raw.as_object() else { return file };
-
-    if let Some(entries) = object.get("accounts").and_then(|a| a.as_array()) {
-        for entry in entries {
-            if let Some(account) = sanitize_account(entry, now) {
-                file.accounts.push(account);
-            }
-        }
-    }
-    let ids: std::collections::HashSet<&str> = file.accounts.iter().map(|a| a.id.as_str()).collect();
-
-    if let Some(id) = object.get("defaultAccountId").and_then(|v| v.as_str()) {
-        if ids.contains(id) {
-            file.default_account_id = Some(id.to_string());
-        }
-    }
-    if let Some(bindings) = object.get("sessionAccounts").and_then(|v| v.as_object()) {
-        for (session_id, account_id) in bindings {
-            if let Some(account_id) = account_id.as_str() {
-                if ids.contains(account_id) {
-                    file.session_accounts.insert(session_id.clone(), account_id.to_string());
-                }
-            }
-        }
-    }
-    file
 }
 
 /// A missing `kind` or `provider` is a row from before the field existed, and
@@ -903,9 +850,9 @@ fn read_env(raw: Option<&serde_json::Value>) -> Vec<EnvVar> {
         .iter()
         .filter_map(|entry| {
             let object = entry.as_object()?;
-            // The denylist again, on the way *in*: this array is also what the
-            // `accounts.json` import reads, and a row that named
-            // `CLAUDE_CONFIG_DIR` would move where transcripts land.
+            // The denylist again, on the way *in*: the payload column is also
+            // hand-editable, and a row that named `CLAUDE_CONFIG_DIR` would
+            // move where transcripts land.
             let key = object
                 .get("key")
                 .and_then(|v| v.as_str())
@@ -949,17 +896,7 @@ impl AccountsStore {
     /// A store rooted at the given path set, over the machine-wide database.
     pub fn new(paths: Arc<Paths>) -> Self {
         let db = db::at(paths.config_db());
-        Self {
-            paths,
-            db,
-            imported: std::sync::Once::new(),
-        }
-    }
-
-    /// Where the file the import drains lives. Still the file the rest of the
-    /// server, and every message about this store, names it by.
-    pub fn path(&self) -> PathBuf {
-        self.paths.config_dir().join("accounts.json")
+        Self { paths, db }
     }
 
     /// Per-account directory; only ever named after a validated uuid.
@@ -981,34 +918,12 @@ impl AccountsStore {
         Ok(self.account_dir(id)?.join("cwd"))
     }
 
-    /// Drain `accounts.json` into the database, once ever, before the first read.
-    ///
-    /// Staged through `kv` and then moved into the three places the file's three
-    /// halves belong, for the reason given in
-    /// [`crate::auth::users::UsersStore::ensure_imported`]: the helper that makes
-    /// an import happen exactly once writes rows into `kv`. The staging keys say
-    /// which of the three a row is; the second hop is idempotent, so a crash
-    /// between the two costs a boot rather than an account.
-    ///
-    /// What crosses is what [`sanitize`] makes of the file, which is the same
-    /// reading of it the store has always had — a malformed account is dropped
-    /// here exactly as it was dropped on every read before.
-    fn ensure_imported(&self) {
-        self.imported.call_once(|| {
-            let path = self.path();
-            self.db.import_once(IMPORT_MARKER, || staged_from_json(&path));
-            drain_staged(&self.db);
-        });
-    }
-
     /// The whole store, assembled from its three tables.
     ///
-    /// The shape the file had, because everything that reads it still wants that
-    /// shape. Assembling it is three indexed reads of a few kilobytes; the store
-    /// it replaces did a `stat`, a `read` and a parse of the same data and then
+    /// Assembling it is three indexed reads of a few kilobytes; the store it
+    /// replaces did a `stat`, a `read` and a parse of the same data and then
     /// filtered it in Rust.
     fn snapshot(&self) -> AccountsFile {
-        self.ensure_imported();
         let now = now_iso();
         self.db.read(|conn| load_file(conn, &now)).unwrap_or_else(|error| {
             tracing::error!(database = %self.db.path().display(), %error, "cannot read the accounts out of the state database");
@@ -1070,7 +985,6 @@ impl AccountsStore {
     /// Whether somebody chose the machine's own login as this CLI's default,
     /// rather than leaving the default unset (see [`LOCAL_DEFAULT`]).
     pub fn local_is_default(&self, provider: AccountProvider) -> bool {
-        self.ensure_imported();
         self.db
             .read(|conn| {
                 conn.query_row(
@@ -1118,7 +1032,6 @@ impl AccountsStore {
     /// would hand a spawn no token and let it fall through to whatever login the
     /// machine has lying about, under a label that says otherwise.
     fn stored(&self, id: &str) -> Option<StoredAccount> {
-        self.ensure_imported();
         let now = now_iso();
         self.db
             .read(|conn| {
@@ -1149,7 +1062,6 @@ impl AccountsStore {
         credential: Credential,
         rotation: Option<bool>,
     ) -> Result<Account, AccountError> {
-        self.ensure_imported();
         let kind = credential.kind();
         validate_pairing(provider, kind)?;
         let label = normalize_label(label)?;
@@ -1216,7 +1128,6 @@ impl AccountsStore {
     /// with it every `sessionAccounts` binding, so a session mid-conversation
     /// carries on under the same account with a token that works again.
     pub async fn update(&self, id: &str, patch: AccountPatch) -> Result<Option<Account>, AccountError> {
-        self.ensure_imported();
         let new_credential = patch.credential.is_some();
         let updated = self
             .db
@@ -1304,7 +1215,6 @@ impl AccountsStore {
     /// `Ok(false)` means there was no such account; a failed write is an error,
     /// not a "not found".
     pub async fn delete(&self, id: &str) -> Result<bool, AccountError> {
-        self.ensure_imported();
         // Three tables, one transaction: an account cannot survive as the thing
         // a session is still bound to, and a binding cannot outlive the
         // credential it names, however the process dies in between.
@@ -1348,7 +1258,6 @@ impl AccountsStore {
     /// *other* CLI is refused rather than stored, because a default nothing can
     /// spawn under is a setting that only fails later.
     pub async fn set_default(&self, id: Option<&str>, provider: AccountProvider) -> Result<bool, AccountError> {
-        self.ensure_imported();
         let key = provider.default_key();
         let known = self
             .db
@@ -1391,7 +1300,6 @@ impl AccountsStore {
     /// local login, or on a stand-in while it is signed out
     /// ([`super::rotation::start_choice`]).
     pub async fn clear_default(&self, provider: AccountProvider) -> Result<(), AccountError> {
-        self.ensure_imported();
         self.db
             .write(|tx| tx.execute("DELETE FROM kv WHERE scope = ?1 AND key = ?2", (SETTINGS_SCOPE, provider.default_key())))
             .map_err(store_db)?;
@@ -1403,7 +1311,6 @@ impl AccountsStore {
     /// The join is the rule the file's reader applied by hand: a binding that
     /// names an account nobody has any more is not a binding.
     pub async fn session_account_id(&self, session_id: &str) -> Option<String> {
-        self.ensure_imported();
         self.db
             .read(|conn| {
                 conn.query_row(
@@ -1449,7 +1356,6 @@ impl AccountsStore {
     /// payloads — which is exactly the sort of question the file could not be
     /// asked without reading all of it.
     pub async fn session_account_map(&self) -> BTreeMap<String, String> {
-        self.ensure_imported();
         self.db
             .read(|conn| {
                 let mut statement = conn.prepare(
@@ -1469,7 +1375,6 @@ impl AccountsStore {
     /// and re-`fsync` every account's OAuth token, and it happened every time a
     /// session was started under an account.
     pub async fn bind_session_account(&self, session_id: &str, account_id: Option<&str>, expect: AccountProvider) -> Result<(), AccountError> {
-        self.ensure_imported();
         self.db
             .write(|tx| {
                 let Some(account_id) = account_id else {
@@ -1618,7 +1523,7 @@ fn load_file(conn: &Connection, now: &str) -> rusqlite::Result<AccountsFile> {
     let accounts = load_accounts(conn, now)?;
     let ids: HashSet<&str> = accounts.iter().map(|account| account.id.as_str()).collect();
     // A default naming nothing is not a default, and a binding to nothing is
-    // dropped: the two rules `sanitize` applied to the file, applied to rows.
+    // dropped: a row that disagrees with the accounts table is not a truth.
     let default_of = |key: &str| -> rusqlite::Result<Option<String>> {
         Ok(conn
             .query_row("SELECT value FROM kv WHERE scope = ?1 AND key = ?2", (SETTINGS_SCOPE, key), |row| {
@@ -1666,91 +1571,6 @@ fn load_accounts(conn: &Connection, now: &str) -> rusqlite::Result<Vec<StoredAcc
 /// around it.
 fn payload_of(account: &StoredAccount) -> String {
     serde_json::to_string(account).unwrap_or_default()
-}
-
-/// The rows [`Db::import_once`] stages, one per account, binding and setting.
-fn staged_from_json(path: &Path) -> Vec<(String, String)> {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return Vec::new();
-    };
-    let file = sanitize(&value, &now_iso());
-    let mut staged: Vec<(String, String)> = file
-        .accounts
-        .iter()
-        .map(|account| (format!("{STAGED_ACCOUNT}{}", account.id), payload_of(account)))
-        .collect();
-    staged.extend(
-        file.session_accounts
-            .iter()
-            .map(|(session_id, account_id)| (format!("{STAGED_BINDING}{session_id}"), account_id.clone())),
-    );
-    if let Some(id) = file.default_account_id {
-        staged.push((STAGED_DEFAULT.to_string(), id));
-    }
-    staged
-}
-
-/// Move whatever is staged into the three tables, and forget it was staged.
-///
-/// `INSERT OR IGNORE` throughout, for [`Db::import_once`]'s reason: a row that is
-/// already there was written by this build and is newer than a file this build
-/// has never read from twice. The accounts are put back in creation order first,
-/// because `kv` hands rows back by key and the rowids handed out here are the
-/// order the list keeps from now on.
-fn drain_staged(db: &Db) {
-    let staged: Vec<(String, String)> = db
-        .read(|conn| {
-            let mut statement = conn.prepare("SELECT key, value FROM kv WHERE scope = ?1")?;
-            let rows = statement.query_map((IMPORT_MARKER,), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
-            Ok(rows.filter_map(Result::ok).collect())
-        })
-        .unwrap_or_default();
-    if staged.is_empty() {
-        return;
-    }
-
-    let mut accounts: Vec<StoredAccount> = Vec::new();
-    let mut bindings: Vec<(String, String)> = Vec::new();
-    let mut default: Option<String> = None;
-    for (key, value) in staged {
-        if let Some(id) = key.strip_prefix(STAGED_ACCOUNT) {
-            if let Ok(account) = serde_json::from_str::<StoredAccount>(&value) {
-                debug_assert_eq!(account.id, id);
-                accounts.push(account);
-            }
-        } else if let Some(session_id) = key.strip_prefix(STAGED_BINDING) {
-            bindings.push((session_id.to_string(), value));
-        } else if key == STAGED_DEFAULT {
-            default = Some(value);
-        }
-    }
-    accounts.sort_by(|left, right| (&left.created_at, &left.id).cmp(&(&right.created_at, &right.id)));
-
-    db.commit("the imported accounts", |tx| {
-        for account in &accounts {
-            tx.execute(
-                "INSERT OR IGNORE INTO accounts (id, payload) VALUES (?1, ?2)",
-                (&account.id, payload_of(account)),
-            )?;
-        }
-        for (session_id, account_id) in &bindings {
-            tx.execute(
-                "INSERT OR IGNORE INTO session_accounts (session_id, account_id) VALUES (?1, ?2)",
-                (session_id, account_id),
-            )?;
-        }
-        if let Some(id) = &default {
-            tx.execute(
-                "INSERT OR IGNORE INTO kv (scope, key, value) VALUES (?1, ?2, ?3)",
-                (SETTINGS_SCOPE, DEFAULT_KEY, id),
-            )?;
-        }
-        tx.execute("DELETE FROM kv WHERE scope = ?1", (IMPORT_MARKER,))?;
-        Ok(())
-    });
 }
 
 /// The fields [`AccountsStore::update`] may change; `None` means "leave it".
@@ -2087,8 +1907,9 @@ mod tests {
             .await
             .expect("create");
 
-        assert!(!store.path().exists(), "no file is created where there was none");
-        assert!(!std::fs::exists(store.path().with_extension("json.tmp")).unwrap_or(false));
+        let file = store.paths.config_dir().join("accounts.json");
+        assert!(!file.exists(), "no file is created where there was none");
+        assert!(!std::fs::exists(file.with_extension("json.tmp")).unwrap_or(false));
 
         #[cfg(unix)]
         {
@@ -2096,43 +1917,6 @@ mod tests {
             let mode = std::fs::metadata(store.paths.config_db()).expect("stat").permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "the database holds the secrets now, so it is as private as the file was");
         }
-    }
-
-    /// A file left over from before the upgrade is an input, once, and never an
-    /// output — which is what makes a hand-restored `accounts.json` a safe thing
-    /// to drop next to an empty database.
-    #[tokio::test]
-    async fn a_pre_existing_file_is_read_and_then_left_untouched() {
-        let (_dir, store) = store();
-        std::fs::create_dir_all(store.paths.config_dir()).expect("config dir");
-        let before = r#"{
-  "version": 1,
-  "accounts": [
-    {
-      "id": "11111111-1111-1111-1111-111111111111",
-      "label": "From the file",
-      "kind": "oauth_token",
-      "secret": "sk-ant-imported"
-    }
-  ],
-  "sessionAccounts": {}
-}
-"#;
-        std::fs::write(store.path(), before).expect("seed");
-
-        assert_eq!(store.list().await.len(), 1, "the import read it");
-        store
-            .create("Typed since", AccountProvider::Claude, env("ANTHROPIC_API_KEY=sk-ant-typed"))
-            .await
-            .expect("create");
-        store.delete("11111111-1111-1111-1111-111111111111").await.expect("delete");
-        assert_eq!(store.list().await.len(), 1);
-
-        assert_eq!(
-            std::fs::read_to_string(store.path()).expect("read"),
-            before,
-            "byte for byte as it was found: no new secret written into it, and no deletion applied to it"
-        );
     }
 
     /// The model picker needs to know which model a block runs, and must not
@@ -2259,43 +2043,6 @@ mod tests {
             .expect("unbind");
     }
 
-    #[tokio::test]
-    async fn a_hand_edited_store_degrades_to_its_usable_entries() {
-        let (dir, store) = store();
-        let config = dir.path().join(".config/remote-hand");
-        std::fs::create_dir_all(&config).expect("config dir");
-        std::fs::write(
-            config.join("accounts.json"),
-            r#"{
-              "version": 1,
-              "defaultAccountId": "99999999-9999-9999-9999-999999999999",
-              "accounts": [
-                {"id": "not-a-uuid", "secret": "x"},
-                {"id": "11111111-2222-3333-4444-555555555555", "secret": "sk-ant-ok"}
-              ],
-              "sessionAccounts": {"s1": "11111111-2222-3333-4444-555555555555", "s2": "gone"}
-            }"#,
-        )
-        .expect("seed");
-
-        let accounts = store.list().await;
-        assert_eq!(accounts.len(), 1, "the malformed entry is dropped, the good one survives");
-        assert_eq!(
-            accounts[0].label, "11111111-2222-3333-4444-555555555555",
-            "a missing label falls back to the id"
-        );
-        assert_eq!(
-            store.default_account_id(AccountProvider::Claude).await,
-            None,
-            "a default naming nothing is not a default"
-        );
-        assert_eq!(
-            store.session_account_id("s1").await.as_deref(),
-            Some("11111111-2222-3333-4444-555555555555")
-        );
-        assert_eq!(store.session_account_id("s2").await, None, "a binding to nothing is dropped");
-    }
-
     /// A deletion has one place to reach, and the credential is gone from the
     /// machine with it — there is no copy beside the table for it to survive in.
     #[tokio::test]
@@ -2307,7 +2054,6 @@ mod tests {
         store.delete(&account.id).await.expect("delete");
         assert_eq!(store.list().await.len(), 0);
         assert!(payloads(&store).is_empty(), "and the credential is gone from the row as well");
-        assert!(!store.path().exists(), "with nothing written out beside it");
     }
 
     /// Every account row's payload, exactly as the table holds it.
@@ -2353,77 +2099,6 @@ mod tests {
             .expect("unbind");
         assert_eq!(payloads(&store), before);
         assert_eq!(store.session_account_id("session-a").await, None);
-    }
-
-    /// The upgrade path: a machine that has been running for a year has its
-    /// accounts, its bindings and its default in a file and nothing in a
-    /// database.
-    #[tokio::test]
-    async fn an_existing_accounts_file_is_imported_once_and_then_left_alone() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let paths = Arc::new(Paths::new(dir.path().to_path_buf()));
-        std::fs::create_dir_all(paths.config_dir()).expect("config dir");
-        // Written oldest-first, as this store has always written it, with ids
-        // whose alphabetical order is the other way round: the accounts pass
-        // through a table keyed by id on the way in, and coming back out in
-        // that order would silently reshuffle everybody's list.
-        std::fs::write(
-            paths.config_dir().join("accounts.json"),
-            r#"{
-              "version": 1,
-              "defaultAccountId": "22222222-2222-2222-2222-222222222222",
-              "accounts": [
-                {
-                  "id": "22222222-2222-2222-2222-222222222222",
-                  "label": "Older",
-                  "kind": "oauth_token",
-                  "secret": "sk-ant-imported",
-                  "usageEnabled": true,
-                  "createdAt": "2023-01-01T00:00:00.000Z",
-                  "updatedAt": "2023-01-01T00:00:00.000Z"
-                },
-                {
-                  "id": "11111111-1111-1111-1111-111111111111",
-                  "label": "Newer",
-                  "kind": "api_key",
-                  "secret": "sk-ant-newer",
-                  "createdAt": "2024-01-01T00:00:00.000Z",
-                  "updatedAt": "2024-01-01T00:00:00.000Z"
-                }
-              ],
-              "sessionAccounts": {"s1": "22222222-2222-2222-2222-222222222222", "s2": "99999999-9999-9999-9999-999999999999"}
-            }"#,
-        )
-        .expect("seed");
-
-        let store = AccountsStore::new(paths.clone());
-        let listed = store.list().await;
-        assert_eq!(
-            listed.iter().map(|account| account.label.as_str()).collect::<Vec<_>>(),
-            vec!["Older", "Newer"],
-            "creation order, not the id order the staging table hands them back in"
-        );
-        assert!(listed[0].usage_enabled, "the flags came across with them");
-        assert_eq!(
-            store.default_account_id(AccountProvider::Claude).await.as_deref(),
-            Some("22222222-2222-2222-2222-222222222222")
-        );
-        assert_eq!(
-            store.session_account_id("s1").await.as_deref(),
-            Some("22222222-2222-2222-2222-222222222222"),
-            "and so did the bindings"
-        );
-        assert_eq!(store.session_account_id("s2").await, None, "a binding to nothing is still dropped");
-        assert_eq!(
-            store.account_env("22222222-2222-2222-2222-222222222222").await.expect("env").env[0].1,
-            "sk-ant-imported"
-        );
-
-        // The file is not the source of truth any more. Deleting an account and
-        // building another store over the same directory must not bring it back.
-        assert!(store.delete("11111111-1111-1111-1111-111111111111").await.expect("delete"));
-        let reopened = AccountsStore::new(paths);
-        assert_eq!(reopened.list().await.len(), 1, "drained exactly once, however many stores are built");
     }
 
     /// A row is a row on disk, not a copy in this process.

@@ -109,8 +109,8 @@ serve 那一个 pid：
   重启**（退出的是 A 的 serve 进程，A 的 supervisor 把它拉起来）；
 - 实例 B 继续跑着旧二进制，直到它自己下一次重启为止；
 - 因此「升级完成」在多实例部署里意味着「每个实例都重启过一次」。要立刻生效就逐个重启，
-  或者干脆给每个实例配一个自己的 `DROPPEN_DATA_DIR`，让它们连二进制也不共享（兼容期内把旧名
-  `REMOTE_HAND_DATA_DIR` 也设成同一个值：回滚到改名前的版本时它只认旧名，否则会落到默认目录里）。
+  或者干脆给每个实例配一个自己的 `DROPPEN_DATA_DIR`，让它们连二进制也不共享（旧名
+  `REMOTE_HAND_DATA_DIR` 已弃用，v0.2.135 起不再生效）。
 
 回滚阶梯（`.prev` → 镜像里那份）同样是共享的：A 触发的回滚会改变 B 下次重启时跑的东西。
 
@@ -137,13 +137,14 @@ to」）。不用写的：IP 地址、`localhost` 和 `*.localhost`、本地网�
 
 另外两条运维前提：
 
-- **VAPID 私钥落在 `~/.local/share/remote-hand/instances/<instance>/push.json`（`0600`）**，首次
-  有人调 `/api/push/vapid` 时才生成。它是「这台服务端的身份」，换掉等于让所有已注册设备的
+- **VAPID 私钥落在实例自己的 `state.db`（`0600`）的 `kv` 行里**
+  （`~/.local/share/remote-hand/instances/<instance>/state.db`），首次有人调
+  `/api/push/vapid` 时才生成。它是「这台服务端的身份」，换掉等于让所有已注册设备的
   订阅一次性作废；备份时要把实例目录一起带上，别只备份 `~/.config/remote-hand` 那几个。
-  订阅归属于一个 origin，所以这个文件按实例分开存：同机第二个实例有自己的密钥和自己的
-  设备列表，不会把通知推到另一个实例的 PWA 上。老版本留在 `~/.config/remote-hand/push.json`
-  的文件会在启动时被复制进实例目录一次（原文件保留不动），之后两边各自演进。
-- **`DROPPEN_PUSH_CONTACT`**（旧名 `REMOTE_HAND_PUSH_CONTACT` 也认）覆盖 VAPID 的 `sub`（RFC 8292 §2.1：push service 出事时
+  订阅归属于一个 origin，所以这个库按实例分开存：同机第二个实例有自己的密钥和自己的
+  设备列表，不会把通知推到另一个实例的 PWA 上。老版本留下的
+  `~/.config/remote-hand/push.json` 与实例目录里的 `push.json` 都不再被读入。
+- **`DROPPEN_PUSH_CONTACT`**（旧名 `REMOTE_HAND_PUSH_CONTACT` 已弃用，v0.2.135 起不再生效）覆盖 VAPID 的 `sub`（RFC 8292 §2.1：push service 出事时
   联系谁）。只接受 `mailto:` 或 `https:` 开头的值——Apple 的 push service 会直接拒掉别的
   形式——缺省是项目主页。
 
@@ -163,7 +164,7 @@ agent 跑 rh-notify ──POST /api/notify──> 本服务 ──> Bark ──>
 把 Bark 的设备密钥塞进会话环境让 agent 自己 `curl` 是最省事的写法，也正是这个模块存在的
 原因之所在——**不能那么做**：会话环境对 agent 跑的一切都可读，值会被引用进 transcript 与
 总结，一个被要求排查网络问题的 agent 会大大方方把它打出来。所以密钥只留在
-`~/.config/remote-hand/notify.json`（`0600`，与 `chat-provider.json` 同级，**全机共享**——
+`~/.config/remote-hand/state.db`（`0600`；`notify` scope，与 `chat-provider` 同级，**全机共享**——
 「你想收通知的那台手机」在哪个实例都是同一台），读接口只回掩码
 （`https://api.day.app/••••Wc31`），写接口才收明文。作为交换，服务端是唯一同时知道两头的
 一方，于是它能补上 agent 补不了的东西：会话标题，以及点开就回到那个会话的深链。
@@ -171,7 +172,7 @@ agent 跑 rh-notify ──POST /api/notify──> 本服务 ──> Bark ──>
 几条实现约束：
 
 - **鉴权**：`POST /api/notify` **不豁免**。`crate::notify::token` 给每个会话签一个无状态的
-  keyed MAC（HMAC-SHA256，密钥在上面那个文件里），在 spawn 时注进环境；`auth::guard` 在这
+  keyed MAC（HMAC-SHA256，密钥在上面那个库里），在 spawn 时注进环境；`auth::guard` 在这
   一条路径上多认这一种凭据，认出来的是 `NotifyCaller` 而不是 `AuthIdentity`——它不是身份，
   在别的任何路由上都换不到东西。无状态是因为常驻 claude 活得比服务端久，重启后没法把新的
   内存表递给一个已经在跑的进程。

@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fillServiceWorker, inlineScriptSources } from "../build/service-worker.js";
+import { pickLanguage } from "../src/i18n/match.js";
 
 const ORIGIN = "https://droppen.test";
 const SOURCE = readFileSync(new URL("../public/sw.js", import.meta.url), "utf8");
@@ -59,14 +60,28 @@ type Listener = (event: any) => void;
  * headers] or a status), `clients` that record what they were asked.
  */
 function worker(
-  opts: { network?: Record<string, [string, Record<string, string>] | number>; precache?: string[]; table?: Record<string, string>; shell?: string; scripts?: string[]; httpCache?: Record<string, string>; hub?: string } = {},
+  opts: {
+    network?: Record<string, [string, Record<string, string>] | number>;
+    precache?: string[];
+    precacheCloud?: string[];
+    languages?: Record<string, { prefix: string; files: string[] }>;
+    table?: Record<string, string>;
+    shell?: string;
+    scripts?: string[];
+    httpCache?: Record<string, string>;
+    hub?: string;
+    /** The worker's `navigator`: its `languages` and `language`. */
+    navigator?: { languages?: string[]; language?: string };
+  } = {},
 ) {
   const table = opts.table ?? { "/assets/app-1.js": sha(APP), "/assets/vendor-1.js": sha(VENDOR) };
   const text = SOURCE.replace("const PRECACHE = [];", `const PRECACHE = ${JSON.stringify(opts.precache ?? [])};`)
+    .replace("const PRECACHE_CLOUD = [];", `const PRECACHE_CLOUD = ${JSON.stringify(opts.precacheCloud ?? [])};`)
     .replace("const INTEGRITY = {};", `const INTEGRITY = ${JSON.stringify(table)};`)
     .replace('const SHELL_SHA256 = "";', `const SHELL_SHA256 = ${JSON.stringify(opts.shell ?? sha(SHELL))};`)
     .replace("const SHELL_SCRIPTS = [];", `const SHELL_SCRIPTS = ${JSON.stringify(opts.scripts ?? [])};`)
-    .replace('const HUB_ORIGIN = "";', `const HUB_ORIGIN = ${JSON.stringify(opts.hub ?? "")};`);
+    .replace('const HUB_ORIGIN = "";', `const HUB_ORIGIN = ${JSON.stringify(opts.hub ?? "")};`)
+    .replace("const LANGUAGES = {};", `const LANGUAGES = ${JSON.stringify(opts.languages ?? {})};`);
   assert.notEqual(text, SOURCE, "the markers are there to fill in");
   const stores = new Map<string, FakeCache>();
   const caches = {
@@ -82,14 +97,17 @@ function worker(
     },
   };
   const network = { ...(opts.network ?? {}) };
-  // The browser's HTTP cache: what a plain fetch gets first; `cache: "reload"` passes it by.
+  // The browser's HTTP cache: what a plain fetch gets first; `cache: "reload"`
+  // passes it by, `only-if-cached` gets nothing else (a network error without it).
   const httpCache = { ...(opts.httpCache ?? {}) };
   const fetched: string[] = [];
   const fetch = async (input: Request | string, init?: { cache?: string }) => {
     const url = new URL(typeof input === "string" ? input : input.url, ORIGIN);
     const reload = init?.cache === "reload";
-    fetched.push(`${url.pathname}${reload ? " (reload)" : ""}`);
+    const cachedOnly = init?.cache === "only-if-cached";
+    fetched.push(`${url.pathname}${reload ? " (reload)" : cachedOnly ? " (only-if-cached)" : ""}`);
     if (!reload && httpCache[url.pathname] !== undefined) return new Response(httpCache[url.pathname], { headers: JS });
+    if (cachedOnly) throw new TypeError("Failed to fetch");
     const answer = network[url.pathname];
     if (answer === undefined) throw new TypeError("Failed to fetch");
     if (typeof answer === "number") return new Response("not found", { status: answer });
@@ -112,7 +130,7 @@ function worker(
       openWindow: async (url: string) => void opened.push(url),
     },
   };
-  new Function("self", "caches", "fetch", "crypto", "navigator", text)(self, caches, fetch, globalThis.crypto, {});
+  new Function("self", "caches", "fetch", "crypto", "navigator", text)(self, caches, fetch, globalThis.crypto, opts.navigator ?? {});
 
   /** Dispatch `type` and wait for everything it waits on; the response, for a fetch. */
   async function dispatch(type: string, extra: Record<string, unknown> = {}): Promise<Response | undefined> {
@@ -198,6 +216,129 @@ test("install precaches the boot set only with the listed bytes, replacing a tam
   await sw.install();
   assert.equal(await (await sw.cache()).text("/assets/app-1.js"), APP);
   assert.equal(await (await sw.cache()).match("/assets/vendor-1.js"), undefined);
+});
+
+test("install precaches the translations of the languages this browser shows, with the listed bytes, and no other's", async () => {
+  const ZH = "export default { settings: '设置' }";
+  const JA = "export default { settings: '設定' }";
+  const languages = {
+    "zh-CN": { prefix: "/assets/lang-zh-CN-", files: ["/assets/lang-zh-CN-2.js"] },
+    ja: { prefix: "/assets/lang-ja-", files: ["/assets/lang-ja-2.js"] },
+  };
+  const table = { "/assets/app-1.js": sha(APP), "/assets/lang-zh-CN-2.js": sha(ZH), "/assets/lang-ja-2.js": sha(JA) };
+  const languageFetches = (sw: { fetched: string[] }) => sw.fetched.filter((f) => f.includes("/lang-") && !f.endsWith("(only-if-cached)"));
+
+  // The first install: the page fetched its zh-CN translations before any worker saw its requests.
+  const first = worker({ precache: ["/assets/app-1.js"], languages, table, httpCache: { "/assets/app-1.js": APP, "/assets/lang-zh-CN-2.js": ZH }, network: { "/assets/lang-ja-2.js": [JA, JS] } });
+  await first.install();
+  assert.equal(await (await first.cache()).text("/assets/lang-zh-CN-2.js"), ZH, "from the HTTP cache");
+  assert.equal(await (await first.cache()).match("/assets/lang-ja-2.js"), undefined);
+  assert.deepEqual(languageFetches(first), ["/assets/lang-zh-CN-2.js"], "ja not fetched at all");
+
+  // A release: the older build's ja chunk in the cache says this browser shows ja; the new one comes before the reload.
+  const update = worker({ precache: ["/assets/app-1.js"], languages, table, network: { "/assets/app-1.js": [APP, JS], "/assets/lang-ja-2.js": [JA, JS], "/assets/lang-zh-CN-2.js": [ZH, JS] } });
+  await (await update.cache()).put("/assets/lang-ja-1.js", new Response("export default {}", { headers: JS }));
+  await update.install();
+  assert.equal(await (await update.cache()).text("/assets/lang-ja-2.js"), JA);
+  assert.deepEqual(languageFetches(update), ["/assets/lang-ja-2.js"], "zh-CN not fetched at all");
+  await update.activate();
+  assert.equal(await (await update.cache()).match("/assets/lang-ja-1.js"), undefined, "the older chunk goes on activate");
+
+  // An English reader's browser: none.
+  const english = worker({ precache: ["/assets/app-1.js"], languages, table, network: { "/assets/app-1.js": [APP, JS], "/assets/lang-ja-2.js": [JA, JS], "/assets/lang-zh-CN-2.js": [ZH, JS] } });
+  await english.install();
+  assert.deepEqual(languageFetches(english), []);
+  assert.deepEqual((await (await english.cache()).keys()).map((r) => new URL(r.url).pathname), ["/assets/app-1.js"]);
+
+  // Bytes that are not the listed ones are not kept, from either cache or the network.
+  const tampered = worker({ precache: [], languages, table, httpCache: { "/assets/lang-zh-CN-2.js": EVIL }, network: { "/assets/lang-zh-CN-2.js": [EVIL, JS] } });
+  await tampered.install();
+  assert.equal(await (await tampered.cache()).match("/assets/lang-zh-CN-2.js"), undefined);
+});
+
+test("the first release with per-language chunks, or after the kill switch: the language the browser's own languages pick is precached", async () => {
+  const ZH = "export default { settings: '設定' }";
+  const languages = {
+    "zh-CN": { prefix: "/assets/lang-zh-CN-", files: ["/assets/lang-zh-CN-2.js"] },
+    "zh-TW": { prefix: "/assets/lang-zh-TW-", files: ["/assets/lang-zh-TW-2.js"] },
+  };
+  const table = { "/assets/app-2.js": sha(APP), "/assets/lang-zh-CN-2.js": sha("zh-CN"), "/assets/lang-zh-TW-2.js": sha(ZH) };
+  // The older build's worker kept its boot set, no language chunk among it; the page never fetched this build's.
+  const sw = worker({ precache: ["/assets/app-2.js"], languages, table, navigator: { languages: ["fr-FR", "zh-HK", "en"], language: "fr-FR" }, network: { "/assets/app-2.js": [APP, JS], "/assets/lang-zh-TW-2.js": [ZH, JS], "/assets/lang-zh-CN-2.js": ["zh-CN", JS] } });
+  await (await sw.cache()).put("/assets/app-1.js", new Response(APP, { headers: JS }));
+  await sw.install();
+  await sw.activate();
+  assert.equal(await (await sw.cache()).text("/assets/lang-zh-TW-2.js"), ZH);
+  assert.equal(await (await sw.cache()).match("/assets/lang-zh-CN-2.js"), undefined);
+  // Offline, the reload after it finds its words.
+  for (const path of Object.keys(sw.network)) delete sw.network[path];
+  assert.equal(await (await sw.get("/assets/lang-zh-TW-2.js"))!.text(), ZH);
+});
+
+test("the worker picks the browser's language by the page's own rule (match.ts)", async () => {
+  const languages = {
+    "zh-CN": { prefix: "/assets/lang-zh-CN-", files: ["/assets/lang-zh-CN-2.js"] },
+    "zh-TW": { prefix: "/assets/lang-zh-TW-", files: ["/assets/lang-zh-TW-2.js"] },
+    ja: { prefix: "/assets/lang-ja-", files: ["/assets/lang-ja-2.js"] },
+  };
+  const table = Object.fromEntries(Object.keys(languages).map((lang) => [`/assets/lang-${lang}-2.js`, sha(lang)]));
+  const network = Object.fromEntries(Object.keys(languages).map((lang): [string, [string, Record<string, string>]] => [`/assets/lang-${lang}-2.js`, [lang, JS]]));
+  const cases: [string[] | undefined, string][] = [
+    [["zh-CN"], "zh-CN"],
+    [["zh-Hant-TW"], "zh-CN"],
+    [["zh-Hans-HK", "ja"], "zh-CN"],
+    [["zh_TW"], "zh-CN"],
+    [["ZH-hk"], "zh-CN"],
+    [["zh-MO", "en"], "zh-CN"],
+    [["fr-FR", "ja-JP", "zh-CN"], "zh-CN"],
+    [["de-DE", "zh-Hant", "ja"], "zh-CN"],
+    [["en-US", "zh-CN"], "zh-CN"],
+    [["ko-KR", "es"], "zh-CN"],
+    [[], "zh-CN"],
+    [undefined, "ja"],
+    [["", "yue-Hant-HK", "jav"], "zh-CN"],
+    [["ko-KR"], "fr"],
+  ];
+  for (const [languagesOfBrowser, language] of cases) {
+    const sw = worker({ precache: [], languages, table, network, navigator: { languages: languagesOfBrowser, language } });
+    await sw.install();
+    const kept = (await (await sw.cache()).keys()).map((r) => /lang-([\w-]+)-2\.js$/.exec(new URL(r.url).pathname)?.[1]);
+    const want = pickLanguage([...(languagesOfBrowser ?? []), language]);
+    assert.deepEqual(kept, want === "en" ? [] : [want], `${JSON.stringify(languagesOfBrowser)} / ${language}: the page shows ${want}`);
+  }
+});
+
+test("install precaches the cloud app's chunks too, only on a page a hub serves", async () => {
+  const CLOUD = "export const cloud = 1;";
+  const table = { "/assets/app-1.js": sha(APP), "/assets/cloud-app-1.js": sha(CLOUD) };
+  const network = { "/assets/app-1.js": [APP, JS], "/assets/cloud-app-1.js": [CLOUD, JS] } as Record<string, [string, Record<string, string>]>;
+  const opts = { table, precache: ["/assets/app-1.js"], precacheCloud: ["/assets/cloud-app-1.js"] };
+  // A release's install where the shell kept for offline is a hub's: its page boots from the cloud chunks too.
+  const hub = worker({ ...opts, network: { ...network, "/sessions": [marked(), HTML] } });
+  await (await hub.cache()).put("/", new Response(marked(), { headers: HTML }));
+  await hub.install();
+  assert.equal(await (await hub.cache()).text("/assets/cloud-app-1.js"), CLOUD);
+  assert.equal(await (await hub.cache()).text("/assets/app-1.js"), APP);
+  assert.deepEqual(hub.fetched, ["/assets/app-1.js", "/assets/cloud-app-1.js"], "nothing fetched to tell");
+  // A local server's shell (no marker): only the local app's boot.
+  const local = worker({ ...opts, network });
+  await (await local.cache()).put("/", new Response(SHELL, { headers: HTML }));
+  await local.install();
+  assert.equal(await (await local.cache()).text("/assets/app-1.js"), APP);
+  assert.equal(await (await local.cache()).match("/assets/cloud-app-1.js"), undefined);
+  assert.deepEqual(local.fetched, ["/assets/app-1.js"]);
+  // A first install, with no shell kept yet, on a local page: it never loaded the cloud chunk, which the
+  // HTTP cache is asked for without going to the network; no shell is fetched to find out.
+  const first = worker({ ...opts, network: { ...network, "/sessions": [marked(), HTML] } });
+  await first.install();
+  assert.equal(await (await first.cache()).match("/assets/cloud-app-1.js"), undefined);
+  assert.equal(await (await first.cache()).text("/assets/app-1.js"), APP);
+  assert.deepEqual(first.fetched, ["/assets/cloud-app-1.js (only-if-cached)", "/assets/app-1.js"]);
+  // A first install on a hub's page, which loaded the cloud chunk before any worker saw its requests.
+  const firstHub = worker({ ...opts, network, httpCache: { "/assets/cloud-app-1.js": CLOUD } });
+  await firstHub.install();
+  assert.equal(await (await firstHub.cache()).text("/assets/cloud-app-1.js"), CLOUD, "from the HTTP cache");
+  assert.equal(await (await firstHub.cache()).text("/assets/app-1.js"), APP);
 });
 
 test("activate drops other caches, unlisted and tampered assets, a foreign shell and anything else", async () => {
@@ -348,10 +489,11 @@ test("the build writes every asset's sha256 and the shell's into sw.js, sorted, 
     writeFileSync(join(dir, "assets", "app-1.js"), APP);
     writeFileSync(join(dir, "assets", "fonts", "a.woff2"), "font$&$'");
     writeFileSync(join(dir, "sw.js"), SOURCE);
-    fillServiceWorker(dir, ["/assets/app-1.js"]);
+    fillServiceWorker(dir, ["/assets/app-1.js"], { cloudBoot: ["/assets/vendor-1.js"] });
     let text = readFileSync(join(dir, "sw.js"), "utf8");
     assert.match(text, /^const HUB_ORIGIN = "";$/m, "a normal build: only this origin's own marker is accepted");
     assert.match(text, /^const PRECACHE = \["\/assets\/app-1\.js"\];$/m);
+    assert.match(text, /^const PRECACHE_CLOUD = \["\/assets\/vendor-1\.js"\];$/m);
     const table = JSON.parse(/^const INTEGRITY = (\{.*\});$/m.exec(text)![1]!);
     assert.deepEqual(Object.keys(table), ["/assets/app-1.js", "/assets/fonts/a.woff2", "/assets/vendor-1.js"]);
     assert.equal(table["/assets/fonts/a.woff2"], sha("font$&$'"));
@@ -360,8 +502,23 @@ test("the build writes every asset's sha256 and the shell's into sw.js, sorted, 
     const sources = JSON.parse(/^const SHELL_SCRIPTS = (\[.*\]);$/m.exec(text)![1]!);
     assert.deepEqual(sources, [`'sha256-${createHash("sha256").update(BOOT).digest("base64")}'`]);
     assert.deepEqual(inlineScriptSources(BUILT), sources);
+    assert.match(text, /^const LANGUAGES = \{\};$/m, "no language chunks given: none");
     // Filled once: a second run finds no marker.
     assert.throws(() => fillServiceWorker(dir, []), /has no `const PRECACHE = \[\];` to fill in/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the build writes each language's translations into the worker, for it to precache the ones the browser shows", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sw-integrity-"));
+  try {
+    mkdirSync(join(dir, "assets"), { recursive: true });
+    writeFileSync(join(dir, "index.html"), BUILT);
+    writeFileSync(join(dir, "sw.js"), SOURCE);
+    const languages = { ja: { prefix: "/assets/lang-ja-", files: ["/assets/lang-ja-2.js"] } };
+    fillServiceWorker(dir, [], { languages });
+    assert.deepEqual(JSON.parse(/^const LANGUAGES = (\{.*\});$/m.exec(readFileSync(join(dir, "sw.js"), "utf8"))![1]!), languages);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

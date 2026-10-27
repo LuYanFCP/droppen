@@ -1,30 +1,27 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SourceIcon } from "@/components/source-icon";
 import { Bot, ChevronLeft, Folder, LayoutGrid, MessagesSquare, Plus, Sparkles, SquareTerminal, Terminal, X, Zap } from "lucide-react";
-import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { Suspense, useCallback, useMemo, useState, type ReactNode } from "react";
 import { localize } from "@droppen/plugin-sdk";
 import { useTranslation } from "react-i18next";
-import { ApiChatViewInner } from "@/features/chat/api-chat-view";
 import { useChatList } from "@/features/chat/chat-layout";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
-import { SessionDetailInner } from "@/features/sessions/session-detail";
-import { NewSessionView } from "@/features/sessions/new-session-view";
 import { StatusBadge } from "@/features/sessions/sessions-layout";
 import { unreadCountOf } from "@/features/sessions/session-attention";
 import { XtermPane } from "@/features/terminals/lazy-xterm-pane";
-import { FilesBrowser } from "@/features/files/files-view";
 import { useFeedSessions } from "./global-feed";
+import { ApiChatViewInner, FilesBrowser, NewSessionView, SessionDetailInner } from "./lazy-views";
 import { paneMachine, usesMachine, withMachine, type PaneContent } from "./pane-tree";
 import { MachineView } from "./machine-route";
 import { usePaneTreeMixed } from "./pane-tree-view";
+import { cloudParts } from "./cloud-parts";
 import { basename, formatRelative } from "@/lib/format";
 import { hostLocale } from "@/plugins/host";
 import { readPaneContent, storePaneContent, type PluginPaneContent } from "@/plugins/pane-content";
 import { PluginIcon } from "@/plugins/boundary";
 import { PluginPane, usePluginPaneOptions, usePluginPaneTitle } from "@/plugins/plugin-pane";
 import { DeviceChip, DevicePicker, readOnlyHere } from "@/features/machines/device-picker";
-import { AddDeviceHint } from "@/features/cloud/onboarding-hints";
 import { useApi, useHoldMachine, useHomeMachine, useMachine, useOpenMachines } from "@/lib/machines/context";
 import { isOpen, shellKind } from "@/lib/machines/registry";
 import { sessionKey, type MachineKey } from "@/lib/machines/key";
@@ -274,6 +271,7 @@ function PanePicker({
   const pluginPanes = usePluginPaneOptions();
   const locale = hostLocale();
   const several = useOpenMachines().length > 1;
+  const AddDeviceHint = cloudParts()?.AddDeviceHint;
   // Only devices something can be kept on: a pane never names one shown read-only.
   const devices = <DevicePicker value={machine} onSelect={onMachine} writable />;
 
@@ -349,7 +347,7 @@ function PanePicker({
             </span>
           </button>
           {/* droppen.app with one device that runs AI: a second one could be in a pane too (until put away). */}
-          {!several && <AddDeviceHint variant="line" className="mt-1" />}
+          {!several && AddDeviceHint && <AddDeviceHint variant="line" className="mt-1" />}
         </div>
       )}
       {level !== null && (
@@ -600,37 +598,41 @@ function PaneLeafBody({
           onReset={() => setContent({ kind: "picker" })}
         />
       )}
-      {content.kind === "files" && <FilesBrowser location={content} onNavigate={(next) => setContent({ kind: "files", ...next })} actions={paneActions} />}
-      {content.kind === "session" && (
-        <SessionDetailInner
-          key={sessionKey({ machine, source: content.source, id: content.id })}
-          source={content.source}
-          id={content.id}
-          paneActions={paneActions}
-          onArchived={() => setContent({ kind: "picker" })}
-          onOpenSession={(source, id) => setContent({ kind: "session", source, id })}
-        />
-      )}
-      {content.kind === "new-session" && (
-        <NewSessionView
-          key={`new-session/${machine}`}
-          paneActions={paneActions}
-          onCreated={(source, id) => setContent({ kind: "session", source, id })}
-          onDevice={(next) => setContent({ kind: "new-session" }, next)}
-        />
-      )}
-      {content.kind === "chat" &&
-        (content.chatKind === "api" ? (
-          <ApiChatViewInner key={content.id} id={content.id} />
-        ) : (
+      {/* Files, sessions and chats are loaded the first time one is shown
+          (`lazy-views.ts`); a chunk that fails is the pane's error boundary's. */}
+      <Suspense fallback={null}>
+        {content.kind === "files" && <FilesBrowser location={content} onNavigate={(next) => setContent({ kind: "files", ...next })} actions={paneActions} />}
+        {content.kind === "session" && (
           <SessionDetailInner
-            key={`${content.chatKind}/${content.id}`}
-            source={content.chatKind}
+            key={sessionKey({ machine, source: content.source, id: content.id })}
+            source={content.source}
             id={content.id}
-            chat
             paneActions={paneActions}
+            onArchived={() => setContent({ kind: "picker" })}
+            onOpenSession={(source, id) => setContent({ kind: "session", source, id })}
           />
-        ))}
+        )}
+        {content.kind === "new-session" && (
+          <NewSessionView
+            key={`new-session/${machine}`}
+            paneActions={paneActions}
+            onCreated={(source, id) => setContent({ kind: "session", source, id })}
+            onDevice={(next) => setContent({ kind: "new-session" }, next)}
+          />
+        )}
+        {content.kind === "chat" &&
+          (content.chatKind === "api" ? (
+            <ApiChatViewInner key={content.id} id={content.id} />
+          ) : (
+            <SessionDetailInner
+              key={`${content.chatKind}/${content.id}`}
+              source={content.chatKind}
+              id={content.id}
+              chat
+              paneActions={paneActions}
+            />
+          ))}
+      </Suspense>
       {content.kind === "terminal" &&
         (terminalGone ? (
           <MissingContent note={tr("this terminal has exited")} onReset={() => setContent({ kind: "picker" })} />

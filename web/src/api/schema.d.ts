@@ -1340,28 +1340,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/plugins/{id}/notices/{notice}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /**
-         * Dismiss a plugin notice
-         * @description Dismiss one of a plugin's notices (a merged Excel ledger, say) once it
-         *     has been read. A problem that is still there (a failing write-back) cannot
-         *     be dismissed: it goes when it is fixed.
-         */
-        delete: operations["dismiss_plugin_notice"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/prefs": {
         parameters: {
             query?: never;
@@ -3587,6 +3565,11 @@ export interface components {
             /** @description The four buckets added up. */
             total: number;
         };
+        /**
+         * @description How a Mermaid diagram in a message renders.
+         * @enum {string}
+         */
+        DiagramStyle: "rendered" | "source";
         /** @description The Droppen accounts stored for one CLI. */
         DroppenAccounts: {
             /** @description The label of the one new sessions follow, if one is the default. */
@@ -3957,6 +3940,11 @@ export interface components {
          * @enum {string}
          */
         LoginState: "signed-in" | "signed-out" | "unknown";
+        /**
+         * @description How LaTeX math in a message renders.
+         * @enum {string}
+         */
+        MathStyle: "rendered" | "source";
         /** @description One message's receipt. */
         MessageReceipt: {
             /** @description When the status last changed, ISO-8601. */
@@ -4259,11 +4247,14 @@ export interface components {
         PluginNotice: {
             /** @description When, ISO-8601. */
             at: string;
-            /** @description Whether it may be dismissed; a problem still there goes when it is fixed. */
+            /**
+             * @description Whether a client may dismiss it. Kept for the wire contract; a store
+             *     reset goes away when the user clears its file.
+             */
             dismissible: boolean;
-            /** @description What `DELETE /api/plugins/{id}/notices/{notice}` names. */
+            /** @description Stable while the notice exists. */
             id: string;
-            /** @description `import`, `writeBack`, `reconcile` or `storeReset`. */
+            /** @description What it is about (`storeReset`). */
             kind: string;
             /** @description For people. */
             text: string;
@@ -4295,8 +4286,8 @@ export interface components {
                 [key: string]: string;
             });
             /**
-             * @description A problem that does not stop it working: a failed legacy write-back, a
-             *     store that had to be reset. Every notice's text, joined.
+             * @description A problem that does not stop it working: today, a store that had to be
+             *     reset. Every notice's text, joined.
              */
             notice: string | null;
             /** @description Every notice, oldest first. */
@@ -4332,10 +4323,14 @@ export interface components {
         Prefs: {
             /** @description What sends a composer message. */
             composerSend: components["schemas"]["ComposerSend"];
+            /** @description How a Mermaid diagram in a message renders; a body without it means `rendered`. */
+            diagrams?: components["schemas"]["DiagramStyle"];
             /** @description UI scale. */
             fontSize: components["schemas"]["FontSize"];
             /** @description UI language; `auto` follows the browser locale. */
             language: components["schemas"]["Language"];
+            /** @description How LaTeX math in a message renders; a body without it means `rendered`. */
+            math?: components["schemas"]["MathStyle"];
             /** @description How the session list is grouped. */
             sessionGrouping: components["schemas"]["SessionGrouping"];
             /** @description How transcripts render. */
@@ -8693,47 +8688,6 @@ export interface operations {
             };
             /** @description `forced_by_config`: the configuration pins it; the switch is read-only */
             409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Error"];
-                };
-            };
-        };
-    };
-    dismiss_plugin_notice: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-                notice: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The plugin's status without that notice */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PluginStatus"];
-                };
-            };
-            /** @description `invalid`: the notice goes away by itself once its problem is fixed */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Error"];
-                };
-            };
-            /** @description `plugin_not_found`, or no such notice */
-            404: {
                 headers: {
                     [name: string]: unknown;
                 };
