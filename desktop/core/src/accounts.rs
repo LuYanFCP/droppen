@@ -160,9 +160,9 @@ impl Cli {
     ///
     /// An existing **user** account of that name is turned into an
     /// app-internal one (`user mark-app`) rather than added again, which would
-    /// fail and leave the app unable to start: on a new instance, an inherited
-    /// account that happens to have the app's name (the first launch gives it
-    /// a new password).
+    /// fail and leave the app unable to start: an account made before the app's
+    /// login was app-internal can carry the app's name (the first launch then
+    /// gives it a new password).
     pub fn ensure(&self, credential: &Credential, reset_password: bool) -> Result<Ensured, String> {
         let name = credential.username.as_str();
         let password = Some(credential.password.as_str());
@@ -225,17 +225,15 @@ impl Cli {
     /// Remove every account on the instance but `keep` — every user account
     /// and every other app-internal one — returning the names removed.
     ///
-    /// For a new instance only, right after the app's own account exists. A
-    /// new instance on a device that already has accounts inherits them, once
-    /// ever (`server-rs/src/auth/users.rs`, "What an instance inherits") — on a
-    /// shared Mac that can be another person's login, which has no business
-    /// opening the app's server. The server removes an account from one
-    /// instance and from nothing else (the machine-wide set stays as it is),
-    /// and because the inheritance is marked as done in the same transaction
-    /// it never comes back. `keep` must be an app-internal account already,
-    /// so the app's window can always sign in. Every removal passes `--yes`,
-    /// which the server asks for before it removes an instance's last user
-    /// account.
+    /// This finishes the cleanup an older build's first start may have left:
+    /// such a build inherited the machine-wide accounts into a new instance
+    /// and removed them right after creating its own account, so an instance
+    /// whose first start was cut short in between still has them, with the
+    /// marker saying so. Every start retries until they are gone; an instance
+    /// created by this build has nothing but `keep` to begin with. `keep` must
+    /// be an app-internal account already, so the app's window can always sign
+    /// in. Every removal passes `--yes`, which the server asks for before it
+    /// removes an instance's last user account.
     pub fn prune_others(&self, keep: &str) -> Result<Vec<String>, String> {
         let apps = self.list(Kind::App)?;
         if !apps.iter().any(|name| name == keep) {
@@ -864,9 +862,10 @@ esac
     }
 
     #[test]
-    fn an_inherited_account_with_the_apps_name_becomes_the_apps_with_a_new_password() {
-        // A new instance inherits the device's accounts; one named droppen-app
-        // is made the app's on this instance only, rather than failing to add.
+    fn a_user_account_with_the_apps_name_becomes_the_apps_with_a_new_password() {
+        // An account made before the app's login was app-internal can carry the
+        // app's name; it is made the app's on this instance only, rather than
+        // failing to add.
         let dir = tempfile::tempdir().expect("tempdir");
         seed(dir.path(), &[(APP_ACCOUNT, "user")]);
         let cli = cli(dir.path());
@@ -879,8 +878,8 @@ esac
     #[test]
     fn a_new_instance_keeps_only_the_apps_account() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // Inherited from the device's machine-wide set: people's logins, and
-        // an app-internal account that is not this app's.
+        // Left by an older build's first start: people's logins, and an
+        // app-internal account that is not this app's.
         seed(
             dir.path(),
             &[("someone-else", "user"), ("ada", "user"), ("third", "user"), ("stray-app", "app")],
