@@ -14,7 +14,6 @@ export const welcomeZhCN: Record<string, string> = {
   "Where to use it": "在哪里用", // shell.step.where
   "First session": "第一个会话", // shell.step.first
   "Finishing up": "收尾", // shell.step.wrap
-  "done": "完成", // shell.state.done
   "skipped": "已跳过", // shell.state.skipped
   "Every step can be skipped and changed later in Settings.": "每一步都能跳过，之后都能在「设置」里改。", // shell.railFoot
   "Offline. Installing, signing in and Droppen need the internet; everything else works.": "现在没有联网：安装、登录和 Droppen 需要联网，其它都能用。", // shell.offline
@@ -44,7 +43,6 @@ export const welcomeZhCN: Record<string, string> = {
   "checking": "检查中", // tools.st.checking
   "not installed": "未安装", // tools.st.notInstalled
   "installing": "安装中", // tools.st.installing
-  "failed": "失败", // tools.st.failed
   "not signed in": "未登录", // tools.st.signedOut
   "signing in": "登录中", // tools.st.signingIn
   "ready": "已就绪", // tools.st.ready
@@ -110,7 +108,6 @@ export const welcomeZhCN: Record<string, string> = {
   "Developer tools (git)": "开发者工具（git）", // tools.git
   "Claude Code and Codex use git in code projects. Without it, macOS interrupts the first session to install Apple's Command Line Tools; you can get that done now.": "Claude Code 和 Codex 在代码项目里会用 git。没装的话，macOS 会在第一个会话里弹窗要你安装 Apple 的命令行工具；可以现在先装好。", // tools.git.body
   "Install (Apple)": "安装（Apple 官方）", // tools.git.install
-  "installed": "已安装", // tools.git.ready
   "optional": "可选", // tools.optional
   "Add accounts to Droppen (advanced)": "把账号加到 Droppen（高级）", // tools.adv
   "For switching accounts automatically when one runs out of quota, or paying through an API key or a company gateway. Most people don't need this. Keys stay on this device and are never shown again.": "适合额度用完时自动换号，或者用 API key、公司网关计费。大多数人用不到。密钥只存在这台设备上，存好后不再显示。", // tools.adv.body
@@ -226,7 +223,6 @@ export const welcomeZhCN: Record<string, string> = {
   "Run setup again": "重新运行", // after.settings.rerun
   "Claude Code is signed in. You can go back to Droppen.": "Claude Code 已登录，可以回到 Droppen 了。", // after.signedInToast
   // Step 02 · Where to use it (A.4)
-  "Signing in from the app is coming soon": "很快就能在应用里登录", // where.droppen.soon
   "This Mac stays in your Droppen account. To take it out, use Settings → Access → Droppen.": "这台 Mac 仍在你的 Droppen 账户里。要把它移出，请到 设置 → 访问 → Droppen。", // where.local.stays (as built)
   "This window cannot sign this device in. See Settings → Access → Droppen.": "这个窗口不能让这台设备登录。请看 设置 → 访问 → Droppen。", // where.unavailable (as built)
   // Step 04 · Finishing up (A.6)
