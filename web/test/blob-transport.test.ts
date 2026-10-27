@@ -11,9 +11,10 @@ import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { directTransport, type Transport } from "../src/lib/transport/index.js";
 import { homeMachine, openMachine, transportFor } from "../src/lib/machines/registry.js";
-import { BlobCache, BlobError, BLOB_LIMITS, dispositionName, fetchBlob, formatLimit, sendUpload } from "../src/lib/transport/blob.js";
+import { formatBytes } from "../src/lib/format.js";
+import { BlobCache, BlobError, BLOB_LIMITS, dispositionName, fetchBlob, sendUpload } from "../src/lib/transport/blob.js";
 import { BLOB_UPLOAD_MAX, BodyTooLargeError } from "../src/lib/transport/tunnel.js";
-import { offlineTransport } from "../src/features/cloud/offline-transport.js";
+import { offlineTransport } from "../src/lib/transport/offline.js";
 import { fakeMachine, json } from "./fake-machine.js";
 
 const MiB = 1024 * 1024;
@@ -128,7 +129,7 @@ test("an upload past 64 MB is refused before anything is sent; under it rides th
   await assert.rejects(sendUpload(big(), BLOB_LIMITS.upload + 1, transportFor(homeMachine())), (error: unknown) => {
     assert.ok(error instanceof BlobError);
     assert.equal(error.kind, "tooLarge");
-    assert.equal(formatLimit(error.limit!), "64 MB");
+    assert.equal(formatBytes(error.limit!, true), "64 MB");
     return true;
   });
   assert.equal(machine.exchanges.length, 0, "nothing went out");
@@ -219,7 +220,7 @@ test("the picture cache: least recently used out first, by count and by bytes; l
 });
 
 test("cloud mode's switching transport: the copy's 503 while offline, the machine's blob lane once live, and a word on each switch", async () => {
-  const { SwitchingTransport } = await import("../src/features/cloud/cloud-transport.js");
+  const { SwitchingTransport } = await import("../src/lib/transport/switching.js");
   const machine = fakeMachine(() => ({ status: 200, headers: [["content-type", "image/png"]], chunks: ["png"] }));
   const offline = offlineTransport(null, { user: null, messages: { readOnly: "", noCopy: "", unavailable: "offline" } });
   const switching = new SwitchingTransport({ live: machine.transport, offline }, "offline");

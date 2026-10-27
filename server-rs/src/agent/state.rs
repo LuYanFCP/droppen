@@ -14,28 +14,32 @@
 //!   next to it ([`super::FileSeedStore`]).
 //!
 //! A missing `state.json` means "not enrolled", and then nothing in this
-//! module runs: the server is exactly today's single-machine server.
+//! module runs: the server is a single-machine server.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rh_proto::chain::{Attestation, ChainClock, ChainState, Entry, TrustRoot};
 use rh_proto::noise::ReplayGuard;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use super::hub::hex;
+use super::link::unhex;
 use crate::sessions::Paths;
 
 const VERSION: u32 = 1;
 
-/// `<instance dir>/agent/state.json`.
-pub fn state_path(paths: &Paths) -> PathBuf {
-    paths.instance_dir().join("agent").join("state.json")
-}
+impl Paths {
+    /// `<instance dir>/agent/state.json`.
+    pub fn agent_state_path(&self) -> PathBuf {
+        self.instance_dir().join("agent").join("state.json")
+    }
 
-/// `<instance dir>/agent/machine-keys.json`.
-pub fn keys_path(paths: &Paths) -> PathBuf {
-    paths.instance_dir().join("agent").join("machine-keys.json")
+    /// `<instance dir>/agent/machine-keys.json`.
+    pub fn agent_keys_path(&self) -> PathBuf {
+        self.instance_dir().join("agent").join("machine-keys.json")
+    }
 }
 
 /// The file's shape.
@@ -119,12 +123,12 @@ pub struct RotationNote {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_ms: Option<u64>,
     /// When its own verified chain renewed this machine to keys only a staged
-    /// seed that does not read may hold (R6 review): never taken for a
+    /// seed that does not read may hold: never taken for a
     /// replacement elsewhere; the link stops until the file is put right.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unreadable_ms: Option<u64>,
     /// A renewed key was promoted and the push keys have not been renewed
-    /// with it yet (R6 review): the next link start makes a new VAPID
+    /// with it yet: the next link start makes a new VAPID
     /// keypair and forgets every stored push subscription.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub push_renew: bool,
@@ -152,15 +156,15 @@ pub const MAX_CHANGES: usize = 8;
 pub const ALARM_REPEAT_MS: u64 = 60 * 60 * 1000;
 /// At most this many alarms of any kind within [`ALARM_REPEAT_MS`]: alarms
 /// whose text varies (another device id, another seq) cannot flood every
-/// device's notifications (M2 re-review N3).
+/// device's notifications.
 pub const MAX_ALARMS_PER_WINDOW: usize = 4;
 
 /// The most devices [`AgentState::note_controller`] keeps; one more evicts
 /// the one seen first, and the record starts again at the chain seq of then.
 pub const MAX_CONTROLLERS: usize = 256;
 
-/// Which devices ever opened a channel to this machine, as this agent saw it
-/// (review D3), published in the encrypted status stream as evidence: when a
+/// Which devices ever opened a channel to this machine, as this agent saw it,
+/// published in the encrypted status stream as evidence: when a
 /// device that could control this machine no longer can, the page asks for
 /// the machine to be enrolled again and says whether that device ever
 /// connected. Evidence, never a reason to stay quiet: a device that did
@@ -221,7 +225,7 @@ pub enum Recorded {
 /// Something every device must hear about: this agent was served a device
 /// chain that conflicts with its own (a fork, a rollback, another genesis).
 /// Kept in `state.json`, published in the encrypted status stream and on
-/// `/rh/info`, and pushed (M2 re-review: it used to be logged only).
+/// `/rh/info`, and pushed: a fork must reach every device, not only the log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Alarm {
@@ -285,20 +289,6 @@ pub struct AgentState {
     pub(crate) between_note_and_save: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
-fn hex(data: &[u8]) -> String {
-    data.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn unhex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
-        .collect()
-}
-
 impl AgentState {
     /// A new enrollment: nothing verified yet but the pinned fingerprint.
     pub fn enrolling(hub: &str, account: &str, machine: &str, fingerprint: [u8; 16], now_ms: u64) -> Self {
@@ -335,7 +325,7 @@ impl AgentState {
     /// account (enrollment is complete) — whether or not it runs AI now: a
     /// member that stopped running AI (chain v3 `SetHost false`) is still
     /// enrolled ([`AgentState::not_hosting`]), and nothing takes it for an
-    /// enrollment waiting for a device (chain v3 review, finding 12).
+    /// enrollment waiting for a device.
     pub fn enrolled(&self) -> bool {
         self.chain.as_ref().is_some_and(|c| c.device(&self.machine).is_some())
     }
@@ -406,7 +396,7 @@ impl AgentState {
     /// fails) taking the note back are one step under whatever lock holds
     /// this state: what is in memory is only ever what was saved, so "on the
     /// record already" never means another handshake's note that is not on
-    /// disk (review: concurrent hub, relay and direct admissions).
+    /// disk (concurrent hub, relay and direct admissions).
     pub fn record_controller(&mut self, paths: &Paths, device: &str, now_ms: u64) -> Recorded {
         let noted = self.note_controller(device, now_ms);
         #[cfg(test)]
@@ -501,10 +491,10 @@ impl AgentState {
     /// pins the genesis hash too; later batches apply as far as they verify
     /// ([`ChainState::merge_partial`]).
     ///
-    /// What took effect is reported even when the batch stops short (M2
-    /// re-review): the caller alerts about every entry in `news`, closes the
-    /// channels of devices it removed and saves — a join followed by a spoiled
-    /// entry, or by a self-activation that is too early here, is still a join.
+    /// What took effect is reported even when the batch stops short: the
+    /// caller alerts about every entry in `news`, closes the channels of
+    /// devices it removed and saves — a join followed by a spoiled entry, or
+    /// by a self-activation that is too early here, is still a join.
     pub fn absorb(&mut self, entries: &[Entry], now_ms: u64) -> Absorbed {
         self.clock.set_now(now_ms);
         match &mut self.chain {
@@ -628,7 +618,7 @@ impl AgentState {
 
     /// The saved state, re-verified; `None` when this instance was never enrolled.
     pub fn load(paths: &Paths) -> Result<Option<Self>, String> {
-        let path = state_path(paths);
+        let path = paths.agent_state_path();
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -740,7 +730,7 @@ impl AgentState {
             rotation: self.rotation.clone(),
         };
         let bytes = serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())?;
-        super::write_private(&state_path(paths), &bytes)
+        super::write_private(&paths.agent_state_path(), &bytes)
     }
 }
 
@@ -750,74 +740,77 @@ struct KeysFile {
     epochs: BTreeMap<u32, String>,
 }
 
-/// Store machine-key epoch `epoch`.
-pub fn store_machine_key(paths: &Paths, epoch: u32, key: &[u8]) -> Result<(), String> {
-    let path = keys_path(paths);
-    let mut file: KeysFile = match std::fs::read(&path) {
-        Ok(bytes) => {
-            super::check_private(&path)?;
-            serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => KeysFile::default(),
-        Err(e) => return Err(format!("{}: {e}", path.display())),
-    };
-    file.epochs.insert(epoch, hex(key));
-    let bytes = Zeroizing::new(serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())?);
-    super::write_private(&path, &bytes)
-}
-
-/// Every machine-key epoch this agent holds (empty until a device delivered one).
-pub fn load_machine_keys(paths: &Paths) -> Result<BTreeMap<u32, Zeroizing<[u8; 32]>>, String> {
-    let path = keys_path(paths);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => Zeroizing::new(bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(e) => return Err(format!("{}: {e}", path.display())),
-    };
-    super::check_private(&path)?;
-    let file: KeysFile = serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-    file.epochs
-        .iter()
-        .map(|(epoch, key)| {
-            let raw = Zeroizing::new(unhex(key).ok_or_else(|| format!("{}: a key that is not hex", path.display()))?);
-            let key: [u8; 32] = raw
-                .as_slice()
-                .try_into()
-                .map_err(|_| format!("{}: a key that is not 32 bytes", path.display()))?;
-            Ok((*epoch, Zeroizing::new(key)))
-        })
-        .collect()
-}
-
-/// What an earlier enrollment of this instance left that is not the new
-/// one's: its machine keys (`machine-keys.json`) and its streams' store
-/// (`streams.db`). A new enrollment mints a new machine id with new keys; the
-/// old file's epochs must never be what the writer seals under (M2 re-review).
-/// Gone files are fine.
-pub fn forget_enrollment_leftovers(paths: &Paths) -> Result<(), String> {
-    let store = super::streams::store::path(paths);
-    // The process's connection to the old store goes with it, or the next
-    // open would hand it back (the file deleted, its rows not).
-    crate::db::forget(&store);
-    let mut leftovers = vec![keys_path(paths), store.clone()];
-    for suffix in ["-wal", "-shm"] {
-        let mut name = store.clone().into_os_string();
-        name.push(suffix);
-        leftovers.push(PathBuf::from(name));
-    }
-    for path in leftovers {
-        match std::fs::remove_file(&path) {
-            Ok(()) => tracing::info!(path = %path.display(), "removed what an earlier enrollment left"),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+impl Paths {
+    /// Store machine-key epoch `epoch`.
+    pub fn store_machine_key(&self, epoch: u32, key: &[u8]) -> Result<(), String> {
+        let path = self.agent_keys_path();
+        let mut file: KeysFile = match std::fs::read(&path) {
+            Ok(bytes) => {
+                super::check_private(&path)?;
+                serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => KeysFile::default(),
             Err(e) => return Err(format!("{}: {e}", path.display())),
-        }
+        };
+        file.epochs.insert(epoch, hex(key));
+        let bytes = Zeroizing::new(serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())?);
+        super::write_private(&path, &bytes)
     }
-    Ok(())
-}
 
-/// Whether `path`'s parent exists — enrollment state is per instance.
-pub fn exists(paths: &Paths) -> bool {
-    Path::new(&state_path(paths)).exists()
+    /// Every machine-key epoch this agent holds (empty until a device delivered one).
+    pub fn load_machine_keys(&self) -> Result<BTreeMap<u32, Zeroizing<[u8; 32]>>, String> {
+        let path = self.agent_keys_path();
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => Zeroizing::new(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        super::check_private(&path)?;
+        let file: KeysFile = serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        file.epochs
+            .iter()
+            .map(|(epoch, key)| {
+                let raw = Zeroizing::new(unhex(key).ok_or_else(|| format!("{}: a key that is not hex", path.display()))?);
+                let key: [u8; 32] = raw
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| format!("{}: a key that is not 32 bytes", path.display()))?;
+                Ok((*epoch, Zeroizing::new(key)))
+            })
+            .collect()
+    }
+
+    /// What an earlier enrollment of this instance left that is not the new
+    /// one's: its machine keys (`machine-keys.json`) and its streams' store
+    /// (`streams.db`). A new enrollment mints a new machine id with new keys;
+    /// the old file's epochs must never be what the writer seals under.
+    /// Gone files are fine.
+    pub fn forget_enrollment_leftovers(&self) -> Result<(), String> {
+        let store = self.streams_db_path();
+        // The process's connection to the old store goes with it, or the next
+        // open would hand it back (the file deleted, its rows not).
+        crate::db::forget(&store);
+        let mut leftovers = vec![self.agent_keys_path(), store.clone()];
+        for suffix in ["-wal", "-shm"] {
+            let mut name = store.clone().into_os_string();
+            name.push(suffix);
+            leftovers.push(PathBuf::from(name));
+        }
+        for path in leftovers {
+            match std::fs::remove_file(&path) {
+                Ok(()) => tracing::info!(path = %path.display(), "removed what an earlier enrollment left"),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("{}: {e}", path.display())),
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether this instance has agent state (`agent/state.json`): enrollment
+    /// state is per instance.
+    pub fn has_agent_state(&self) -> bool {
+        self.agent_state_path().exists()
+    }
 }
 
 #[cfg(test)]
@@ -871,7 +864,7 @@ mod tests {
         assert_eq!(loaded.clock.first_seen().get(&1), Some(&6_000), "the agent's own first sighting survives");
 
         // A saved chain that no longer verifies is refused, not trusted.
-        let path = state_path(&paths);
+        let path = paths.agent_state_path();
         let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let tampered = v["chain"][1].as_str().unwrap().replacen('0', "1", 1);
         v["chain"][1] = serde_json::Value::String(tampered);
@@ -906,11 +899,11 @@ mod tests {
         assert!(fresh.absorb(&[other_genesis], 0).error.is_some(), "the genesis hash is pinned too");
     }
 
-    /// The partial-merge PoC, at the agent: the hub sends `[RecoveryJoin,
+    /// The partial-merge case, at the agent: the hub sends `[RecoveryJoin,
     /// <a spoiled entry>]`. The join took effect, so it is news — alerted
     /// about, saved, with this agent's own first sighting — though the batch
-    /// stopped short. (It used to come back as a bare `Err`, and the link
-    /// raised nothing, closed nothing and saved nothing.)
+    /// stopped short: a bare `Err` would raise nothing, close nothing and save
+    /// nothing.
     #[test]
     fn a_batch_that_stops_short_still_reports_and_keeps_what_took_effect() {
         use rh_proto::chain::{recovery_keys, RecoveryKey};
@@ -1059,7 +1052,7 @@ mod tests {
         assert!(st.note_alarm(1_000, "the hub served a fork"));
         assert!(!st.note_alarm(2_000, "the hub served a fork"), "the same alarm within the hour");
         assert!(st.note_alarm(1_000 + ALARM_REPEAT_MS, "the hub served a fork"), "again an hour on");
-        // M2 re-review N3: alarms whose text varies are still few an hour.
+        // Alarms whose text varies are still few an hour.
         let later = 10 * ALARM_REPEAT_MS;
         let raised = (0..20)
             .filter(|i| st.note_alarm(later, &format!("device d-{i}'s view conflicts")))
@@ -1116,7 +1109,7 @@ mod tests {
         let mut st = AgentState::enrolling("wss://hub.example", "a-1", "m-1", fp, 0);
         st.absorb(&entries, 0);
         st.save(&paths).unwrap();
-        let path = state_path(&paths);
+        let path = paths.agent_state_path();
         let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let map = v.as_object_mut().unwrap();
         for key in ["controllers", "controllers_from", "controllers_from_ms"] {
@@ -1172,7 +1165,7 @@ mod tests {
         assert_eq!(st.record_controller(&paths, "d-1", 2_000), Recorded::Known);
         let before = st.controllers().unwrap();
         // Saves fail: the file's place is taken.
-        let path = state_path(&paths);
+        let path = paths.agent_state_path();
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir_all(path.join("in-the-way")).unwrap();
         assert!(matches!(st.record_controller(&paths, "d-2", 3_000), Recorded::Unsaved(_)));
@@ -1188,34 +1181,35 @@ mod tests {
     fn machine_keys_round_trip_by_epoch() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::for_instance(dir.path().to_path_buf(), "agentkeys");
-        assert!(load_machine_keys(&paths).unwrap().is_empty());
-        store_machine_key(&paths, 0, &[1; 32]).unwrap();
-        store_machine_key(&paths, 2, &[2; 32]).unwrap();
-        let keys = load_machine_keys(&paths).unwrap();
+        assert!(paths.load_machine_keys().unwrap().is_empty());
+        paths.store_machine_key(0, &[1; 32]).unwrap();
+        paths.store_machine_key(2, &[2; 32]).unwrap();
+        let keys = paths.load_machine_keys().unwrap();
         assert_eq!(keys.keys().copied().collect::<Vec<_>>(), vec![0, 2]);
         assert_eq!(*keys[&2], [2; 32]);
     }
 
-    /// M2 re-review: `agent enroll` after a re-enrollment kept the old
-    /// `machine-keys.json`, and the writer sealed under its newest epoch.
+    /// A new enrollment forgets what the last one left: its
+    /// `machine-keys.json` (the writer would seal under that file's newest
+    /// epoch) and its `streams.db` with `-wal`.
     #[test]
     fn a_new_enrollment_forgets_the_last_ones_keys_and_streams() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::for_instance(dir.path().to_path_buf(), "agentreenroll");
-        store_machine_key(&paths, 7, &[7; 32]).unwrap();
-        let store = super::super::streams::store::path(&paths);
+        paths.store_machine_key(7, &[7; 32]).unwrap();
+        let store = paths.streams_db_path();
         std::fs::write(&store, b"old").unwrap();
         std::fs::write(format!("{}-wal", store.display()), b"old").unwrap();
-        forget_enrollment_leftovers(&paths).unwrap();
-        assert!(load_machine_keys(&paths).unwrap().is_empty());
+        paths.forget_enrollment_leftovers().unwrap();
+        assert!(paths.load_machine_keys().unwrap().is_empty());
         assert!(!store.exists());
         assert!(!std::path::Path::new(&format!("{}-wal", store.display())).exists());
-        forget_enrollment_leftovers(&paths).unwrap();
+        paths.forget_enrollment_leftovers().unwrap();
     }
 
     #[test]
     fn hex_round_trips() {
-        assert_eq!(unhex(&hex(&[1, 2, 0xfe])).unwrap(), vec![1, 2, 0xfe]);
-        assert!(unhex("0").is_none());
+        assert_eq!(super::unhex(&super::hex(&[1, 2, 0xfe])).unwrap(), vec![1, 2, 0xfe]);
+        assert!(super::unhex("0").is_none());
     }
 }

@@ -31,19 +31,8 @@ import { zhCN } from "../src/i18n/zh-CN.js";
 import { zhTW } from "../src/i18n/zh-TW.js";
 import i18next from "./i18n-all.js";
 import { createV2Genesis, FakeKeysHub } from "./fake-keys-hub.js";
+import { MemoryStorage } from "./storage.js";
 
-class MemoryStorage {
-  values = new Map<string, string>();
-  getItem(key: string) {
-    return this.values.get(key) ?? null;
-  }
-  setItem(key: string, value: string) {
-    this.values.set(key, value);
-  }
-  removeItem(key: string) {
-    this.values.delete(key);
-  }
-}
 Object.assign(globalThis, { localStorage: new MemoryStorage(), sessionStorage: new MemoryStorage(), location: { pathname: "/account", search: "" } });
 // A browser with WebAuthn (the page offers passkeys only there).
 Object.assign(globalThis, { PublicKeyCredential: function PublicKeyCredential() {} });
@@ -307,9 +296,11 @@ test("leaving a deleted account wipes as a removed device does, and says what co
   assert.ok(failures.includes("keys: store locked"), failures.join(" | "));
   const src = readFileSync(new URL("../src/features/cloud/sign-out.ts", import.meta.url), "utf8");
   const leave = src.slice(src.indexOf("export async function leaveDeletedAccount"));
-  for (const step of ["shell?.stop();", "account.stopSession();", "forgetPasskeySignIn();", "clearSession();", "await account.api.forgetKnownClient(email)", "wipeAccountHere(account, account.store)", "markAccountDeleted();", "location.replace(SIGN_IN_PATH);"]) {
+  for (const step of ["endHubShell();", "account.stopSession();", "forgetPasskeySignIn();", "clearSession();", "await account.api.forgetKnownClient(email)", "wipeAccountHere(account, account.store)", "markAccountDeleted();", "location.replace(SIGN_IN_PATH);"]) {
     assert.ok(leave.includes(step), step);
   }
+  const shellSrc = readFileSync(new URL("../src/features/cloud/hub-shell.ts", import.meta.url), "utf8");
+  assert.ok(shellSrc.slice(shellSrc.indexOf("export function endHubShell")).includes("hubShell()?.stop();"), "the shared teardown stops the shell");
   const app = readFileSync(new URL("../src/features/cloud/cloud-app.tsx", import.meta.url), "utf8");
   assert.match(app, /const failures = await wipeAccountHere\(account, store\);/, "the removed device's wipe is the same one");
 });

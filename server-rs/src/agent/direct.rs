@@ -1,10 +1,10 @@
-//! The agent's side of direct paths (architecture doc §9, "直连通道"): a
-//! device that reached this machine through the hub may ask, inside that
-//! end-to-end channel, for a WebRTC DataChannel straight to it; when one
-//! comes up, the channel's frames move onto it and fall back to the hub
-//! when it fails ([`rh_proto::path`], [`rh_proto::direct`]).
+//! The agent's side of direct paths (`docs/cross-machine-architecture.md`
+//! §9, "直连通道"): a device that reached this machine through the hub may
+//! ask, inside that end-to-end channel, for a WebRTC DataChannel straight to
+//! it; when one comes up, the channel's frames move onto it and fall back to
+//! the hub when it fails ([`rh_proto::path`], [`rh_proto::direct`]).
 //!
-//! - **Off switch**: `RH_AGENT_DIRECT=0` turns direct paths off for this
+//! - **Off switch**: `DROPPEN_AGENT_DIRECT=0` turns direct paths off for this
 //!   instance: the agent then answers the signaling stream with 403, binds no
 //!   UDP socket and offers no `direct/1` feature. Channels still negotiate
 //!   sequenced frames (`paths/1`), which costs nothing and gives the
@@ -14,7 +14,7 @@
 //!   when the attempt fails or the direct path ends. Only an enrolled
 //!   instance runs the link, so an instance that was never enrolled binds
 //!   nothing at all.
-//! - **STUN**: Cloudflare and Google by default; `RH_AGENT_DIRECT_STUN` is a
+//! - **STUN**: Cloudflare and Google by default; `DROPPEN_AGENT_DIRECT_STUN` is a
 //!   comma-separated list to use instead (empty: none, host candidates only).
 //!   No TURN: the hub is the fallback.
 //! - **Admission**: the direct hello is admitted by `handshake::accept_direct`
@@ -31,11 +31,7 @@ pub const MAX_PEERS: usize = 16;
 
 /// Whether direct paths are on for this instance (`DROPPEN_AGENT_DIRECT=0` turns them off).
 pub fn enabled() -> bool {
-    enabled_from(crate::env::var("DROPPEN_AGENT_DIRECT").as_deref())
-}
-
-fn enabled_from(value: Option<&str>) -> bool {
-    !matches!(value.map(str::trim), Some("0" | "false" | "off" | "no"))
+    crate::env::flag_or("DROPPEN_AGENT_DIRECT", true)
 }
 
 /// The peers' options: default-route host candidates and STUN.
@@ -87,12 +83,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_switch_and_the_stun_list_parse() {
-        assert!(enabled_from(None));
-        assert!(enabled_from(Some("1")));
-        for off in ["0", "false", "off", " no "] {
-            assert!(!enabled_from(Some(off)), "{off}");
-        }
+    fn the_stun_list_parses() {
         assert_eq!(stun_from(None), DEFAULT_STUN.map(String::from).to_vec());
         assert!(stun_from(Some("")).is_empty(), "empty: host candidates only");
         assert_eq!(stun_from(Some("stun.example:3478, junk ,")), ["stun.example:3478"]);

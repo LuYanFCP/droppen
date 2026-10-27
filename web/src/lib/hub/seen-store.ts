@@ -28,6 +28,8 @@
  * `storage` events. That is said on the console — and refused, as a failure
  * to try again, in a browser that kept them in IndexedDB before.
  */
+import { type ChainClock, type ChainState, hex } from "@/lib/e2e";
+import { openIdb } from "@/lib/idb";
 
 /** Where older pages keep the seen record (and this one, where IndexedDB will not open): `localStorage`'s key for `account`. */
 export const seenKey = (account: string) => `rh.hub.seen.${account}`;
@@ -49,6 +51,11 @@ export const SEEN_STORE = STORE;
 export type SeenStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 type EventTargetLike = Pick<EventTarget, "addEventListener" | "removeEventListener">;
+
+const unref = <T>(handle: T): T => {
+  (handle as { unref?: () => void }).unref?.();
+  return handle;
+};
 
 /**
  * The store would not read or write what it keeps, or would not open: a
@@ -85,11 +92,6 @@ export interface SeenStore {
   /** Hear that another page may have written a value: its account, or `null` for any. Returns the stop. */
   watch(heard: (account: string | null) => void): () => void;
 }
-
-const unref = <T>(handle: T): T => {
-  (handle as { unref?: () => void }).unref?.();
-  return handle;
-};
 
 /**
  * The values in memory: one browser's, for the tests. Updates run one after
@@ -247,64 +249,29 @@ export function indexedDbSeenStore(opts: IndexedDbSeenOptions): SeenStore {
   const canBroadcast = channelName !== null && typeof BroadcastChannel === "function";
   /** This store's own id on the channel: a page does not hear itself. */
   const self = Math.random().toString(36).slice(2);
-  let db: Promise<IDBDatabase> | null = null;
   let opened = false;
   let fallen: SeenStore | null = null;
   let poster: BroadcastChannel | null = null;
   const watchers = new Set<(account: string | null) => void>();
   let listening: (() => void) | null = null;
 
-  const drop = (which: Promise<IDBDatabase>) => {
-    if (db === which) db = null;
-  };
-  const open = (): Promise<IDBDatabase> => {
-    if (db) return db;
-    const opening = new Promise<IDBDatabase>((resolve, reject) => {
-      let late = false;
-      const timer = unref(
-        setTimeout(() => {
-          late = true;
-          reject(new Error(`the browser did not open the seen record's database within ${SEEN_DB_OPEN_MS / 1000} s`));
-        }, SEEN_DB_OPEN_MS),
-      );
-      let req: IDBOpenDBRequest;
-      try {
-        req = factory.open(dbName, 1);
-      } catch (error) {
-        clearTimeout(timer);
-        // Thrown at once: not to be had here (an opaque origin, storage turned off).
-        reject(new NotHere(describe(error)));
-        return;
-      }
-      req.onupgradeneeded = () => {
-        req.result.createObjectStore(STORE);
-      };
-      req.onsuccess = () => {
-        clearTimeout(timer);
-        const conn = req.result;
-        if (late) return conn.close();
-        conn.onversionchange = () => {
-          conn.close();
-          drop(opening);
-        };
-        conn.onclose = () => drop(opening);
-        resolve(conn);
-      };
-      req.onerror = () => {
-        clearTimeout(timer);
-        reject(req.error ?? new Error("the browser would not open the seen record's database"));
-      };
-    });
-    opening.catch(() => drop(opening));
-    db = opening;
-    return opening;
-  };
+  const idb = openIdb({
+    factory,
+    name: dbName,
+    store: STORE,
+    timeoutMs: SEEN_DB_OPEN_MS,
+    timedOut: `the browser did not open the seen record's database within ${SEEN_DB_OPEN_MS / 1000} s`,
+    refused: "the browser would not open the seen record's database",
+    unref: true,
+    // Thrown at once: not to be had here (an opaque origin, storage turned off).
+    notHere: (error) => new NotHere(describe(error)),
+  });
 
   /** The database, or `null` once this page keeps the records in the fallback. */
   const connection = async (): Promise<IDBDatabase | null> => {
     if (fallen) return null;
     try {
-      const conn = await open();
+      const conn = await idb.open();
       if (!opened) opts.onOpen?.();
       opened = true;
       return conn;
@@ -348,14 +315,7 @@ export function indexedDbSeenStore(opts: IndexedDbSeenOptions): SeenStore {
     }
   };
   /** Let go of the connection (one that would not make a transaction, or whose request failed): the next call opens the database afresh. */
-  const letGo = () => {
-    const current = db;
-    db = null;
-    void current?.then(
-      (conn) => conn.close(),
-      () => undefined,
-    );
-  };
+  const letGo = () => idb.reopen();
 
   const post = (account: string) => {
     if (!canBroadcast) return;
@@ -502,4 +462,149 @@ export function pageSeenStore(storage: SeenStorage): SeenStore {
     },
   });
   return pageStore;
+}
+
+/** The most first sightings kept per account. */
+export const MAX_FIRST_SEEN = 4096;
+/** The most entry hashes the seen record keeps (`SeenRecord.heads`): how far behind a tab can still be checked against it. */
+export const MAX_SEEN_HEADS = 256;
+export interface SeenRecord {
+  v: 1;
+  seenThrough: number;
+  head: string;
+  /**
+   * `[seq, hash]` of the newest entries up to `seenThrough` (at most
+   * {@link MAX_SEEN_HEADS}): what lets a tab that is behind the record check
+   * it is on the same chain at its own height. Absent in older records.
+   */
+  heads?: [number, string][];
+  firstSeen: [number, number][];
+}
+
+/** `raw` as a seen record, if it is one (`null`: it is not). */
+export function parseSeen(raw: unknown): SeenRecord | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Partial<SeenRecord>;
+  if (r.v !== 1 || !Number.isSafeInteger(r.seenThrough) || r.seenThrough! < 0 || typeof r.head !== "string" || !Array.isArray(r.firstSeen)) return null;
+  const firstSeen = r.firstSeen.filter((p): p is [number, number] => Array.isArray(p) && Number.isSafeInteger(p[0]) && Number.isFinite(p[1]));
+  const heads = Array.isArray(r.heads) ? r.heads.filter((p): p is [number, string] => Array.isArray(p) && Number.isSafeInteger(p[0]) && typeof p[1] === "string") : undefined;
+  return { v: 1, seenThrough: r.seenThrough!, head: r.head, ...(heads ? { heads } : {}), firstSeen };
+}
+
+/** A record as `localStorage` held it (JSON), if it is one. */
+export function parseSeenJson(raw: string): SeenRecord | null {
+  try {
+    return parseSeen(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+/** Both lists of first sightings as one: the earliest of each entry, the newest {@link MAX_FIRST_SEEN} entries kept. */
+export function earliestSightings(a: Iterable<[number, number]>, b: Iterable<[number, number]>): [number, number][] {
+  const firstSeen = new Map(a);
+  for (const [seq, ms] of b) {
+    const at = firstSeen.get(seq);
+    if (at === undefined || ms < at) firstSeen.set(seq, ms);
+  }
+  return [...firstSeen.entries()].sort((x, y) => x[0] - y[0]).slice(-MAX_FIRST_SEEN);
+}
+
+/**
+ * Two seen records of the account (`a` the store's) as one, where that is
+ * proven: they agree where they overlap — the lower one's head is the higher
+ * one's hash at that height — and then the higher, with the first sightings
+ * of both (the earliest of each). Where it cannot be told (the higher keeps
+ * no hash that far back, or predates `heads`), missing overlap is no
+ * agreement: `a` stays the record and `b` is kept `apart`, a checkpoint every
+ * view is held against as well, until a verified chain holds both. `forkAt`:
+ * they do not agree.
+ */
+export function higherSeen(a: SeenRecord | null, b: SeenRecord | null): { record: SeenRecord | null; apart: SeenRecord | null } | { forkAt: number } {
+  if (!a || !b) return { record: a ?? b, apart: null };
+  const [lo, hi] = a.seenThrough < b.seenThrough ? [a, b] : [b, a];
+  const theirs = lo.seenThrough === hi.seenThrough ? hi.head : hi.heads?.find(([seq]) => seq === lo.seenThrough)?.[1];
+  if (theirs === undefined) return { record: a, apart: b };
+  if (theirs !== lo.head) return { forkAt: lo.seenThrough };
+  const heads = hi.heads ?? lo.heads;
+  return { record: { v: 1, seenThrough: hi.seenThrough, head: hi.head, ...(heads ? { heads } : {}), firstSeen: earliestSightings(hi.firstSeen, lo.firstSeen) }, apart: null };
+}
+
+/** What the seen store keeps for an account: the genesis this browser pinned (hex), and what it verified of the chain under it. */
+export interface StoredTrust {
+  v: 1;
+  genesis: string | null;
+  seen: SeenRecord | null;
+}
+
+/** What the store handed back, as a {@link StoredTrust}. A `null` is a value the browser kept and would not hand back (nothing here stores `null`): never taken for nothing stored. */
+export function parseStored(raw: unknown): StoredTrust {
+  if (raw === undefined) return { v: 1, genesis: null, seen: null };
+  if (raw === null) throw new SeenStoreError("the browser handed back nothing for what it verified of the account: it is left as it is — try again");
+  const r = (typeof raw === "object" ? raw : {}) as { genesis?: unknown; seen?: unknown };
+  return { v: 1, genesis: typeof r.genesis === "string" ? r.genesis : null, seen: parseSeen(r.seen) };
+}
+
+/** Whether two stored values say the same (both as `parseStored`, `seenNext` or `higherSeen` lay them out). */
+export function sameStored(a: StoredTrust, b: StoredTrust): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * What this browser holds for the account now: the genesis it pinned, the
+ * seen record, and an older page's record that could not be proven one chain
+ * with it (`apart`, see {@link higherSeen}) — every view is held against both.
+ */
+export interface Held {
+  genesis: string | null;
+  record: SeenRecord | null;
+  apart: SeenRecord | null;
+}
+
+/** The checkpoints `held` holds: the record, and the one kept apart. */
+export function checkpoints(held: Held): SeenRecord[] {
+  return [held.record, held.apart].filter((c): c is SeenRecord => c !== null);
+}
+
+export function describeError(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+}
+
+/**
+ * What `state` makes of the seen record `stored`, which only moves forward:
+ * a view behind it (a page left open while another went on) keeps the
+ * newer checkpoint and never lowers it — else the next load of the newer
+ * page would take a chain without the entries only it had verified (a
+ * removal, a renewal) as all this device saw. Where this view and the record
+ * overlap they must be one chain: the record's head is in this view, or
+ * (this view behind it) this view's head is the record's hash at that height
+ * — else they fork (`forkAt`). `checked`: whether they could be held against
+ * each other at all (not for a view more than {@link MAX_SEEN_HEADS} behind,
+ * or a record from before `heads`).
+ */
+export function compareSeen(state: ChainState, stored: SeenRecord | null): { record: Omit<SeenRecord, "firstSeen">; checked: boolean } | { forkAt: number } {
+  if (stored && stored.seenThrough > state.seq) {
+    const theirs = stored.heads?.find(([seq]) => seq === state.seq)?.[1];
+    if (theirs !== undefined && theirs !== hex(state.head)) return { forkAt: state.seq };
+    return { record: { v: 1, seenThrough: stored.seenThrough, head: stored.head, ...(stored.heads ? { heads: stored.heads } : {}) }, checked: theirs !== undefined };
+  }
+  if (stored && hex(state.hashAt(stored.seenThrough)!) !== stored.head) return { forkAt: stored.seenThrough };
+  const heads: [number, string][] = [];
+  for (let seq = Math.max(0, state.seq - MAX_SEEN_HEADS + 1); seq <= state.seq; seq++) heads.push([seq, hex(state.hashAt(seq)!)]);
+  return { record: { v: 1, seenThrough: state.seq, head: hex(state.head), heads }, checked: true };
+}
+
+/**
+ * The record to write for `record`, with a view's first sightings (`clock`)
+ * merged into `stored`'s — the earliest of each entry kept, never a later
+ * page's — when the view and the record were held against each other
+ * (`checked`; else the record's own are kept as they are).
+ */
+export function seenNext({ record, checked }: { record: Omit<SeenRecord, "firstSeen">; checked: boolean }, stored: SeenRecord | null, clock: ChainClock): SeenRecord {
+  return { ...record, firstSeen: earliestSightings(stored?.firstSeen ?? [], checked ? clock.firstSeen : []) };
+}
+
+export interface AckRecord {
+  through: number;
+  extra: number[];
 }

@@ -7,7 +7,7 @@
 //! appended to that file as one line, `{"src": "agent", "kind": "ws",
 //! "socket", "dir": "in"|"out", "body"}` — and, through `rh-client`'s tap
 //! ([`install_client_tap`]), every JSON request and answer of its device
-//! role over HTTP (S1-4) as `{"src": "agent", "kind": "http", "dir",
+//! role over HTTP as `{"src": "agent", "kind": "http", "dir",
 //! "method", "path", "query"?, "status"?, "body"}` and its `/v1/client`
 //! control messages, a device session's token redacted. Binary frames never are. What is
 //! written is what already crosses the wire to the hub or a relay (tickets
@@ -16,7 +16,7 @@
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 /// The hub's agent socket.
 pub const AGENT: &str = rh_proto::frame::AGENT_PATH;
@@ -42,13 +42,26 @@ fn file() -> Option<&'static Mutex<std::fs::File>> {
     .as_ref()
 }
 
-fn record(socket: &str, dir: &str, body: &Value) {
+/// Append one capture record (`rh_client::tap::line`'s) as a line, under the
+/// file's lock.
+fn write(record: Value) {
     let Some(file) = file() else { return };
-    let mut line = json!({"src": "agent", "kind": "ws", "socket": socket, "dir": dir, "body": body}).to_string();
+    let mut line = record.to_string();
     line.push('\n');
     if let Ok(mut file) = file.lock() {
         let _ = file.write_all(line.as_bytes());
     }
+}
+
+fn record(socket: &str, dir: &str, body: &Value) {
+    write(rh_client::tap::line(
+        "agent",
+        rh_client::tap::Event::Ws {
+            socket,
+            dir,
+            body,
+        },
+    ));
 }
 
 fn record_text(socket: &str, dir: &str, text: &str) {
@@ -99,23 +112,16 @@ pub fn relay_value(value: Value) -> Value {
 }
 
 fn http(dir: &str, method: &str, url: &str, status: Option<u16>, body: &Value) {
-    let Some(file) = file() else { return };
-    // `scheme://authority/path?query` → the path and the query.
-    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let target = after_scheme.find('/').map_or("/", |i| &after_scheme[i..]);
-    let (path, query) = target.split_once('?').map_or((target, None), |(p, q)| (p, Some(q)));
-    let mut record = json!({"src": "agent", "kind": "http", "dir": dir, "method": method, "path": path, "body": body});
-    if let Some(query) = query {
-        record["query"] = json!(query);
-    }
-    if let Some(status) = status {
-        record["status"] = json!(status);
-    }
-    let mut line = record.to_string();
-    line.push('\n');
-    if let Ok(mut file) = file.lock() {
-        let _ = file.write_all(line.as_bytes());
-    }
+    write(rh_client::tap::line(
+        "agent",
+        rh_client::tap::Event::Http {
+            dir,
+            method,
+            url,
+            status,
+            body,
+        },
+    ));
 }
 
 /// A copy of `value` with what is not the capture's to keep replaced,
@@ -123,8 +129,7 @@ fn http(dir: &str, method: &str, url: &str, status: Option<u16>, body: &Value) {
 /// answer that mints one, `token`, and the `/v1/client` login that presents
 /// one, `session`), a known-client token (`known_client`, `kc1.…` in `GET
 /// /v1/me`), and the account's e-mail. The capture is for checking shapes;
-/// those are credentials and personal data (security reviews of S1-4, N4,
-/// and S1-5, F9).
+/// those are credentials and personal data.
 pub fn redacted(value: &Value) -> Value {
     redact(value, false)
 }
@@ -152,8 +157,8 @@ fn redact(value: &Value, in_email: bool) -> Value {
     }
 }
 
-/// What `rh-client` sends and gets for this computer's device role (S1-4,
-/// S1-5), captured as the agent's own: `"src": "agent"`, tokens redacted.
+/// What `rh-client` sends and gets for this computer's device role, captured
+/// as the agent's own: `"src": "agent"`, tokens redacted.
 struct DeviceRole;
 
 impl rh_client::tap::Tap for DeviceRole {
@@ -188,6 +193,7 @@ pub fn install_client_tap() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn a_device_session_token_never_reaches_the_traffic_capture() {

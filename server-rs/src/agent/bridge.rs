@@ -1,5 +1,5 @@
 //! Sub-streams of an end-to-end channel, bridged to this server's own
-//! loopback listener (architecture doc §5, "MVP 的 agent 侧桥接"), so no handler
+//! loopback listener (`docs/cross-machine-architecture.md` §5, "MVP 的 agent 侧桥接"), so no handler
 //! changes: `rpc` becomes one HTTP request to `/api/*`, `mux` the feed socket
 //! (`/api/events`), `term` a terminal's socket (`/api/terminals/{id}/ws`). The
 //! wire format inside a stream is `rh_proto::bridge`.
@@ -107,7 +107,7 @@ impl Loopback {
 pub const LOCAL_PREFIX: &str = "/rh/";
 
 /// Where a device stands for the admin-only routes, as this agent's own
-/// chain says now (chain v3, local-aggregator §5.4).
+/// chain says now (chain v3, `docs/local-aggregator.md` §5.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Standing {
     /// A current admin device (v2: a full device).
@@ -118,7 +118,7 @@ pub struct Standing {
     /// of the channel's seven days.
     pub view: View,
     /// It may still control this machine: the chain lets it, and its control
-    /// on this channel has not lapsed (local-aggregator §3.4). Judged again
+    /// on this channel has not lapsed (`docs/local-aggregator.md` §3.4). Judged again
     /// when a request is dispatched, which can be long after its stream
     /// opened.
     pub controls: bool,
@@ -199,7 +199,7 @@ impl Refusal {
 }
 
 /// What a route is to a device reaching this computer over a channel
-/// (local-aggregator §5.4): the line runs between *using* the computer and
+/// (`docs/local-aggregator.md` §5.4): the line runs between *using* the computer and
 /// changing its security posture — who signs in, which binary runs,
 /// credentials, push.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -567,8 +567,8 @@ const BLOB_ROUTES: [&str; 3] = ["/api/fs/download", "/api/fs/upload", "/api/medi
 /// Whether `path` may be reached by a stream of `class`.
 pub fn allowed(class: StreamClass, path: &str) -> bool {
     let route = path.split(['?', '#']).next().unwrap_or_default();
-    // Judge the route as the server will see it once percent-decoded too
-    // (M2 review: `%2e%2e` walked past the dot-segment check).
+    // Judge the route as the server will see it once percent-decoded too:
+    // `%2e%2e` would otherwise walk past the dot-segment check.
     let decoded = percent_decoded(route);
     let clean = (route.starts_with("/api/") || (class == StreamClass::Rpc && route.starts_with(LOCAL_PREFIX)))
         && [route, decoded.as_str()]
@@ -703,43 +703,13 @@ async fn local_rpc(mut stream: Stream, head: RequestHead, device: &str, local: &
     };
     let path = head.path.split(['?', '#']).next().unwrap_or_default().to_string();
     let (status, json) = local.handle(device, &head.method, &path, &body).await;
-    let writer = stream.writer();
-    let head = ResponseHead {
-        status,
-        headers: vec![("content-type".into(), "application/json".into())],
-    };
-    if !send_head(&writer, &head).await {
-        return;
-    }
-    let _ = writer.send(&bridge::message(Kind::Binary, json.to_string().as_bytes())).await;
-    writer.close(CLOSE_DONE);
+    answer(stream, (status, json)).await;
 }
 
 async fn rpc(mut stream: Stream, head: RequestHead, device: &str, loopback: &Loopback, local: &dyn Local) {
-    let mut reader = MessageReader::new();
-    let mut body = Vec::new();
-    // The request body, up to `End`.
-    'body: loop {
-        match stream.recv().await {
-            Some(StreamEvent::Data(data)) => {
-                reader.push(&data);
-                loop {
-                    match reader.next_message() {
-                        Ok(Some((Kind::End, _))) => break 'body,
-                        Ok(Some((Kind::Binary | Kind::Text, chunk))) => {
-                            body.extend_from_slice(&chunk);
-                            if body.len() > MAX_BODY {
-                                return stream.close(CLOSE_BAD_REQUEST);
-                            }
-                        }
-                        Ok(Some((Kind::Head, _))) | Err(_) => return stream.close(CLOSE_BAD_REQUEST),
-                        Ok(None) => break,
-                    }
-                }
-            }
-            Some(StreamEvent::Closed(_)) | None => return,
-        }
-    }
+    let Some(body) = request_body(&mut stream, MAX_BODY).await else {
+        return;
+    };
     let Some(stream) = still_served(stream, &head, device, local).await else {
         return;
     };
@@ -928,11 +898,11 @@ mod tests {
         }
     }
 
-    /// Checklist item 12: a device that is not an admin reaches every route
-    /// that *uses* the computer, and none that changes who signs in, what
-    /// runs, its credentials or its push — percent-encoded or not; an admin
-    /// needs a twelve-hour-fresh view for those; and nobody reaches the local
-    /// Droppen link or gateway over a channel.
+    /// A device that is not an admin reaches every route that *uses* the
+    /// computer, and none that changes who signs in, what runs, its
+    /// credentials or its push — percent-encoded or not; an admin needs a
+    /// twelve-hour-fresh view for those; and nobody reaches the local Droppen
+    /// link or gateway over a channel.
     #[test]
     fn devices_that_are_not_admins_reach_only_what_uses_the_computer() {
         for (method, path) in [
@@ -1064,7 +1034,7 @@ mod tests {
         assert_eq!(Refusal::Unlisted.answer().1["error"], "not_offered");
     }
 
-    /// The review of chain v3 (web half): a 412 says why — `reason` is
+    /// A 412 says why — `reason` is
     /// `stale` (nobody vouched within twelve hours: attest and retry),
     /// `behind` (an admin vouched for more of the chain: catch up) or `fork`
     /// (an admin vouched for a conflicting chain) — as the agent's freshness
@@ -1158,7 +1128,7 @@ mod tests {
         found
     }
 
-    /// Chain v3 review, D3: the routes a device may reach are an allow-list.
+    /// The routes a device may reach are an allow-list.
     /// Every route the server registers — read off the router it serves
     /// (its OpenAPI document) and off the source (which also finds the
     /// undocumented websockets) — is classified in [`ROUTES`]; a new route
@@ -1233,7 +1203,7 @@ mod tests {
         assert!(!allowed(StreamClass::Term, "/rh/rotate"));
         assert!(!allowed(StreamClass::Mux, "/rh/info"));
         assert!(!allowed(StreamClass::Rpc, "/rh/../api/x"));
-        // Percent-encoded dot segments and slashes (M2 review).
+        // Percent-encoded dot segments and slashes are refused too.
         for path in [
             "/api/%2e%2e/embed/x",
             "/api/%2E%2E/embed",
@@ -1249,8 +1219,8 @@ mod tests {
             "the query is not the route"
         );
         assert!(allowed(StreamClass::Rpc, "/api/sessions/claude/a%20b"));
-        // A plugin document's encoded slash gets no exception any more, and
-        // the plugin routes themselves are refused by [`refusal`], not here
+        // A plugin document's encoded slash gets no exception, and the
+        // plugin routes themselves are refused by [`refusal`], not here
         // (`docs/plugins/runtime.md` §5).
         for path in [
             "/api/plugins/tasks/docs/events%2F2026-10",

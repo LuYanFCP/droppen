@@ -110,8 +110,7 @@ fn parse(args: &[String]) -> Result<Action, String> {
 pub async fn run(args: &[String]) -> Result<(), String> {
     let (args, instance) = crate::auth::cli::take_instance(args)?;
     let action = parse(&args)?;
-    let paths = crate::auth::cli::home_paths(instance.as_deref())?;
-    let config = crate::config::load(std::env::var("GOTCHA_ACTIVE_PROFILE").ok()).map_err(|error| error.to_string())?;
+    let (paths, config) = crate::auth::cli::cli_context(instance.as_deref())?;
     let plugins = Plugins::new(paths.instance_dir(), paths.instance_db(), &config.app.plugins, None);
     tokio::task::spawn_blocking(move || execute(&plugins, &paths, action))
         .await
@@ -207,7 +206,7 @@ fn execute(plugins: &Plugins, paths: &Paths, action: Action) -> Result<(), Strin
             let json = serde_json::to_string_pretty(&export).map_err(|e| e.to_string())? + "\n";
             match out {
                 Some(out) => {
-                    write_private(Path::new(&out), json.as_bytes())?;
+                    crate::fsutil::write_private(Path::new(&out), json.as_bytes()).map_err(|error| format!("cannot write {out}: {error}"))?;
                     println!("exported {} documents of {id} on instance {instance} to {out}", export.docs.len());
                 }
                 None => {
@@ -286,30 +285,6 @@ fn execute(plugins: &Plugins, paths: &Paths, action: Action) -> Result<(), Strin
             Ok(())
         }
     }
-}
-
-/// Write `0600`, through a temporary file renamed into place.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-    let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let temp = dir.join(format!(".plugin-export-{}.tmp", uuid::Uuid::new_v4()));
-    let write = || -> std::io::Result<()> {
-        let mut options = std::fs::OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&temp, path)
-    };
-    write().map_err(|error| {
-        let _ = std::fs::remove_file(&temp);
-        format!("cannot write {}: {error}", path.display())
-    })
 }
 
 #[cfg(test)]
@@ -415,6 +390,38 @@ mod tests {
             .collect();
         assert!(moved.len() == 1 && moved[0].starts_with("notes.purged-"), "{moved:?}");
         execute(&plugins, &paths, Action::Purge("notes".into())).expect("nothing left to purge is not an error");
+    }
+
+    #[test]
+    fn an_export_to_a_missing_directory_is_refused_with_enoent() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins = installed_host(dir.path(), &["notes"], PluginSettings::default(), None);
+        let paths = Paths::new(dir.path().to_path_buf());
+        plugins
+            .put(
+                "notes",
+                "state",
+                droppen_plugin_sdk::PutDoc {
+                    expected_revision: None,
+                    value: json!({ "name": "state" }),
+                },
+                None,
+            )
+            .unwrap();
+        let out = dir.path().join("missing").join("notes.json");
+        let error = execute(
+            &plugins,
+            &paths,
+            Action::Export {
+                id: "notes".into(),
+                out: Some(out.to_string_lossy().into_owned()),
+            },
+        )
+        .expect_err("writing into a directory that is not there is the old ENOENT");
+        assert!(error.contains("cannot write"), "{error}");
+        assert!(error.contains("os error 2"), "{error}");
+        assert!(!out.exists());
+        assert!(!out.parent().expect("parent").exists(), "the missing directory is not created");
     }
 
     #[test]

@@ -11,10 +11,9 @@
  *
  * Which machines there are is the shell's to say (`shells/`):
  *
- * - the local shell (`shells/local.ts`): only {@link LOCAL}, the page's own
- *   server, reached directly — exactly what the page did before. It is what
- *   the registry is until a shell says otherwise, so a page (or a test) that
- *   boots nothing is the local page as it always was;
+ * - the local shell: only {@link LOCAL}, the page's own server, reached
+ *   directly. The registry is that shell until one of the others boots
+ *   ({@link setShell}), so a page that boots nothing is the local page;
  * - droppen.app (`features/cloud/hub-shell.ts`): every machine of the
  *   account at once, each through its own end-to-end channel (or its offline
  *   copy), and no `local`.
@@ -31,7 +30,7 @@ import { createApiClient, type ApiClient } from "@/api/client";
 import { directTransport } from "@/lib/transport/direct";
 import type { Transport } from "@/lib/transport/types";
 import { LOCAL, type MachineKey } from "./key";
-import type { MachineInfo, MachineRuntime, ShellKind } from "./runtime";
+import type { AppShell, MachineInfo, MachineRuntime, ShellKind } from "./runtime";
 import { constantStore, createStore, type Store } from "./store";
 
 export type { MachineInfo, MachineRuntime, ShellKind } from "./runtime";
@@ -242,6 +241,34 @@ export function setHome(machine: MachineKey): void {
   runtimeFor(machine);
   homeStore.set(machine);
   published();
+}
+
+// ---------------------------------------------------------------------------
+// The shell besides this page's own machine
+// ---------------------------------------------------------------------------
+
+let current: AppShell | null = null;
+/** The shell as it comes and goes, for the views that read it. */
+const currentStore = createStore<AppShell | null>(null);
+
+/**
+ * The shell the page runs besides its own machine — droppen.app's hub, or the
+ * local app's gateway while it shows other devices — or `null` (the local app
+ * alone). One shell at a time: setting another replaces it.
+ */
+export function currentShell(): AppShell | null {
+  return current;
+}
+
+/** The shell as it comes and goes. */
+export function currentShellStore(): Store<AppShell | null> {
+  return currentStore;
+}
+
+/** Make `shell` the page's one shell (`null`: none). */
+export function setCurrentShell(shell: AppShell | null): void {
+  current = shell;
+  currentStore.set(shell);
 }
 
 // ---------------------------------------------------------------------------

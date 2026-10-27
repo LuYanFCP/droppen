@@ -21,9 +21,6 @@ import * as React from "react";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import i18next from "i18next";
-import { I18nextProvider, initReactI18next } from "react-i18next";
-import { renderToStaticMarkup } from "react-dom/server";
 import { type AccountPasskey, HubApi, HubApiError, type Reauth, type SignInChange, type SignInMethods } from "../src/lib/hub/api.js";
 import { MeStore } from "../src/lib/hub/me.js";
 import { type CreationOptionsJSON, type CredentialsLike, fromBase64Url, passkeyAdd, passkeyPrf, prfOutputOf, toBase64Url } from "../src/lib/hub/passkey.js";
@@ -41,37 +38,22 @@ import { ja } from "../src/i18n/ja.js";
 import { zhCN } from "../src/i18n/zh-CN.js";
 import { signOutJa, signOutZhCN, signOutZhTW } from "../src/i18n/sign-out.js";
 import { zhTW } from "../src/i18n/zh-TW.js";
+import { MemoryStorage } from "./storage.js";
+import { makeI18n, pageDraw } from "./render.js";
 
-class MemoryStorage {
-  values = new Map<string, string>();
-  getItem(key: string) {
-    return this.values.get(key) ?? null;
-  }
-  setItem(key: string, value: string) {
-    this.values.set(key, value);
-  }
-  removeItem(key: string) {
-    this.values.delete(key);
-  }
-}
 Object.assign(globalThis, { localStorage: new MemoryStorage(), sessionStorage: new MemoryStorage(), location: { pathname: ACCOUNT_PATH, search: "" } });
 // A browser with WebAuthn (the page offers passkeys only there).
 Object.assign(globalThis, { PublicKeyCredential: function PublicKeyCredential() {} });
 Object.defineProperty(globalThis, "navigator", { value: { credentials: { create: async () => null, get: async () => null } }, configurable: true });
 
-const i18n = i18next.createInstance();
-void i18n.use(initReactI18next).init({
+const i18n = makeI18n({
   lng: "en",
   resources: { en: { translation: {} }, "zh-CN": { translation: { ...cloudDevicesZhCN, ...zhCN } } },
-  interpolation: { escapeValue: false },
   keySeparator: false,
-  nsSeparator: false,
+  nsSeparator: false
 });
 
-function draw(node: React.ReactElement, lng = "en"): string {
-  void i18n.changeLanguage(lng);
-  return renderToStaticMarkup(<I18nextProvider i18n={i18n}>{node}</I18nextProvider>);
-}
+const draw = pageDraw(i18n);
 
 // ------------------------------------------------------------ the hub's calls
 
@@ -440,10 +422,12 @@ test("/account is the shell's other page with no device in view; the bar and 「
   assert.ok(button.includes(">my account<"));
   const bar = readFileSync(new URL("../src/features/cloud/cloud-bar.tsx", import.meta.url), "utf8");
   assert.equal(bar.match(/<AccountButton \/>/g)?.length, 1);
-  assert.equal(bar.match(/<PendingPasskeyBanner /g)?.length, 1, "the bar says when a device asks to join");
+  assert.equal(bar.match(/<AccountAlerts [^>]*where="bar"/g)?.length, 1, "the bar says when a device asks to join");
+  const alerts = readFileSync(new URL("../src/features/cloud/account-alerts.tsx", import.meta.url), "utf8");
+  assert.equal(alerts.match(/<PendingPasskeyBanner /g)?.length, 1, "the shared stack says it, once");
   const frame = readFileSync(new URL("../src/features/cloud/my-devices.tsx", import.meta.url), "utf8");
   assert.match(frame, /data-testid="my-devices-account"/);
-  assert.equal(frame.match(/<PendingPasskeyBanner /g)?.length, 1);
+  assert.equal(frame.match(/<AccountAlerts [^>]*where="devices"/g)?.length, 1);
   const app = readFileSync(new URL("../src/features/cloud/cloud-app.tsx", import.meta.url), "utf8");
   assert.match(app, /isAccountPath\(pathname\)\) return <AccountScreen /);
 });
@@ -556,9 +540,11 @@ test("the notice: what changed, from which device, when — for every kind", () 
   assert.ok(plan.includes('account.standing !== "active" || !account.isAdmin'));
   const settings = readFileSync(new URL("../src/features/cloud/account-settings.tsx", import.meta.url), "utf8");
   assert.ok(settings.includes("const head = me?.signInChangeHead ?? 0;"), "the settings read their list again when a change is heard");
+  const alerts = readFileSync(new URL("../src/features/cloud/account-alerts.tsx", import.meta.url), "utf8");
+  assert.equal(alerts.match(/<SignInChangeAlerts /g)?.length, 1, "the shared stack shows it, once");
   for (const f of ["cloud-bar.tsx", "my-devices.tsx", "account-settings.tsx"]) {
     const src = readFileSync(new URL(`../src/features/cloud/${f}`, import.meta.url), "utf8");
-    assert.equal(src.match(/<SignInChangeAlerts /g)?.length, 1, f);
+    assert.equal(src.match(/<AccountAlerts\b/g)?.length, 1, f);
   }
 });
 
