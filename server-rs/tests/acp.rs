@@ -738,3 +738,111 @@ async fn the_agent_routes_report_names_never_values() {
     assert_ne!(status, 200, "the single-agent route is gone");
     server.stop().await;
 }
+
+#[tokio::test]
+async fn a_check_says_what_the_agent_is_and_why_it_cannot_start() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let program = install_fake(home.path());
+    let server = TestServer::start_at(home.path(), None).await;
+
+    // A ready agent: what it says it is and can do, and where it was found.
+    configure_as(&server, "ready", &program, "mark").await;
+    let (status, body) = server.json("POST", "/api/acp/agents/ready/check", &json!({})).await;
+    assert_eq!(status, 200, "{body}");
+    let check: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(check["state"], "ready", "{check:#}");
+    assert_eq!(check["resolvedPath"], json!(program.to_string_lossy()));
+    assert_eq!(check["protocolVersion"], 1);
+    assert_eq!(check["agentInfo"]["version"], "0.1.0");
+    assert_eq!(
+        (&check["capabilities"]["loadSession"], &check["capabilities"]["image"], &check["capabilities"]["audio"]),
+        (&json!(true), &json!(true), &json!(false))
+    );
+    assert!(check.get("error").is_none(), "{check:#}");
+    // Kept with the agent, and nothing was left running or opened.
+    let listed = server.get_json("/api/acp/agents").await;
+    assert_eq!(listed["agents"][0]["lastCheck"]["state"], "ready", "{listed:#}");
+
+    // An executable that is not there: not found, with the PATH it was looked up on.
+    let (status, _) = server
+        .json("PUT", "/api/acp/agents/missing", &json!({"command": "no-such-agent-anywhere"}))
+        .await;
+    assert_eq!(status, 200);
+    let (_, body) = server.json("POST", "/api/acp/agents/missing/check", &json!({})).await;
+    let check: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(check["state"], "not_found", "{check:#}");
+    let error = check["error"].as_str().unwrap();
+    assert!(error.contains("no-such-agent-anywhere") && error.contains("PATH="), "{error}");
+
+    // One that starts and dies: failed, with what it said, its values taken out.
+    let broken = home.path().join("bin").join("broken-agent");
+    std::fs::write(&broken, "#!/bin/sh\necho \"cannot load: token $BROKEN_TOKEN\" >&2\nexit 3\n").unwrap();
+    std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (status, _) = server
+        .json(
+            "PUT",
+            "/api/acp/agents/broken",
+            &json!({"command": broken.to_string_lossy(), "env": "BROKEN_TOKEN=tok-very-secret"}),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (_, body) = server.json("POST", "/api/acp/agents/broken/check", &json!({})).await;
+    let check: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(check["state"], "failed", "{check:#}");
+    let error = check["error"].as_str().unwrap();
+    assert!(error.contains("cannot load: token"), "the agent's own words: {error}");
+    assert!(!body.contains("tok-very-secret"), "a value never comes back: {body}");
+    let listed = server.get("/api/acp/agents").await.1;
+    assert!(!listed.contains("tok-very-secret"), "{listed}");
+
+    // An edit of the command line forgets what the last check found.
+    server
+        .json("PUT", "/api/acp/agents/broken", &json!({"command": program.to_string_lossy(), "args": ["--acp", "--stdio"]}))
+        .await;
+    let listed = server.get_json("/api/acp/agents").await;
+    let broken = listed["agents"].as_array().unwrap().iter().find(|agent| agent["id"] == "broken").cloned().unwrap();
+    assert_eq!(broken["lastCheck"], Value::Null, "{broken:#}");
+
+    let (status, _) = server.json("POST", "/api/acp/agents/nobody/check", &json!({})).await;
+    assert_eq!(status, 404);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn an_agent_is_not_removed_while_one_of_its_turns_runs() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let program = install_fake(home.path());
+    let workdir = workdirs(home.path(), &["work"]).remove(0);
+    let server = TestServer::start_at(home.path(), None).await;
+    configure_as(&server, "busy", &program, "mark").await;
+    let id = start(&server, "busy", &workdir, "hello").await;
+    wait_for(&server, &id, "the first turn", finished).await;
+
+    // A turn that does not end on its own.
+    server
+        .json("POST", &format!("/api/sessions/acp/{id}/message"), &json!({"text": "wait for me"}))
+        .await;
+    wait_for(&server, &id, "the long turn", |detail| detail["injection"]["state"] == "running").await;
+    let (status, body) = server.json("DELETE", "/api/acp/agents/busy", &json!({})).await;
+    assert_eq!(status, 409, "{body}");
+    assert!(body.contains("running a turn"), "{body}");
+    assert_eq!(server.get_json("/api/acp/agents").await["agents"][0]["id"], "busy", "still there");
+
+    // Stopped, it can go; its idle process does not hold it back.
+    server.json("POST", &format!("/api/sessions/acp/{id}/interrupt"), &json!({})).await;
+    wait_for(&server, &id, "the interruption", finished).await;
+    let (status, body) = server.json("DELETE", "/api/acp/agents/busy", &json!({})).await;
+    assert_eq!(status, 200, "{body}");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn the_built_in_agents_say_whether_their_executable_is_on_path() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let server = TestServer::start_at(home.path(), None).await;
+    let listed = server.get_json("/api/acp/agents").await;
+    for preset in listed["presets"].as_array().unwrap() {
+        assert!(preset["onPath"].is_boolean(), "{preset:#}");
+    }
+    server.stop().await;
+}

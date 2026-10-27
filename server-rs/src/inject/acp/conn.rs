@@ -147,8 +147,8 @@ impl Conn {
         }
     }
 
-    /// Initialize, then create or reopen the session.
-    pub(super) async fn open(&mut self, id: Option<&str>, workdir: &Path) -> Result<Opened, InjectError> {
+    /// Say who this client is and what it can do; the agent's answer.
+    pub(super) async fn initialize(&mut self) -> Result<Value, InjectError> {
         let init = self
             .call(
                 "initialize",
@@ -160,6 +160,12 @@ impl Conn {
             )
             .await?;
         self.can_close = init["agentCapabilities"]["sessionCapabilities"]["close"].is_object();
+        Ok(init)
+    }
+
+    /// Initialize, then create or reopen the session.
+    pub(super) async fn open(&mut self, id: Option<&str>, workdir: &Path) -> Result<Opened, InjectError> {
+        let init = self.initialize().await?;
         let cwd = absolute(workdir);
         match id {
             None => {

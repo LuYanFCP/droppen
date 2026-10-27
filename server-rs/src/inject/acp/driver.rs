@@ -68,11 +68,28 @@ pub(super) struct Message {
 pub(in crate::inject) struct Handle {
     pub(super) tx: mpsc::UnboundedSender<Cmd>,
     shared: Arc<Mutex<State>>,
+    /// The id of the agent the session runs on.
+    agent: Arc<str>,
 }
 
 impl Handle {
-    pub(super) fn new(tx: mpsc::UnboundedSender<Cmd>) -> Self {
-        Self { tx, shared: Arc::default() }
+    pub(super) fn new(tx: mpsc::UnboundedSender<Cmd>, agent: &str) -> Self {
+        Self {
+            tx,
+            shared: Arc::default(),
+            agent: agent.into(),
+        }
+    }
+
+    /// Whether this is a session of the agent `agent`.
+    pub(super) fn runs_on(&self, agent: &str) -> bool {
+        &*self.agent == agent
+    }
+
+    /// A turn is running, or a message is waiting for one.
+    pub(super) fn busy(&self) -> bool {
+        let state = self.shared.lock().unwrap();
+        self.alive() && (state.active || !state.queue.is_empty())
     }
 
     pub(super) fn shared(&self) -> Arc<Mutex<State>> {

@@ -309,6 +309,8 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = {
         ("GET", "/api/acp/agents", Use),
         ("PUT", "/api/acp/agents/{id}", Posture),
         ("DELETE", "/api/acp/agents/{id}", Posture),
+        // A check starts the program an agent names.
+        ("POST", "/api/acp/agents/{id}/check", Posture),
         ("GET", "/api/fs/list", Use),
         ("GET", "/api/fs/read", Use),
         ("GET", "/api/fs/download", Use),
@@ -977,6 +979,7 @@ mod tests {
             // They name the programs ACP sessions run.
             ("PUT", "/api/acp/agents/bub"),
             ("DELETE", "/api/acp/agents/bub"),
+            ("POST", "/api/acp/agents/bub/check"),
             ("POST", "/api/push/subscriptions"),
             ("GET", "/api/push/vapid"),
             ("POST", "/rh/machine-key"),

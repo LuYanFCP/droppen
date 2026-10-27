@@ -103,7 +103,9 @@ for raw in sys.stdin:
             done.set()
     elif method == "initialize":
         answer(request, {"protocolVersion": 1, "agentCapabilities": {
-            "loadSession": True, "sessionCapabilities": {"close": {}}}})
+            "loadSession": True, "sessionCapabilities": {"close": {}},
+            "promptCapabilities": {"image": True, "embeddedContext": True}},
+            "agentInfo": {"name": "fake-agent", "title": "Fake agent", "version": "0.1.0"}})
     elif method == "session/new":
         session = "f00dfeed0123456789abcdef01234567"
         runtime.pop(session, None)

@@ -24,7 +24,14 @@
 //! recorded on every session, so a session is reopened by the agent it ran on
 //! and no other. Removing an agent leaves its sessions alone: they stay listed
 //! and readable, and cannot be continued until an agent with that id is
-//! configured again.
+//! configured again. It is refused while a turn of the agent is running.
+//!
+//! A **check** ([`AcpCheck`], `POST /api/acp/agents/{id}/check`) starts the
+//! agent with its environment, sends `initialize`, reads what it says it is and
+//! can do, and stops it; nothing reaches a model. The last one is kept with the
+//! agent and forgotten when its command line or environment changes, so the
+//! settings page and the new-session picker can say an agent cannot start
+//! before a session finds out.
 //!
 //! `env` is read through [`parse_env_block`], so an agent's block refuses what
 //! an account's block refuses: `PATH`, the loader variables, and everything
@@ -45,7 +52,7 @@ use crate::api::extract::{ApiJson, ApiPath};
 use crate::api::{ApiRouter, AppState, SendResult};
 use crate::db::scope;
 use crate::openapi_ext::{ExtraResponses, Optional};
-use crate::process_env::Env;
+use crate::process_env::{clean_env_bare, resolve_on_path, Env};
 use crate::sessions::{Paths, SessionSummary, Source};
 
 /// The longest agent id.
@@ -87,6 +94,20 @@ pub struct AcpAgentPreset {
     /// What it needs before it can run.
     #[serde(default, skip_serializing_if = "Optional::is_none")]
     pub note: Optional<String>,
+    /// Whether its executable is on this server's `PATH`, as a lookup finds it
+    /// (nothing is started). Filled in when the descriptions are listed.
+    #[serde(default)]
+    pub on_path: bool,
+}
+
+impl AcpAgentPreset {
+    /// This description, with whether its executable is on `PATH` in `env`.
+    fn looked_up(&self, env: &Env) -> Self {
+        Self {
+            on_path: resolve_on_path(&self.command, env).is_some(),
+            ..self.clone()
+        }
+    }
 }
 
 static PRESETS: LazyLock<Vec<AcpAgentPreset>> =
@@ -114,6 +135,8 @@ pub struct AcpAgent {
     pub args: Vec<String>,
     /// Extra environment, in the order it was typed.
     pub env: Vec<EnvVar>,
+    /// What the last check of this command line and environment found.
+    pub last_check: Option<AcpCheck>,
 }
 
 impl AcpAgent {
@@ -141,6 +164,38 @@ impl AcpAgent {
             env_names: self.env.iter().map(|var| var.key.clone()).collect(),
             homepage: preset.and_then(|preset| preset.homepage.0.clone()).into(),
             note: preset.and_then(|preset| preset.note.0.clone()).into(),
+            last_check: self.last_check.clone().into(),
+        }
+    }
+
+    /// The values a check of this agent must not show, longest first: its
+    /// variables' values, which are what an API key looks like. Short ones are
+    /// left alone; they would blank out ordinary words.
+    pub fn secrets(&self) -> Vec<&str> {
+        let mut values: Vec<&str> = self.env.iter().map(|var| var.value.as_str()).filter(|value| value.len() >= 4).collect();
+        values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        values
+    }
+
+    /// Keep `check` as this agent's last, unless its command line or
+    /// environment changed while it ran: then it describes nothing that is
+    /// configured, and is dropped. `false` when it was not kept.
+    pub fn record_check(&self, paths: &Paths, check: &AcpCheck) -> bool {
+        let _writing = WRITES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let db = crate::db::at(paths.config_db());
+        let Some(mut stored) = db.kv_get(scope::ACP_AGENTS, &self.id).and_then(|raw| serde_json::from_str::<Stored>(&raw).ok()) else {
+            return false;
+        };
+        if !stored.launches_like(self) {
+            return false;
+        }
+        stored.last_check = Some(check.clone());
+        match serde_json::to_string(&stored) {
+            Ok(raw) => {
+                db.kv_set(scope::ACP_AGENTS, &self.id, &raw);
+                true
+            }
+            Err(_) => false,
         }
     }
 }
@@ -156,9 +211,17 @@ struct Stored {
     args: Vec<String>,
     #[serde(default)]
     env: Vec<EnvVar>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_check: Option<AcpCheck>,
 }
 
 impl Stored {
+    /// Whether this row starts the same process `agent` does: the same command
+    /// line and the same environment.
+    fn launches_like(&self, agent: &AcpAgent) -> bool {
+        self.command == agent.command && self.args == agent.args && self.env == agent.env
+    }
+
     /// What a new agent with this id starts from: its built-in's description, if
     /// it has one.
     fn fresh(id: &str) -> Self {
@@ -167,6 +230,7 @@ impl Stored {
             command: preset.command.clone(),
             args: preset.args.clone(),
             env: Vec::new(),
+            last_check: None,
         })
     }
 
@@ -181,6 +245,7 @@ impl Stored {
             command: self.command,
             args: self.args,
             env: self.env,
+            last_check: self.last_check,
         }
     }
 }
@@ -253,6 +318,7 @@ pub fn update(paths: &Paths, id: &str, patch: &AcpAgentUpdate) -> Result<AcpAgen
         None if rows.len() >= MAX_AGENTS => return Err(format!("at most {MAX_AGENTS} ACP agents can be configured")),
         None => Stored::fresh(id),
     };
+    let launch = (next.command.clone(), next.args.clone(), next.env.clone());
     if let Some(name) = patch.name.as_deref() {
         let name = name.trim();
         if name.len() > MAX_NAME || name.chars().any(char::is_control) {
@@ -278,6 +344,11 @@ pub fn update(paths: &Paths, id: &str, patch: &AcpAgentUpdate) -> Result<AcpAgen
     }
     if next.command.is_empty() {
         return Err("an agent needs an executable".into());
+    }
+    // Another command line or environment is another process: what the last
+    // check found says nothing about it.
+    if (&next.command, &next.args, &next.env) != (&launch.0, &launch.1, &launch.2) {
+        next.last_check = None;
     }
     let raw = serde_json::to_string(&next).map_err(|error| error.to_string())?;
     db.kv_set(scope::ACP_AGENTS, id, &raw);
@@ -334,6 +405,176 @@ pub struct AcpAgentInfo {
     /// What a built-in agent needs before it can run.
     #[serde(default, skip_serializing_if = "Optional::is_none")]
     pub note: Optional<String>,
+    /// What the last check of its command line and environment found; absent
+    /// until one ran.
+    #[serde(default, skip_serializing_if = "Optional::is_none")]
+    pub last_check: Optional<AcpCheck>,
+}
+
+/// How a check of an agent ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Schematic)]
+#[serde(rename_all = "snake_case")]
+pub enum AcpCheckState {
+    /// It started and answered `initialize`.
+    Ready,
+    /// Its executable is not there: not on its `PATH`, or not an executable file.
+    NotFound,
+    /// It did not start, did not answer `initialize` in time, or answered it
+    /// with an error.
+    Failed,
+}
+
+/// What a check found (`POST /api/acp/agents/{id}/check`): the agent was
+/// started with its environment, sent `initialize` and stopped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Schematic)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpCheck {
+    /// When, ISO-8601.
+    pub checked_at: String,
+    /// How it ended.
+    pub state: AcpCheckState,
+    /// Where its executable was found.
+    #[serde(default, skip_serializing_if = "Optional::is_none")]
+    pub resolved_path: Optional<String>,
+    /// The ACP version it agreed to.
+    #[serde(default, skip_serializing_if = "Optional::is_none")]
+    pub protocol_version: Optional<u64>,
+    /// What it says it is.
+    #[serde(default, skip_serializing_if = "Optional::is_none")]
+    pub agent_info: Optional<AcpAgentIdentity>,
+    /// What it says it can do.
+    #[serde(default, skip_serializing_if = "Optional::is_none")]
+    pub capabilities: Optional<AcpCapabilities>,
+    /// The ways it can be signed in to, when it needs that first.
+    #[serde(default, skip_serializing_if = "Optional::is_none")]
+    pub auth_methods: Optional<Vec<AcpAuthMethod>>,
+    /// Why it is not ready: the error, the end of what it wrote to stderr and
+    /// the `PATH` it was looked up on, with the agent's variable values and
+    /// anything that looks like a key taken out.
+    #[serde(default, skip_serializing_if = "Optional::is_none")]
+    pub error: Optional<String>,
+}
+
+/// An agent's `agentInfo`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Schematic)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpAgentIdentity {
+    /// Its programmatic name.
+    pub name: String,
+    /// Its display name.
+    #[serde(default, skip_serializing_if = "Optional::is_none")]
+    pub title: Optional<String>,
+    /// Its version.
+    #[serde(default, skip_serializing_if = "Optional::is_none")]
+    pub version: Optional<String>,
+}
+
+/// What an agent says it can do, as `initialize` answers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Schematic)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpCapabilities {
+    /// It can reopen a session (`session/load`).
+    pub load_session: bool,
+    /// A prompt may hold images.
+    pub image: bool,
+    /// A prompt may hold audio.
+    pub audio: bool,
+    /// A prompt may embed resources.
+    pub embedded_context: bool,
+    /// It can be given MCP servers over HTTP.
+    pub mcp_http: bool,
+    /// It can be given MCP servers over SSE.
+    pub mcp_sse: bool,
+}
+
+/// One way an agent can be signed in to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Schematic)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpAuthMethod {
+    /// Its id.
+    pub id: String,
+    /// What it is called.
+    pub name: String,
+    /// What it does.
+    #[serde(default, skip_serializing_if = "Optional::is_none")]
+    pub description: Optional<String>,
+}
+
+/// The longest error a check keeps.
+const MAX_CHECK_ERROR: usize = 4096;
+
+impl AcpCheck {
+    /// An agent that started and answered `initialize` with `answer`.
+    pub fn ready(resolved: PathBuf, answer: &crate::acp::InitializeResponse) -> Self {
+        let caps = &answer.agent_capabilities;
+        Self {
+            resolved_path: Some(resolved.to_string_lossy().into_owned()).into(),
+            protocol_version: answer.protocol_version.into(),
+            agent_info: answer
+                .agent_info
+                .as_ref()
+                .map(|info| AcpAgentIdentity {
+                    name: info.name.clone(),
+                    title: info.title.clone().into(),
+                    version: info.version.clone().into(),
+                })
+                .into(),
+            capabilities: Some(AcpCapabilities {
+                load_session: caps.load_session,
+                image: caps.prompt_capabilities.image,
+                audio: caps.prompt_capabilities.audio,
+                embedded_context: caps.prompt_capabilities.embedded_context,
+                mcp_http: caps.mcp_capabilities.http,
+                mcp_sse: caps.mcp_capabilities.sse,
+            })
+            .into(),
+            auth_methods: (!answer.auth_methods.is_empty())
+                .then(|| {
+                    answer
+                        .auth_methods
+                        .iter()
+                        .map(|method| AcpAuthMethod {
+                            id: method.id.clone(),
+                            name: method.name.clone(),
+                            description: method.description.clone().into(),
+                        })
+                        .collect()
+                })
+                .into(),
+            ..Self::ended(AcpCheckState::Ready, None)
+        }
+    }
+
+    /// A check that ended in `state`, with `error` saying why. The error is
+    /// cut to [`MAX_CHECK_ERROR`] bytes; redacting it is the caller's.
+    pub fn ended(state: AcpCheckState, error: Option<String>) -> Self {
+        let error = error.map(|mut error| {
+            if error.len() > MAX_CHECK_ERROR {
+                let mut end = MAX_CHECK_ERROR;
+                while !error.is_char_boundary(end) {
+                    end -= 1;
+                }
+                error.truncate(end);
+                error.push('\u{2026}');
+            }
+            error
+        });
+        Self {
+            checked_at: crate::sessions::iso8601(std::time::SystemTime::now()),
+            state,
+            resolved_path: None.into(),
+            protocol_version: None.into(),
+            agent_info: None.into(),
+            capabilities: None.into(),
+            auth_methods: None.into(),
+            error: error.into(),
+        }
+    }
+
+    /// Whether the agent cannot run, as far as this check knows.
+    pub fn failed(&self) -> bool {
+        self.state != AcpCheckState::Ready
+    }
 }
 
 /// `GET /api/acp/agents`.
@@ -341,7 +582,8 @@ pub struct AcpAgentInfo {
 pub struct AcpAgentList {
     /// The agents sessions can run on, in id order.
     pub agents: Vec<AcpAgentInfo>,
-    /// The built-in descriptions, to offer when an agent is added.
+    /// The built-in descriptions, to offer when an agent is added, each with
+    /// whether its executable is on this server's `PATH`.
     pub presets: Vec<AcpAgentPreset>,
 }
 
@@ -367,9 +609,10 @@ pub struct AcpAgentUpdate {
 /// The ACP agents configured on this machine, and the built-in descriptions.
 #[api(id = "acp_agents", group = "acp", summary = "ACP agents")]
 pub async fn acp_agents(State(state): State<AppState>) -> Json<AcpAgentList> {
+    let env = clean_env_bare();
     Json(AcpAgentList {
         agents: agents(&state.paths).iter().map(AcpAgent::info).collect(),
-        presets: presets().to_vec(),
+        presets: presets().iter().map(|preset| preset.looked_up(&env)).collect(),
     })
 }
 
@@ -388,14 +631,35 @@ pub async fn put_acp_agent(
 }
 
 /// Remove an ACP agent. Its sessions stay listed and readable; they cannot be
-/// continued until an agent with this id is configured again.
+/// continued until an agent with this id is configured again. Refused while a
+/// turn of the agent is running, or a message is waiting for one.
 #[api(id = "delete_acp_agent", group = "acp", summary = "Remove an ACP agent")]
 pub async fn delete_acp_agent(State(state): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Json<SendResult>, ApiError> {
+    let Some(agent) = agent(&state.paths, &id) else {
+        return Err(ApiError::not_found("no such ACP agent"));
+    };
+    if state.drive.injections.acp_agent_busy(&id) {
+        return Err(ApiError::conflict(format!(
+            "{} is running a turn; stop it, or let it finish, then remove the agent",
+            agent.name
+        )));
+    }
     if !remove(&state.paths, &id) {
         return Err(ApiError::not_found("no such ACP agent"));
     }
     state.drive.injections.forget_acp_options(&id);
     Ok(Json(SendResult { accepted: true }))
+}
+
+/// Check an ACP agent: start it with its environment, send `initialize`, read
+/// what it says it is and can do, and stop it. Nothing is sent to a model. The
+/// answer is kept as the agent's `lastCheck`.
+#[api(id = "check_acp_agent", group = "acp", summary = "Check an ACP agent")]
+pub async fn check_acp_agent(State(state): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Json<AcpCheck>, ApiError> {
+    let agent = agent(&state.paths, &id).ok_or_else(|| ApiError::not_found("no such ACP agent"))?;
+    let check = state.drive.injections.check_acp_agent(&agent).await;
+    agent.record_check(&state.paths, &check);
+    Ok(Json(check))
 }
 
 /// Register this module's routes.
@@ -404,6 +668,7 @@ pub fn routes(router: ApiRouter) -> ApiRouter {
         .get("/api/acp/agents", acp_agents)
         .put("/api/acp/agents/{id}", put_acp_agent)
         .delete("/api/acp/agents/{id}", delete_acp_agent)
+        .post("/api/acp/agents/{id}/check", check_acp_agent)
 }
 
 /// Everything gotcha cannot express about those routes.
@@ -422,7 +687,15 @@ pub fn describe(reg: &mut ExtraResponses) {
         "An unusable id, name, executable, argument or environment block",
     )
     .describe("DELETE", "/api/acp/agents/{id}", 200, "The agent is gone; its sessions stay")
-    .error("DELETE", "/api/acp/agents/{id}", 404, "No such ACP agent");
+    .error("DELETE", "/api/acp/agents/{id}", 404, "No such ACP agent")
+    .error("DELETE", "/api/acp/agents/{id}", 409, "A turn of the agent is running")
+    .describe(
+        "POST",
+        "/api/acp/agents/{id}/check",
+        200,
+        "What the check found: ready, or why the agent cannot start",
+    )
+    .error("POST", "/api/acp/agents/{id}/check", 404, "No such ACP agent");
 }
 
 #[cfg(test)]
@@ -559,5 +832,71 @@ mod tests {
         update(&paths, "x", &patch(Some("/x"), None, None)).expect("saved");
         assert!(update(&paths, "x", &patch(Some(""), None, None)).is_err(), "removing is a delete, not an empty executable");
         assert_eq!(agent(&paths, "x").unwrap().command, "/x");
+    }
+
+    #[test]
+    fn a_check_is_kept_until_the_command_line_or_environment_changes() {
+        let (_home, paths) = paths();
+        update(&paths, "x", &patch(Some("/x/agent"), Some(&["acp"]), Some("KEY=a-long-secret"))).expect("saved");
+        let configured = agent(&paths, "x").unwrap();
+        assert!(configured.last_check.is_none(), "nothing checked yet");
+        let found = AcpCheck::ended(AcpCheckState::NotFound, Some("gone".into()));
+        assert!(configured.record_check(&paths, &found));
+        assert_eq!(agent_check(&paths, "x"), Some(AcpCheckState::NotFound));
+        assert_eq!(agent(&paths, "x").unwrap().info().last_check.0.and_then(|check| check.error.0), Some("gone".into()));
+
+        // A new name is the same process: the check stands.
+        update(&paths, "x", &AcpAgentUpdate { name: Some("Renamed".into()).into(), ..AcpAgentUpdate::default() }).expect("saved");
+        assert_eq!(agent_check(&paths, "x"), Some(AcpCheckState::NotFound));
+        // Another environment is another process: it is forgotten.
+        update(&paths, "x", &patch(None, None, Some("KEY=other"))).expect("saved");
+        assert_eq!(agent_check(&paths, "x"), None);
+
+        // A check of what was configured before an edit is not kept after it.
+        let before = agent(&paths, "x").unwrap();
+        update(&paths, "x", &patch(Some("/y/agent"), None, None)).expect("saved");
+        assert!(!before.record_check(&paths, &found), "it describes a command line that is gone");
+        assert_eq!(agent_check(&paths, "x"), None);
+    }
+
+    fn agent_check(paths: &Paths, id: &str) -> Option<AcpCheckState> {
+        agent(paths, id).and_then(|agent| agent.last_check).map(|check| check.state)
+    }
+
+    #[test]
+    fn a_check_error_is_bounded_and_says_nothing_of_the_values() {
+        let long = AcpCheck::ended(AcpCheckState::Failed, Some("é".repeat(MAX_CHECK_ERROR)));
+        assert!(long.failed());
+        let error = long.error.0.expect("an error");
+        assert!(error.len() <= MAX_CHECK_ERROR + '\u{2026}'.len_utf8(), "{}", error.len());
+        let agent = AcpAgent {
+            id: "x".into(),
+            name: "X".into(),
+            command: "/x".into(),
+            args: vec![],
+            env: vec![
+                EnvVar { key: "SHORT".into(), value: "ab".into() },
+                EnvVar { key: "KEY".into(), value: "secret-value".into() },
+                EnvVar { key: "LONGER".into(), value: "secret-value-2".into() },
+            ],
+            last_check: None,
+        };
+        assert_eq!(agent.secrets(), vec!["secret-value-2", "secret-value"], "the longest first, the short ones left alone");
+    }
+
+    #[test]
+    fn a_preset_says_whether_its_executable_is_on_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let preset = presets().first().expect("a built-in").clone();
+        let env = Env::from([("PATH".to_string(), dir.path().to_string_lossy().into_owned())]);
+        assert!(!preset.looked_up(&env).on_path);
+        let program = dir.path().join(&preset.command);
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(preset.looked_up(&env).on_path);
     }
 }

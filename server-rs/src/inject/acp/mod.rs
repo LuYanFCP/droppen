@@ -53,8 +53,8 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use super::*;
-use crate::acp::{category, option_for, ConfigOption};
-use crate::acp_agent::AcpAgent;
+use crate::acp::{category, option_for, ConfigOption, InitializeResponse};
+use crate::acp_agent::{AcpAgent, AcpCheck, AcpCheckState};
 use crate::sessions::acp_transcript::{agent_dir, has_conversation, locate, read_header, record, Translator};
 use client::Client;
 use conn::Conn;
@@ -72,6 +72,9 @@ const START_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What to do when an agent cannot be started, said after the reason.
 const INSTALL_HINT: &str = "Check its executable and arguments in Settings";
+
+/// How long a check waits for `initialize` to be answered.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The configured agent `id`, or why a new session cannot run on it.
 fn configured(paths: &Paths, id: &str) -> Result<AcpAgent, InjectError> {
@@ -284,6 +287,66 @@ impl InjectionRegistry {
         self.acp_options.lock().unwrap().remove(agent);
     }
 
+    /// Whether a turn of the agent `agent` is running, in any of its sessions,
+    /// or a message is waiting for one.
+    pub fn acp_agent_busy(&self, agent: &str) -> bool {
+        self.acp_servers.lock().unwrap().values().any(|handle| handle.runs_on(agent) && handle.busy())
+    }
+
+    /// Check `agent`: find its executable on its own `PATH`, start it in a
+    /// scratch directory, send `initialize`, read the answer, and stop it.
+    /// Nothing reaches a model, and no session is opened.
+    ///
+    /// Bounded: `initialize` gets [`CHECK_TIMEOUT`], what the agent wrote to
+    /// stderr is its last few lines, and the error is cut to a few KB. What it
+    /// says is redacted of the agent's own variable values and of anything that
+    /// looks like a key.
+    pub async fn check_acp_agent(&self, agent: &AcpAgent) -> AcpCheck {
+        let env = agent.environment(clean_env_bare());
+        let searched = format!("PATH={}", env.get("PATH").map(String::as_str).unwrap_or(""));
+        let redact = |text: String| {
+            let mut text = self.redact(&text);
+            for secret in agent.secrets() {
+                text = text.replace(secret, "\u{2022}\u{2022}\u{2022}\u{2022}");
+            }
+            text
+        };
+        let Some(resolved) = crate::process_env::resolve_on_path(agent.command.trim(), &env) else {
+            let error = format!("{}: no such executable\n{searched}", agent.command.trim());
+            return AcpCheck::ended(AcpCheckState::NotFound, Some(redact(error)));
+        };
+        let scratch = std::env::temp_dir().join(format!("droppen-acp-check-{}", new_uuid()));
+        if let Err(error) = tokio::fs::create_dir_all(&scratch).await {
+            return AcpCheck::ended(AcpCheckState::Failed, Some(redact(format!("cannot make a scratch directory: {error}"))));
+        }
+        let checked = match start(agent, &scratch).await {
+            Err(error) => AcpCheck::ended(AcpCheckState::Failed, Some(redact(format!("{error}\n{searched}")))),
+            Ok(mut started) => {
+                let answered = tokio::time::timeout(CHECK_TIMEOUT, started.conn.initialize()).await;
+                started.client.kill_all();
+                started.conn.close().await;
+                if tokio::time::timeout(Duration::from_secs(5), started.child.wait()).await.is_err() {
+                    let _ = started.child.start_kill();
+                    let _ = started.child.wait().await;
+                }
+                match answered {
+                    Ok(Ok(answer)) => AcpCheck::ready(resolved, &InitializeResponse::read(&answer)),
+                    failed => {
+                        let reason = match failed {
+                            Ok(Err(error)) => error.to_string(),
+                            _ => format!("{} did not answer initialize within {}s", agent.name, CHECK_TIMEOUT.as_secs()),
+                        };
+                        let tail = started.stderr.text();
+                        let said = if tail.is_empty() { reason } else { format!("{reason}\n{tail}") };
+                        AcpCheck::ended(AcpCheckState::Failed, Some(redact(said)))
+                    }
+                }
+            }
+        };
+        let _ = tokio::fs::remove_dir_all(&scratch).await;
+        checked
+    }
+
     pub(super) fn acp_handle(&self, id: &str) -> Option<Handle> {
         self.acp_servers.lock().unwrap().get(&self.key_of(Source::Acp, id)).cloned()
     }
@@ -445,7 +508,7 @@ impl InjectionRegistry {
         }
 
         let (tx, rx) = mpsc::unbounded_channel();
-        let handle = Handle::new(tx);
+        let handle = Handle::new(tx, &agent.id);
         self.acp_servers.lock().unwrap().insert(self.key_of(Source::Acp, &id), handle.clone());
         let Started { child, stderr, client, conn } = started;
         let driver = Driver {
@@ -496,6 +559,7 @@ mod tests {
             command: "/x/fake".into(),
             args: vec![],
             env: vec![],
+            last_check: None,
         }
     }
 

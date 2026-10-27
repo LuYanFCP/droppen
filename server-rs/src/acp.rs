@@ -317,6 +317,102 @@ pub fn config_options(answer: &Value) -> Vec<ConfigOption> {
         .unwrap_or_default()
 }
 
+/// The answer to `initialize`: what the agent is and says it can do.
+///
+/// Every part is optional to read: an agent that leaves one out, or spells
+/// one in a way this build does not know, is described with what it did say.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitializeResponse {
+    /// The protocol version it agreed to.
+    #[serde(default)]
+    pub protocol_version: Option<u64>,
+    /// What it can do.
+    #[serde(default)]
+    pub agent_capabilities: AgentCapabilities,
+    /// The ways it can be signed in to, when it needs that before a session.
+    #[serde(default)]
+    pub auth_methods: Vec<AuthMethod>,
+    /// Its own name and version.
+    #[serde(default)]
+    pub agent_info: Option<Implementation>,
+}
+
+impl InitializeResponse {
+    /// Read an `initialize` answer, leniently: a part this build cannot read
+    /// is left out rather than failing the rest.
+    pub fn read(answer: &Value) -> Self {
+        fn part<T: serde::de::DeserializeOwned>(answer: &Value, key: &str) -> Option<T> {
+            answer.get(key).cloned().and_then(|value| serde_json::from_value(value).ok())
+        }
+        Self {
+            protocol_version: answer.get("protocolVersion").and_then(Value::as_u64),
+            agent_capabilities: part(answer, "agentCapabilities").unwrap_or_default(),
+            auth_methods: part(answer, "authMethods").unwrap_or_default(),
+            agent_info: part(answer, "agentInfo"),
+        }
+    }
+}
+
+/// `agentCapabilities`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AgentCapabilities {
+    /// It can reopen a session (`session/load`).
+    pub load_session: bool,
+    /// What a prompt may hold besides text.
+    pub prompt_capabilities: PromptCapabilities,
+    /// Which MCP transports it can be given servers over, besides stdio.
+    pub mcp_capabilities: McpCapabilities,
+}
+
+/// `promptCapabilities`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PromptCapabilities {
+    /// Images.
+    pub image: bool,
+    /// Audio.
+    pub audio: bool,
+    /// Resources embedded in the prompt.
+    pub embedded_context: bool,
+}
+
+/// `mcpCapabilities`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct McpCapabilities {
+    /// MCP servers over HTTP.
+    pub http: bool,
+    /// MCP servers over SSE.
+    pub sse: bool,
+}
+
+/// One of `authMethods`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthMethod {
+    /// Its id.
+    pub id: String,
+    /// What it is called.
+    pub name: String,
+    /// What it does.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// `agentInfo`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Implementation {
+    /// Its programmatic name.
+    pub name: String,
+    /// Its display name.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Its version.
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
 /// The answer to `session/prompt`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

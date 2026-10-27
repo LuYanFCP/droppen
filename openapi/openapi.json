@@ -481,6 +481,27 @@
         "required": [],
         "type": "object"
       },
+      "AcpAgentIdentity": {
+        "description": "An agent's `agentInfo`.",
+        "properties": {
+          "name": {
+            "description": "Its programmatic name.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Its display name.",
+            "type": "string"
+          },
+          "version": {
+            "description": "Its version.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "AcpAgentInfo": {
         "description": "One configured agent, as a client sees it: the variables' names, not their\nvalues.",
         "properties": {
@@ -509,6 +530,10 @@
           "id": {
             "description": "Its id: what sessions record, and what `presets/icons/<id>.svg` draws.",
             "type": "string"
+          },
+          "lastCheck": {
+            "$ref": "#/components/schemas/AcpCheck",
+            "description": "What the last check of its command line and environment found; absent\nuntil one ran."
           },
           "name": {
             "description": "What the user calls it.",
@@ -539,7 +564,7 @@
             "type": "array"
           },
           "presets": {
-            "description": "The built-in descriptions, to offer when an agent is added.",
+            "description": "The built-in descriptions, to offer when an agent is added, each with\nwhether its executable is on this server's `PATH`.",
             "items": {
               "$ref": "#/components/schemas/AcpAgentPreset"
             },
@@ -581,6 +606,10 @@
           "note": {
             "description": "What it needs before it can run.",
             "type": "string"
+          },
+          "onPath": {
+            "description": "Whether its executable is on this server's `PATH`, as a lookup finds it\n(nothing is started). Filled in when the descriptions are listed.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -616,6 +645,120 @@
         },
         "required": [],
         "type": "object"
+      },
+      "AcpAuthMethod": {
+        "description": "One way an agent can be signed in to.",
+        "properties": {
+          "description": {
+            "description": "What it does.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Its id.",
+            "type": "string"
+          },
+          "name": {
+            "description": "What it is called.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "AcpCapabilities": {
+        "description": "What an agent says it can do, as `initialize` answers.",
+        "properties": {
+          "audio": {
+            "description": "A prompt may hold audio.",
+            "type": "boolean"
+          },
+          "embeddedContext": {
+            "description": "A prompt may embed resources.",
+            "type": "boolean"
+          },
+          "image": {
+            "description": "A prompt may hold images.",
+            "type": "boolean"
+          },
+          "loadSession": {
+            "description": "It can reopen a session (`session/load`).",
+            "type": "boolean"
+          },
+          "mcpHttp": {
+            "description": "It can be given MCP servers over HTTP.",
+            "type": "boolean"
+          },
+          "mcpSse": {
+            "description": "It can be given MCP servers over SSE.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "loadSession",
+          "image",
+          "audio",
+          "embeddedContext",
+          "mcpHttp",
+          "mcpSse"
+        ],
+        "type": "object"
+      },
+      "AcpCheck": {
+        "description": "What a check found (`POST /api/acp/agents/{id}/check`): the agent was\nstarted with its environment, sent `initialize` and stopped.",
+        "properties": {
+          "agentInfo": {
+            "$ref": "#/components/schemas/AcpAgentIdentity",
+            "description": "What it says it is."
+          },
+          "authMethods": {
+            "description": "The ways it can be signed in to, when it needs that first.",
+            "items": {
+              "$ref": "#/components/schemas/AcpAuthMethod"
+            },
+            "type": "array"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/AcpCapabilities",
+            "description": "What it says it can do."
+          },
+          "checkedAt": {
+            "description": "When, ISO-8601.",
+            "type": "string"
+          },
+          "error": {
+            "description": "Why it is not ready: the error, the end of what it wrote to stderr and\nthe `PATH` it was looked up on, with the agent's variable values and\nanything that looks like a key taken out.",
+            "type": "string"
+          },
+          "protocolVersion": {
+            "description": "The ACP version it agreed to.",
+            "type": "integer"
+          },
+          "resolvedPath": {
+            "description": "Where its executable was found.",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/AcpCheckState",
+            "description": "How it ended."
+          }
+        },
+        "required": [
+          "checkedAt",
+          "state"
+        ],
+        "type": "object"
+      },
+      "AcpCheckState": {
+        "description": "How a check of an agent ended.",
+        "enum": [
+          "ready",
+          "not_found",
+          "failed"
+        ],
+        "type": "string"
       },
       "AgentTranscript": {
         "description": "A subagent's own transcript.",
@@ -7558,7 +7701,7 @@
     "/api/acp/agents/{id}": {
       "delete": {
         "deprecated": false,
-        "description": "Remove an ACP agent. Its sessions stay listed and readable; they cannot be\ncontinued until an agent with this id is configured again.",
+        "description": "Remove an ACP agent. Its sessions stay listed and readable; they cannot be\ncontinued until an agent with this id is configured again. Refused while a\nturn of the agent is running, or a message is waiting for one.",
         "operationId": "delete_acp_agent",
         "parameters": [
           {
@@ -7590,6 +7733,16 @@
               }
             },
             "description": "No such ACP agent"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A turn of the agent is running"
           }
         },
         "summary": "Remove an ACP agent",
@@ -7645,6 +7798,49 @@
           }
         },
         "summary": "Add or update an ACP agent",
+        "tags": [
+          "acp"
+        ]
+      }
+    },
+    "/api/acp/agents/{id}/check": {
+      "post": {
+        "deprecated": false,
+        "description": "Check an ACP agent: start it with its environment, send `initialize`, read\nwhat it says it is and can do, and stop it. Nothing is sent to a model. The\nanswer is kept as the agent's `lastCheck`.",
+        "operationId": "check_acp_agent",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcpCheck"
+                }
+              }
+            },
+            "description": "What the check found: ready, or why the agent cannot start"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No such ACP agent"
+          }
+        },
+        "summary": "Check an ACP agent",
         "tags": [
           "acp"
         ]

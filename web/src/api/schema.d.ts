@@ -364,9 +364,32 @@ export interface paths {
         /**
          * Remove an ACP agent
          * @description Remove an ACP agent. Its sessions stay listed and readable; they cannot be
-         *     continued until an agent with this id is configured again.
+         *     continued until an agent with this id is configured again. Refused while a
+         *     turn of the agent is running, or a message is waiting for one.
          */
         delete: operations["delete_acp_agent"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/acp/agents/{id}/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check an ACP agent
+         * @description Check an ACP agent: start it with its environment, send `initialize`, read
+         *     what it says it is and can do, and stop it. Nothing is sent to a model. The
+         *     answer is kept as the agent's `lastCheck`.
+         */
+        post: operations["check_acp_agent"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2850,6 +2873,15 @@ export interface components {
              */
             secret?: string;
         };
+        /** @description An agent's `agentInfo`. */
+        AcpAgentIdentity: {
+            /** @description Its programmatic name. */
+            name: string;
+            /** @description Its display name. */
+            title?: string;
+            /** @description Its version. */
+            version?: string;
+        };
         /**
          * @description One configured agent, as a client sees it: the variables' names, not their
          *     values.
@@ -2865,6 +2897,11 @@ export interface components {
             homepage?: string;
             /** @description Its id: what sessions record, and what `presets/icons/<id>.svg` draws. */
             id: string;
+            /**
+             * @description What the last check of its command line and environment found; absent
+             *     until one ran.
+             */
+            lastCheck?: components["schemas"]["AcpCheck"];
             /** @description What the user calls it. */
             name: string;
             /** @description What a built-in agent needs before it can run. */
@@ -2874,7 +2911,10 @@ export interface components {
         AcpAgentList: {
             /** @description The agents sessions can run on, in id order. */
             agents: components["schemas"]["AcpAgentInfo"][];
-            /** @description The built-in descriptions, to offer when an agent is added. */
+            /**
+             * @description The built-in descriptions, to offer when an agent is added, each with
+             *     whether its executable is on this server's `PATH`.
+             */
             presets: components["schemas"]["AcpAgentPreset"][];
         };
         /** @description One built-in agent description: how a known agent is started in ACP mode. */
@@ -2891,6 +2931,11 @@ export interface components {
             name: string;
             /** @description What it needs before it can run. */
             note?: string;
+            /**
+             * @description Whether its executable is on this server's `PATH`, as a lookup finds it
+             *     (nothing is started). Filled in when the descriptions are listed.
+             */
+            onPath?: boolean;
         };
         /** @description The body of `PUT /api/acp/agents/{id}`; every field is a patch. */
         AcpAgentUpdate: {
@@ -2906,6 +2951,61 @@ export interface components {
             /** @description The name; `""` goes back to the built-in's or the id, absent leaves it alone. */
             name?: string;
         };
+        /** @description One way an agent can be signed in to. */
+        AcpAuthMethod: {
+            /** @description What it does. */
+            description?: string;
+            /** @description Its id. */
+            id: string;
+            /** @description What it is called. */
+            name: string;
+        };
+        /** @description What an agent says it can do, as `initialize` answers. */
+        AcpCapabilities: {
+            /** @description A prompt may hold audio. */
+            audio: boolean;
+            /** @description A prompt may embed resources. */
+            embeddedContext: boolean;
+            /** @description A prompt may hold images. */
+            image: boolean;
+            /** @description It can reopen a session (`session/load`). */
+            loadSession: boolean;
+            /** @description It can be given MCP servers over HTTP. */
+            mcpHttp: boolean;
+            /** @description It can be given MCP servers over SSE. */
+            mcpSse: boolean;
+        };
+        /**
+         * @description What a check found (`POST /api/acp/agents/{id}/check`): the agent was
+         *     started with its environment, sent `initialize` and stopped.
+         */
+        AcpCheck: {
+            /** @description What it says it is. */
+            agentInfo?: components["schemas"]["AcpAgentIdentity"];
+            /** @description The ways it can be signed in to, when it needs that first. */
+            authMethods?: components["schemas"]["AcpAuthMethod"][];
+            /** @description What it says it can do. */
+            capabilities?: components["schemas"]["AcpCapabilities"];
+            /** @description When, ISO-8601. */
+            checkedAt: string;
+            /**
+             * @description Why it is not ready: the error, the end of what it wrote to stderr and
+             *     the `PATH` it was looked up on, with the agent's variable values and
+             *     anything that looks like a key taken out.
+             */
+            error?: string;
+            /** @description The ACP version it agreed to. */
+            protocolVersion?: number;
+            /** @description Where its executable was found. */
+            resolvedPath?: string;
+            /** @description How it ended. */
+            state: components["schemas"]["AcpCheckState"];
+        };
+        /**
+         * @description How a check of an agent ended.
+         * @enum {string}
+         */
+        AcpCheckState: "ready" | "not_found" | "failed";
         /** @description A subagent's own transcript. */
         AgentTranscript: {
             /** @description Which agent type answered. */
@@ -7042,6 +7142,46 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SendResult"];
+                };
+            };
+            /** @description No such ACP agent */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description A turn of the agent is running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    check_acp_agent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description What the check found: ready, or why the agent cannot start */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcpCheck"];
                 };
             };
             /** @description No such ACP agent */
