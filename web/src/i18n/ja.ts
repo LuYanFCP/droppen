@@ -923,10 +923,8 @@ export const ja: Record<string, string> = {
   // The desktop app's update, ready (`app/desktop-update.tsx`).
   "restart": "再起動",
   "no room beside the returned message's attachments (at most {{max}}), so these were taken out: {{names}}": "戻されたメッセージの添付を戻すと空きがなくなったため（最大 {{max}} 個）、次の添付を外しました：{{names}}",
-  // Settings → ACP agent (`features/settings/settings-view.tsx`), and the agent's name where none is set.
+  // Settings → ACP agents (`features/settings/acp-agents-section.tsx`), and an ACP session's agent (`components/source-icon.tsx`).
   "ACP agent": "ACP エージェント",
-  "acp agent": "acp エージェント",
-  "Any agent that speaks the Agent Client Protocol (ACP) over stdio can run sessions here. Give the command that starts it in ACP mode; leave the executable empty to turn it off.": "Agent Client Protocol（ACP）を stdio で話すエージェントなら、ここでセッションを動かせます。ACP モードで起動するコマンドを指定してください。実行ファイルを空にするとオフになります。",
   "preset": "プリセット",
   "custom (no preset)": "カスタム（プリセットなし）",
   "learn more": "詳しく見る",
@@ -935,4 +933,12 @@ export const ja: Record<string, string> = {
   "environment (one KEY=VALUE per line)": "環境変数（1 行に 1 つの KEY=VALUE）",
   "· saved: {{names}} (a new block replaces them all)": "· 保存済み：{{names}}（新しい内容ですべて置き換えます）",
   "clear variables": "変数を消去",
+  "acp agents": "acp エージェント",
+  "Any agent that speaks the Agent Client Protocol (ACP) over stdio can run sessions here, each with its own command line and variables. A session always runs on the agent it was started with.": "Agent Client Protocol（ACP）を stdio で話すエージェントなら、ここでセッションを動かせます。エージェントごとにコマンドラインと変数を設定します。セッションは常に、開始したエージェントで動きます。",
+  "No ACP agent is set up on this device yet.": "このデバイスにはまだ ACP エージェントが設定されていません。",
+  "add agent": "エージェントを追加",
+  "new agent": "新しいエージェント",
+  "variables: {{names}}": "変数：{{names}}",
+  "Remove {{name}}? Its sessions stay in the list and can be read, but cannot be continued until an agent is added again as “{{id}}”.": "{{name}} を削除しますか？セッションは一覧に残り、読むことはできますが、「{{id}}」としてエージェントを追加し直すまで続けられません。",
+  "{{name}} (removed)": "{{name}}（削除済み）",
 };

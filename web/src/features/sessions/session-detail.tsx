@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { SourceIcon } from "@/components/source-icon";
+import { AcpAgentChip, SourceIcon } from "@/components/source-icon";
+import { useAcpAgentLook } from "@/features/sessions/acp-agent-icons";
 import { useParams } from "@tanstack/react-router";
 import {
   ArrowDown,
@@ -1484,6 +1485,10 @@ function Composer({
   // The machine's offline copy is read-only: nothing is queued for later
   // (architecture doc §4: no offline queue), so the composer is shut, not deferred.
   const readOnlyCopy = useShowingCopy();
+  // So is an ACP session whose agent was removed: it is read, not continued,
+  // until an agent with its id is added again — nothing waits for that.
+  const agentRemoved = useAcpAgentLook(source === "acp" ? detail.summary.acpAgent : null).removed;
+  const shut = readOnlyCopy || agentRemoved;
   // Another device's session in the local app (its gateway, S1-7): nothing
   // here can go to it — not a message, a model or an attachment — until S2.
   const otherDevice = useInfoOf(useMachine()).readOnly === true;
@@ -1504,7 +1509,7 @@ function Composer({
 
   // The models offered are the ones the account this session is *bound to* may
   // run — the same value `ComposerQuota` below is given, for the same reason.
-  const choice = useComposerChoice(source, id, detail.cliChoice, detail.account?.id ?? null);
+  const choice = useComposerChoice(source, id, detail.cliChoice, detail.account?.id ?? null, undefined, detail.summary.acpAgent);
   const { activeModel, activeEffort, activePermission } = choice;
 
   // The checklist sidecar is only ever rewritten by a tool call, so the number
@@ -1805,7 +1810,7 @@ function Composer({
     if (
       (!message && attachments.length === 0) ||
       send.isPending ||
-      readOnlyCopy ||
+      shut ||
       anyFailed
     ) {
       return;
@@ -1966,10 +1971,10 @@ function Composer({
           text={text}
           onText={setText}
           onTextLive={setTextState}
-          disabled={readOnlyCopy}
+          disabled={shut}
           onSubmit={submit}
           placeholder={
-            readOnlyCopy
+            shut
               ? (detail.sendBlockReason ?? t("the device is offline — this is a read-only copy"))
               : detail.canSend
                 ? `${sendsAnswer ? t("type your answer…") : t("send a message to this session…")} (${sendHint})`
@@ -1982,7 +1987,7 @@ function Composer({
             <ChecklistChip source={source} id={id} toolTick={toolTick} />
           </>}
           send={{
-            disabled: send.isPending || readOnlyCopy || anyFailed || (!text.trim() && attachments.length === 0),
+            disabled: send.isPending || shut || anyFailed || (!text.trim() && attachments.length === 0),
             label: sendsAnswer ? t("send as your answer") : willQueue ? t("add to queue") : t("send"),
             busy: send.isPending || sendQueued,
             queues: willQueue,
@@ -2746,6 +2751,9 @@ export function SessionDetailInner({
             <Badge variant={summary.source === "acp" ? "default" : summary.source} className="shrink-0">
               {t("chat")}
             </Badge>
+          ) : summary.source === "acp" ? (
+            // Its agent's mark and name: the session's own, whatever else is configured.
+            <AcpAgentChip agent={summary.acpAgent} />
           ) : (
             <SourceIcon source={summary.source} className="text-muted" />
           )}

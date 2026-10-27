@@ -1,36 +1,16 @@
-import presets from "./acp-agent-presets.json";
+import type { components } from "@/api/schema";
 
 /**
  * A known ACP agent the settings can fill in: how it is started in ACP mode
- * over stdio. Data, not code — the list is `acp-agent-presets.json`, and
- * nothing here names an agent.
+ * over stdio. Data, not code — the server's built-in list (`acp-agents.json`,
+ * served by `GET /api/acp/agents`), and nothing here names an agent. An agent
+ * added from one keeps its id, which is what its mark is found by
+ * (`presets/icons/<id>.svg`).
  */
-export interface AcpAgentPreset {
-  /** Stable key for the picker. */
-  id: string;
-  /** What the agent is called; shown as is, never translated. */
-  name: string;
-  /** The executable, as found on the `PATH`. */
-  command: string;
-  /** The arguments that put it into ACP mode. */
-  args: string[];
-  /** Its mark: a file in `presets/icons/`, drawn as path data. */
-  icon?: string;
-  /** Where its ACP setup is documented. */
-  homepage?: string;
-  /** A short hint: what it needs before it can run. */
-  note?: string;
-}
+export type AcpAgentPreset = components["schemas"]["AcpAgentPreset"];
 
-/** Every preset, in the order the picker offers them. */
-export const ACP_AGENT_PRESETS: readonly AcpAgentPreset[] = presets;
-
-/** The picker's "no preset" choice: whatever is typed. */
+/** The "add an agent" picker's choice of no preset: whatever is typed. */
 export const CUSTOM_PRESET = "custom";
-
-export function presetById(id: string): AcpAgentPreset | undefined {
-  return ACP_AGENT_PRESETS.find((preset) => preset.id === id);
-}
 
 /** The settings form's unsaved edits: `null` is a field left as saved. */
 export interface AcpAgentDraft {
@@ -44,19 +24,33 @@ export interface AcpAgentDraft {
  * arguments, which stay editable; the custom choice leaves every field alone.
  * Nothing is saved either way.
  */
-export function applyPreset(draft: AcpAgentDraft, id: string, presets: readonly AcpAgentPreset[] = ACP_AGENT_PRESETS): AcpAgentDraft {
+export function applyPreset(draft: AcpAgentDraft, id: string, presets: readonly AcpAgentPreset[]): AcpAgentDraft {
   const preset = presets.find((candidate) => candidate.id === id);
   if (!preset) return draft;
   return { name: preset.name, command: preset.command, args: preset.args.join(" ") };
 }
 
-/** The preset a saved configuration was made from, if its command line is one. */
-export function matchingPreset(
-  saved: { command: string; args: readonly string[] } | undefined,
-  presets: readonly AcpAgentPreset[] = ACP_AGENT_PRESETS,
-): AcpAgentPreset | undefined {
-  if (!saved?.command) return undefined;
-  return presets.find(
-    (preset) => preset.command === saved.command && preset.args.join(" ") === saved.args.join(" "),
-  );
+/** The longest agent id the server takes. */
+const MAX_ID = 64;
+
+/**
+ * The id a new agent is saved under: a preset's own, else the name as a slug
+ * (lowercase letters, digits and `-`), numbered past the ids already `taken`.
+ * The server holds every id to that shape: it names the agent's transcripts.
+ */
+export function newAgentId(name: string, taken: ReadonlySet<string>, preset?: string): string {
+  if (preset && preset !== CUSTOM_PRESET && !taken.has(preset)) return preset;
+  const slug = name
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, MAX_ID - 4)
+    .replace(/-+$/, "");
+  const base = slug || "agent";
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) {
+    const candidate = `${base}-${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
 }

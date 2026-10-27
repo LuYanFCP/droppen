@@ -922,10 +922,8 @@ export const zhTW: Record<string, string> = {
   // The desktop app's update, ready (`app/desktop-update.tsx`).
   "restart": "重啟",
   "no room beside the returned message's attachments (at most {{max}}), so these were taken out: {{names}}": "退回的訊息自帶的附件放回後已沒有空位（最多 {{max}} 個），以下附件已被移出：{{names}}",
-  // Settings → ACP agent (`features/settings/settings-view.tsx`), and the agent's name where none is set.
+  // Settings → ACP agents (`features/settings/acp-agents-section.tsx`), and an ACP session's agent (`components/source-icon.tsx`).
   "ACP agent": "ACP 代理",
-  "acp agent": "acp 代理",
-  "Any agent that speaks the Agent Client Protocol (ACP) over stdio can run sessions here. Give the command that starts it in ACP mode; leave the executable empty to turn it off.": "任何透過 stdio 使用 Agent Client Protocol（ACP）的代理都可以在這裡執行工作階段。填寫以 ACP 模式啟動它的命令；執行檔留空即關閉。",
   "preset": "預設組合",
   "custom (no preset)": "自訂（不用預設組合）",
   "learn more": "了解更多",
@@ -934,4 +932,12 @@ export const zhTW: Record<string, string> = {
   "environment (one KEY=VALUE per line)": "環境變數（每行一個 KEY=VALUE）",
   "· saved: {{names}} (a new block replaces them all)": "· 已儲存：{{names}}（填寫新的內容會全部取代）",
   "clear variables": "清除變數",
+  "acp agents": "acp 代理",
+  "Any agent that speaks the Agent Client Protocol (ACP) over stdio can run sessions here, each with its own command line and variables. A session always runs on the agent it was started with.": "任何透過 stdio 使用 Agent Client Protocol（ACP）的代理都可以在這裡執行工作階段，每個都有自己的命令列和變數。工作階段始終在啟動它的代理上執行。",
+  "No ACP agent is set up on this device yet.": "這台裝置上還沒有設定 ACP 代理。",
+  "add agent": "新增代理",
+  "new agent": "新代理",
+  "variables: {{names}}": "變數：{{names}}",
+  "Remove {{name}}? Its sessions stay in the list and can be read, but cannot be continued until an agent is added again as “{{id}}”.": "移除 {{name}}？它的工作階段會留在清單中，仍可檢視，但在以「{{id}}」重新新增代理之前無法繼續。",
+  "{{name}} (removed)": "{{name}}（已移除）",
 };

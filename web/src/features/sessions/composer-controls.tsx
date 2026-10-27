@@ -371,6 +371,8 @@ export function useComposerChoice(
   accountId?: string | null,
   /** The model to start on when none (sendable) is stored: the one the server paired with the login shown ([`useComposerStart`]). */
   startModel?: string | null,
+  /** An ACP session's agent, by id: whose models and efforts are offered. */
+  acpAgent?: string | null,
 ) {
   const api = useApi();
   const machine = useMachine();
@@ -442,15 +444,25 @@ export function useComposerChoice(
   // Codex has one config root and no account to pick, so its key stays
   // account-free: sending a meaningless id would split one cache entry in two.
   const modelAccount = source === "claude" ? (accountId ?? null) : null;
+  // Every ACP agent publishes its own list; with no agent named there is none.
+  const modelAgent = acp ? (acpAgent ?? null) : null;
   const { data: modelData, isError: modelsFailed } = useQuery({
     // The account is in the key, not just the query: two accounts publish two
     // lists, and one served out of the other's entry is the bug this fixes.
-    queryKey: mq(machine, "models", source, modelAccount),
+    // The same goes for two ACP agents.
+    queryKey: mq(machine, "models", source, acp ? modelAgent : modelAccount),
     queryFn: async () =>
       (await api.GET("/api/models", {
-        params: { query: { source, ...(modelAccount ? { accountId: modelAccount } : {}) } },
+        params: {
+          query: {
+            source,
+            ...(modelAccount ? { accountId: modelAccount } : {}),
+            ...(modelAgent ? { acpAgent: modelAgent } : {}),
+          },
+        },
       })).data,
     staleTime: 5 * 60_000,
+    enabled: !acp || modelAgent !== null,
   });
   // An ACP agent's list is the agent's own (its `model` option); there is no
   // static guess to fall back on, and no list means no pickers at all.

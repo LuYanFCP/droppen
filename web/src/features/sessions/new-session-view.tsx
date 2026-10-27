@@ -79,13 +79,13 @@ import {
   type NewSessionPrefill,
   type RecentDirectory,
 } from "./new-session";
-import { isSessionSource, type CreationAttempt, type NewConversation, type SessionSource } from "./new-session-flow";
+import { agentKey, parseAgentKey, type CreationAttempt, type NewConversation, type SessionSource } from "./new-session-flow";
 import { useCreateConversation, type AcceptedConversation } from "./use-create-conversation";
-import { useAcpSettings } from "./acp-agent";
-import { ACP_GLYPH, useAcpAgentLook } from "./acp-agent-icons";
+import { useAcpAgents } from "./acp-agent";
+import { acpAgentGlyph } from "./acp-agent-icons";
 import { cliGlyph } from "@/components/source-icon";
 
-/** The CLIs that are always offered, with their marks; the ACP agent is offered once one is configured. */
+/** The CLIs that are always offered, with their marks; then one entry per configured ACP agent. */
 const CLI_SOURCES = (["claude", "codex"] as const).map((source) => ({ value: source, label: source, glyph: cliGlyph(source) }));
 
 /** A message on its way to becoming a session's first. */
@@ -139,7 +139,8 @@ export function NewSessionView({
 
   const [draft] = useState(() => applyNewSessionPrefill(readNewSessionDraft(localStorage, machine), prefill));
   const [text, setText] = useState(draft.text);
-  const [source, setSourceState] = useState<SessionSource>(draft.source);
+  const [pickedSource, setSourceState] = useState<SessionSource>(draft.source);
+  const [pickedAcpAgent, setAcpAgent] = useState<string | null>(draft.source === "acp" ? (draft.acpAgent ?? null) : null);
   const [cwdPick, setCwdPick] = useState<string | null>(draft.cwd);
   // null while untouched, so the stored default stays in force until picked.
   const [accountChoice, setAccountChoice] = useState<string | null>(draft.account);
@@ -175,16 +176,30 @@ export function NewSessionView({
   const tabStop = onScreen.includes(cwd) ? cwd : (onScreen[0] ?? null);
 
   const { data: accountList } = useAccounts();
+  // Every configured ACP agent is an agent of its own here, by its name and
+  // mark. A draft may name one since removed, or none (`?agent=acp`): once
+  // the list is in, a removed one falls back to Claude Code, and none is the
+  // first agent there is.
+  const { data: acpList } = useAcpAgents();
+  const acpAgents = acpList?.agents ?? [];
+  const acpAgent =
+    pickedSource !== "acp"
+      ? null
+      : acpList === undefined
+        ? pickedAcpAgent
+        : (acpAgents.find((agent) => agent.id === (pickedAcpAgent ?? acpAgents[0]?.id))?.id ?? null);
+  const source: SessionSource = pickedSource === "acp" && acpList !== undefined && acpAgent === null ? "claude" : pickedSource;
   // Each CLI runs under its own accounts: a Claude login cannot start a Codex
   // session. An ACP agent runs on its own configuration and has none.
   const acp = source === "acp";
-  // The ACP agent, by the name it was given, once one is configured — or while
-  // it is the agent already picked, so the picker never shows a blank.
-  const { data: acpSettings } = useAcpSettings();
-  const acpLook = useAcpAgentLook();
-  const sources = acpSettings?.command || acp
-    ? [...CLI_SOURCES, { value: "acp", label: acpLook.name || t("ACP agent"), glyph: acpLook.glyph ?? ACP_GLYPH }]
-    : CLI_SOURCES;
+  const sources = [
+    ...CLI_SOURCES,
+    ...acpAgents.map((agent) => ({ value: agentKey({ source: "acp", acpAgent: agent.id }), label: agent.name, glyph: acpAgentGlyph(agent.id) })),
+    // The pick while the list is on its way, so the picker never shows a blank.
+    ...(acp && acpAgent && !acpAgents.some((agent) => agent.id === acpAgent)
+      ? [{ value: agentKey({ source, acpAgent }), label: acpAgent, glyph: acpAgentGlyph(acpAgent) }]
+      : []),
+  ];
   const accounts = acp ? [] : accountsForProvider(accountList?.accounts ?? [], source);
   // Untouched, the picker shows where the server will start a session that
   // names no account — the default (moved off a rest), the local login, or,
@@ -210,7 +225,7 @@ export function NewSessionView({
   const localSignedOut = !accountValue && localSignedOutNow;
   // The models on offer follow the account picked here: this is the one
   // surface where the credentials are chosen before the session exists.
-  const choice = useComposerChoice(source, undefined, null, accountValue || null, picked === null ? (startAccount?.model ?? null) : null);
+  const choice = useComposerChoice(source, undefined, null, accountValue || null, picked === null ? (startAccount?.model ?? null) : null, acpAgent);
 
   // The draft, kept as it changes — except while a start is in flight, when
   // the composer is empty only because the message is on its way: a reload
@@ -220,13 +235,14 @@ export function NewSessionView({
   useEffect(() => {
     if (starting) return;
     writeNewSessionDraft(localStorage, machine, {
-      text, attachments: ready, source, cwd: cwdPick, account: accountChoice, attempt: attempt.current,
+      text, attachments: ready, source, ...(acpAgent ? { acpAgent } : {}), cwd: cwdPick, account: accountChoice, attempt: attempt.current,
     });
     // `ready` is read through its key: a new array every render, the same list.
-  }, [machine, text, readyKey, source, cwdPick, accountChoice, starting]);
+  }, [machine, text, readyKey, source, acpAgent, cwdPick, accountChoice, starting]);
 
-  const setSource = (next: SessionSource) => {
+  const setSource = (next: SessionSource, nextAcpAgent: string | null = null) => {
     setSourceState(next);
+    setAcpAgent(next === "acp" ? nextAcpAgent : null);
     // A pick made for the other CLI names an account this one cannot use.
     setAccountChoice(null);
     setAccountPickedHere(false);
@@ -241,7 +257,9 @@ export function NewSessionView({
     if (!prefill || prefill === appliedPrefill.current) return;
     appliedPrefill.current = prefill;
     if (prefill.cwd) setCwdPick(prefill.cwd);
-    if (prefill.source && prefill.source !== source) setSource(prefill.source);
+    if (prefill.source && (prefill.source !== source || (prefill.acpAgent && prefill.acpAgent !== acpAgent))) {
+      setSource(prefill.source, prefill.acpAgent ?? null);
+    }
     if (prefill.text !== undefined) {
       setText(prefill.text);
       attachments.clear();
@@ -251,7 +269,7 @@ export function NewSessionView({
   }, [prefill]);
 
   const input = (message: string, images: string[], files: string[]): NewConversation => ({
-    kind: "session", source, cwd, text: message, model: choice.activeModel.id, effort: choice.activeEffort,
+    kind: "session", source, acpAgent, cwd, text: message, model: choice.activeModel.id, effort: choice.activeEffort,
     permission: choice.activePermission, images, files,
     // Only a pick is sent; untouched, the server's start rule decides — unless
     // the pair shown is one no model-less start reaches, which has to be named.
@@ -377,7 +395,7 @@ export function NewSessionView({
     // A start pressed for this device is not sent from here once it moves.
     dropPressed();
     const there = readNewSessionDraft(localStorage, next);
-    if (text.trim() && !there.text.trim()) writeNewSessionDraft(localStorage, next, { ...there, text, source });
+    if (text.trim() && !there.text.trim()) writeNewSessionDraft(localStorage, next, { ...there, text, source, ...(acpAgent ? { acpAgent } : {}) });
     onDevice?.(next);
   };
 
@@ -534,7 +552,16 @@ export function NewSessionView({
             chips={<>
               {/* Never another device shown read-only here (the local app's gateway): nothing starts there. */}
               {onDevice && <DevicePicker ghost forStarting writable value={machine} onSelect={switchDevice} disabled={busy} />}
-              <ComposerSelect ghost label={t("cli")} value={source} options={sources} onChange={(v) => setSource(v as SessionSource)} />
+              <ComposerSelect
+                ghost
+                label={t("cli")}
+                value={agentKey({ source, acpAgent })}
+                options={sources}
+                onChange={(v) => {
+                  const next = parseAgentKey(v);
+                  if (next) setSource(next.source, next.acpAgent);
+                }}
+              />
               <DirectoryChip cwd={cwd} onShow={showList} disabled={busy} />
               <ComposerChoiceChips
                 source={source}

@@ -1,18 +1,28 @@
 import { useQuery } from "@tanstack/react-query";
+import type { components } from "@/api/schema";
 import { useApi, useMachine } from "@/lib/machines/context";
 import { mq } from "@/lib/machines/query";
 import type { MachineKey } from "@/lib/machines/key";
 
-/** Where this machine's ACP agent settings are cached. */
-export const acpSettingsKey = (machine: MachineKey) => mq(machine, "acp-settings");
+export type AcpAgentInfo = components["schemas"]["AcpAgentInfo"];
+export type AcpAgentList = components["schemas"]["AcpAgentList"];
 
-/** How this machine starts its ACP agent: its name, command line and variable names. */
-export function useAcpSettings() {
+/** Where this device's ACP agents are cached. */
+export const acpAgentsKey = (machine: MachineKey) => mq(machine, "acp-agents");
+
+/**
+ * The ACP agents this device runs sessions on (`agents`, each with the names
+ * of its variables), and the built-in descriptions offered when one is added
+ * (`presets`). `enabled: false` asks nothing (a row of another device's).
+ */
+export function useAcpAgents(enabled = true) {
   const api = useApi();
   const machine = useMachine();
   return useQuery({
-    queryKey: acpSettingsKey(machine),
-    queryFn: async () => (await api.GET("/api/acp/settings")).data,
+    queryKey: acpAgentsKey(machine),
+    queryFn: async () => (await api.GET("/api/acp/agents")).data,
+    staleTime: 60_000,
+    enabled,
   });
 }
 

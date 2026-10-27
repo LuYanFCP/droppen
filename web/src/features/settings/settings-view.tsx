@@ -3,7 +3,6 @@ import { useSearch } from "@tanstack/react-router";
 import { MachineLink, useMachineNavigate } from "@/app/machine-route";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ApiError, errorText } from "@/api/errors";
 import type { components } from "@/api/schema";
 import { useFeedSessions, useFeedSettings } from "@/app/global-feed";
 import { SelectField } from "@/components/ui/select";
@@ -28,9 +27,7 @@ import {
   SETTINGS_FIELD,
 } from "@/features/settings/layout";
 import { SetupSection } from "@/features/setup/settings-section";
-import { acpSettingsKey, splitArgs, useAcpSettings } from "@/features/sessions/acp-agent";
-import { ACP_AGENT_PRESETS, applyPreset, CUSTOM_PRESET, matchingPreset, presetById } from "@/features/sessions/acp-agent-presets";
-import { ACP_GLYPH, presetGlyph } from "@/features/sessions/acp-agent-icons";
+import { AcpAgentsSection } from "@/features/settings/acp-agents-section";
 import { cn } from "@/lib/cn";
 import { isCloud } from "@/lib/hub/config";
 import { formatTime } from "@/lib/format";
@@ -691,178 +688,6 @@ function ChatProviderSection() {
   );
 }
 
-/**
- * How this device starts its ACP agent: any program that speaks the Agent
- * Client Protocol over stdio, with the arguments and variables it needs.
- *
- * A preset (`acp-agent-presets.json`) fills in the name, executable and
- * arguments of a known agent; they stay editable, and nothing is saved until
- * the person saves. Nothing is picked for them: no agent is the default.
- *
- * The values are what an API key looks like, so they are never read back —
- * the server says which names are set, and a block typed here replaces them all.
- */
-function AcpAgentSection() {
-  const api = useApi();
-  const machine = useMachine();
-  const { t } = useTranslation();
-  const queryClient = useQueryClient();
-  const { data: settings } = useAcpSettings();
-  const [name, setName] = useState<string | null>(null);
-  const [command, setCommand] = useState<string | null>(null);
-  const [args, setArgs] = useState<string | null>(null);
-  const [env, setEnv] = useState<string | null>(null);
-  // The preset picked since the last save; otherwise the one the saved
-  // command line came from, if any.
-  const [preset, setPreset] = useState<string | null>(null);
-  const shownPreset = preset ?? matchingPreset(settings)?.id ?? CUSTOM_PRESET;
-  const hint = presetById(shownPreset);
-  const pickPreset = (id: string) => {
-    const next = applyPreset({ name, command, args }, id);
-    setName(next.name);
-    setCommand(next.command);
-    setArgs(next.args);
-    setPreset(id);
-  };
-
-  const save = useMutation({
-    mutationFn: async (patch: { name?: string; command?: string; args?: string[]; env?: string }) => {
-      const res = await api.PUT("/api/acp/settings", { body: patch });
-      if (!res.data) throw new ApiError(res.error);
-      return res.data;
-    },
-    onSuccess: (data) => {
-      queryClient.setQueryData(acpSettingsKey(machine), data);
-      void queryClient.invalidateQueries({ queryKey: mq(machine, "models", "acp") });
-      setName(null);
-      setCommand(null);
-      setArgs(null);
-      setEnv(null);
-      setPreset(null);
-    },
-  });
-
-  const dirty = name !== null || command !== null || args !== null || env !== null;
-  const names = settings?.envNames ?? [];
-  const field = cn(SETTINGS_FIELD, "font-mono");
-
-  return (
-    <section className="border-b border-border p-3">
-      <h2 data-label="" className={SECTION_TITLE}>
-        {t("acp agent")}
-      </h2>
-      <div className={cn(SETTINGS_COLUMN, "flex flex-col gap-2")}>
-        <span className="text-xs text-muted">
-          {t("Any agent that speaks the Agent Client Protocol (ACP) over stdio can run sessions here. Give the command that starts it in ACP mode; leave the executable empty to turn it off.")}
-        </span>
-        <div className="flex flex-col gap-1">
-          <span className="text-xs text-muted">{t("preset")}</span>
-          <SelectField
-            aria-label={t("preset")}
-            value={shownPreset}
-            onValueChange={pickPreset}
-            options={[
-              { value: CUSTOM_PRESET, label: t("custom (no preset)"), glyph: ACP_GLYPH },
-              ...ACP_AGENT_PRESETS.map((p) => ({ value: p.id, label: p.name, glyph: presetGlyph(p) ?? ACP_GLYPH })),
-            ]}
-          />
-          {hint && (hint.note || hint.homepage) && (
-            <span data-preset-hint="" className="text-xs text-muted">
-              {hint.note}
-              {hint.note && hint.homepage && " · "}
-              {hint.homepage && (
-                <a href={hint.homepage} target="_blank" rel="noreferrer" className="underline hover:text-fg">
-                  {t("learn more")}
-                </a>
-              )}
-            </span>
-          )}
-        </div>
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-muted">{t("name")}</span>
-          <input
-            value={name ?? settings?.name ?? ""}
-            onChange={(e) => setName(e.target.value)}
-            placeholder={t("ACP agent")}
-            autoComplete="off"
-            spellCheck={false}
-            className={SETTINGS_FIELD}
-          />
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-muted">{t("executable")}</span>
-          <input
-            value={command ?? settings?.command ?? ""}
-            onChange={(e) => setCommand(e.target.value)}
-            placeholder="/path/to/agent"
-            autoComplete="off"
-            spellCheck={false}
-            className={field}
-          />
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-muted">{t("arguments (separated by spaces)")}</span>
-          <input
-            value={args ?? settings?.args.join(" ") ?? ""}
-            onChange={(e) => setArgs(e.target.value)}
-            placeholder="acp"
-            autoComplete="off"
-            spellCheck={false}
-            className={field}
-          />
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-muted">
-            {t("environment (one KEY=VALUE per line)")}
-            {names.length > 0 && <> {t("· saved: {{names}} (a new block replaces them all)", { names: names.join(", ") })}</>}
-          </span>
-          <textarea
-            rows={4}
-            value={env ?? ""}
-            onChange={(e) => setEnv(e.target.value)}
-            placeholder={names.length > 0 ? "••••••••" : "KEY=…"}
-            autoComplete="off"
-            spellCheck={false}
-            className={cn(field, "h-auto resize-y py-1.5 max-md:h-auto")}
-          />
-        </label>
-        {save.error && (
-          <span data-signal="failed" className="text-xs text-danger">
-            {errorText(save.error)}
-          </span>
-        )}
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            disabled={!dirty || save.isPending}
-            onClick={() =>
-              save.mutate({
-                ...(name !== null ? { name } : {}),
-                ...(command !== null ? { command } : {}),
-                ...(args !== null ? { args: splitArgs(args) } : {}),
-                ...(env !== null ? { env } : {}),
-              })
-            }
-            data-variant="primary" className={SETTINGS_ACTION_PRIMARY}
-          >
-            {t("save")}
-          </button>
-          {names.length > 0 && (
-            <button
-              type="button"
-              disabled={save.isPending}
-              onClick={() => save.mutate({ env: "" })}
-              className={SETTINGS_ACTION}
-            >
-              {t("clear variables")}
-            </button>
-          )}
-        </div>
-      </div>
-    </section>
-  );
-}
-
 function GeneralSettings() {
   const { t } = useTranslation();
   // Server info and counts arrive over the global websocket feed.
@@ -896,7 +721,7 @@ function GeneralSettings() {
       <PhoneNotificationsSection />
       <InstallSection />
       <ChatProviderSection />
-      <AcpAgentSection />
+      <AcpAgentsSection />
       <SettingsUpdatesRow />
       <section className="p-3">
         <h2 data-label="" className={SECTION_TITLE}>

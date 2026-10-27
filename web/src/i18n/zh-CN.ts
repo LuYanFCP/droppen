@@ -922,10 +922,8 @@ export const zhCN: Record<string, string> = {
   // The desktop app's update, ready (`app/desktop-update.tsx`).
   "restart": "重启",
   "no room beside the returned message's attachments (at most {{max}}), so these were taken out: {{names}}": "退回的消息自带的附件放回后已没有空位（最多 {{max}} 个），以下附件已被移出：{{names}}",
-  // Settings → ACP agent (`features/settings/settings-view.tsx`), and the agent's name where none is set.
+  // Settings → ACP agents (`features/settings/acp-agents-section.tsx`), and an ACP session's agent (`components/source-icon.tsx`).
   "ACP agent": "ACP 智能体",
-  "acp agent": "acp 智能体",
-  "Any agent that speaks the Agent Client Protocol (ACP) over stdio can run sessions here. Give the command that starts it in ACP mode; leave the executable empty to turn it off.": "任何通过 stdio 使用 Agent Client Protocol（ACP）的智能体都可以在这里运行会话。填写以 ACP 模式启动它的命令；可执行文件留空即关闭。",
   "preset": "预设",
   "custom (no preset)": "自定义（不用预设）",
   "learn more": "了解更多",
@@ -934,4 +932,12 @@ export const zhCN: Record<string, string> = {
   "environment (one KEY=VALUE per line)": "环境变量（每行一个 KEY=VALUE）",
   "· saved: {{names}} (a new block replaces them all)": "· 已保存：{{names}}（填写新的内容会全部替换）",
   "clear variables": "清除变量",
+  "acp agents": "acp 智能体",
+  "Any agent that speaks the Agent Client Protocol (ACP) over stdio can run sessions here, each with its own command line and variables. A session always runs on the agent it was started with.": "任何通过 stdio 使用 Agent Client Protocol（ACP）的智能体都可以在这里运行会话，每个都有自己的命令行和变量。会话始终运行在启动它的智能体上。",
+  "No ACP agent is set up on this device yet.": "这台设备上还没有设置 ACP 智能体。",
+  "add agent": "添加智能体",
+  "new agent": "新智能体",
+  "variables: {{names}}": "变量：{{names}}",
+  "Remove {{name}}? Its sessions stay in the list and can be read, but cannot be continued until an agent is added again as “{{id}}”.": "移除 {{name}}？它的会话会留在列表里，仍可查看，但在以“{{id}}”重新添加智能体之前无法继续。",
+  "{{name}} (removed)": "{{name}}（已移除）",
 };
