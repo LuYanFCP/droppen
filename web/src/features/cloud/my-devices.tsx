@@ -29,12 +29,11 @@ import { useStore } from "@/lib/machines/store";
 import { useDeviceSessions } from "@/features/machines/device-sessions";
 import { unreadAcross } from "@/features/machines/needs-you";
 import { UnreadSignals } from "@/features/machines/unread-signals";
-import { ACCOUNT_PATH, askedPlace, askRemoval, cleanDevicesAddress, DEVICES_PATH, isAccountPath } from "./devices-route";
-import { AccountNotices, ChainAlerts, DevicesPanel, PendingRecoveryBanner, useAccountVersion } from "./devices";
-import { PendingPasskeyBanner } from "./passkey-join";
-import { VerifyEmailBanner } from "./email-verify";
+import { ACCOUNT_PATH, askedPlace, askRemoval, DEVICES_PATH, isAccountPath } from "./devices-route";
+import { AccountAlerts } from "./account-alerts";
+import { DevicesPanel, useAccountVersion } from "./devices";
 import { hubShell, useShellMachines } from "@/features/machines/shells";
-import { PlanBanner, RegisteredDeviceAlerts, SignInChangeAlerts, useMe } from "./plan";
+import { useMe } from "./plan";
 import { SignOutChoice } from "./sign-out-dialog";
 import { CloudPage, quiet } from "./ui";
 
@@ -106,24 +105,19 @@ export function DevicesButton() {
 export interface MyDevicesProps {
   account: CloudAccount;
   link: HubLink;
-  origin: string;
-  /** Open a device that runs AI (the app on it). */
-  onSelect?: (machine: string) => void;
-  /** Open a device that runs AI on one of its pages (a session, its terminals). */
-  onOpenAt?: (machine: string, path: string) => void;
 }
 
-export function MyDevicesScreen({ account, link, origin, onSelect, onOpenAt }: MyDevicesProps) {
+export function MyDevicesScreen({ account, link }: MyDevicesProps) {
   useAccountVersion(account);
   useAskedPlace();
   return (
-    <MyDevicesFrame account={account} link={link} onBack={onSelect}>
-      <DevicesPanel account={account} link={link} origin={origin} onSelect={onSelect} onOpenAt={onOpenAt} />
+    <MyDevicesFrame account={account} link={link}>
+      <DevicesPanel account={account} link={link} />
     </MyDevicesFrame>
   );
 }
 
-/** A part of the page a way in asked for, brought into view; and an old address's filter dropped. */
+/** A part of the page a way in asked for, brought into view. */
 function useAskedPlace(): void {
   const asked = useStore(askedPlace);
   useEffect(() => {
@@ -131,11 +125,6 @@ function useAskedPlace(): void {
     askedPlace.set(null);
     scrollTo(asked.anchor);
   }, [asked]);
-  useEffect(() => {
-    if (typeof location === "undefined") return;
-    const href = cleanDevicesAddress(location.pathname, location.search);
-    if (href) history.replaceState(history.state, "", href);
-  }, []);
 }
 
 /** Bring the element `id` into view once it is drawn (the relay picker draws once it has the relays). */
@@ -161,7 +150,7 @@ export function AccountName({ account, link }: { account: CloudAccount; link: Hu
 }
 
 /** The page around the list: the bar's account and way back, the account's alerts and notices. */
-function MyDevicesFrame({ account, link, onBack, children }: { account: CloudAccount; link: HubLink; onBack?: (machine: string) => void; children: ReactNode }) {
+function MyDevicesFrame({ account, link, children }: { account: CloudAccount; link: HubLink; children: ReactNode }) {
   const { t } = useTranslation();
   // The tab and the badge: only devices that are up (`unreadAcross`), read off their copies.
   const lists = useDeviceSessions();
@@ -181,7 +170,7 @@ function MyDevicesFrame({ account, link, onBack, children }: { account: CloudAcc
               className={cn(quiet, "h-7 min-w-0 px-2")}
               title={t("back to {{name}}", { name: backName })}
               aria-label={t("back to {{name}}", { name: backName })}
-              onClick={() => (onBack ? onBack(back) : shell?.select(back))}
+              onClick={() => shell?.select(back)}
             >
               <ArrowLeft className="size-3.5 shrink-0" />
               <span className="max-w-40 truncate max-sm:hidden">{backName}</span>
@@ -209,14 +198,7 @@ function MyDevicesFrame({ account, link, onBack, children }: { account: CloudAcc
       }
     >
       <UnreadSignals unread={unreadAcross(lists)} />
-      <PendingPasskeyBanner account={account} link={link} onRemovePasskey={removePasskeyThere} />
-      <PendingRecoveryBanner account={account} link={link} />
-      <ChainAlerts account={account} link={link} />
-      <RegisteredDeviceAlerts account={account} link={link} />
-      <SignInChangeAlerts account={account} link={link} onReview={() => openAccount()} />
-      <VerifyEmailBanner account={account} />
-      <PlanBanner account={account} link={link} />
-      <AccountNotices account={account} link={link} />
+      <AccountAlerts account={account} link={link} where="devices" onRemovePasskey={removePasskeyThere} onReview={() => openAccount()} />
       {children}
     </CloudPage>
   );

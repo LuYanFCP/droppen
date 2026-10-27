@@ -13,7 +13,7 @@ import type { RelayPool } from "@/lib/hub/relays";
 import type { MachineKey } from "@/lib/machines/key";
 import type { MachineInfo } from "@/lib/machines/runtime";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import type { CloudMode } from "./cloud-transport";
+import type { CloudMode } from "@/lib/transport/switching";
 import {
   type CopyView,
   useAgentKeyState,
@@ -25,12 +25,12 @@ import {
   useRelayPool,
 } from "./context";
 import { useCloudMode } from "@/features/machines/copy-mode";
-import { ChainAlerts, PendingRecoveryBanner } from "./devices";
+import { DeviceDot } from "@/features/machines/device-picker";
+import { AccountAlerts } from "./account-alerts";
 import { AccountButton, DevicesButton, openAccount, openMyDevices, removePasskeyThere } from "./my-devices";
-import { PendingPasskeyBanner } from "./passkey-join";
 import { cityName, noticeText } from "./relays";
 import { BarMachineName } from "./machine-name";
-import { RegisteredDeviceAlerts, SignInChangeAlerts, storageFullText, useMe } from "./plan";
+import { storageFullText, useMe } from "./plan";
 import { CompatBadge } from "./browser-support";
 import { storageView } from "@/lib/hub/plan";
 import { SignOutChoice } from "./sign-out-dialog";
@@ -49,7 +49,7 @@ import { useHomeMachine } from "@/lib/machines/context";
  * to 「我的设备」 (`my-devices.tsx`). Renders nothing in local mode.
  *
  * When the machine cannot be reached the app shows its offline copy
- * (`offline-transport.ts`), read-only, and a notice under the strip says so
+ * (`lib/transport/offline.ts`), read-only, and a notice under the strip says so
  * and how old the copy is. Only a device with no copy at all is covered
  * ("no offline copy yet") until the machine is back.
  */
@@ -107,7 +107,6 @@ function Bar({ shell, machine }: { shell: HubShell; machine: HubMachine }) {
   const keyState = useAgentKeyState(machine.key);
   const me = useMe(shell.account, shell.link);
   const machines = useShellMachines();
-  const online = presence === "online";
   const refusal = machine.channel.refusal;
   const state = barState({ link, presence, channel, mode, copy, refusal: refusal?.kind ?? null });
   // A full cloud storage: the hub took no more of this machine's copy after its last write (§3.8).
@@ -128,14 +127,7 @@ function Bar({ shell, machine }: { shell: HubShell; machine: HubMachine }) {
   return (
     <>
       <div data-cloud-bar="" className="flex h-7 shrink-0 items-center gap-2 border-b border-border bg-bg px-3 font-mono text-2xs">
-        <span
-          data-signal={!online && presence !== "unknown" ? "offline" : undefined}
-          className={cn(
-            "size-[7px] shrink-0",
-            online ? "bg-fg" : presence === "unknown" ? "shadow-[inset_0_0_0_1.25px_var(--color-faint)]" : "bg-danger",
-          )}
-          title={presence ? t(presence) : t("unknown")}
-        />
+        <DeviceDot state={presence ?? "offline"} title={presence ? undefined : t("unknown")} />
         <BarMachineName machine={machine.key} mirror={machine.mirror} channel={machine.channel} canRename={state.label === "e2e" && shell.account.isAdmin !== false} />
         <MachineSwitcher shell={shell} current={machine.key} />
         {label && (
@@ -166,11 +158,7 @@ function Bar({ shell, machine }: { shell: HubShell; machine: HubMachine }) {
           )}
         </SignOutChoice>
       </div>
-      <PendingPasskeyBanner account={shell.account} link={shell.link} onRemovePasskey={removePasskeyThere} />
-      <PendingRecoveryBanner account={shell.account} link={shell.link} />
-      <ChainAlerts account={shell.account} link={shell.link} />
-      <RegisteredDeviceAlerts account={shell.account} link={shell.link} />
-      <SignInChangeAlerts account={shell.account} link={shell.link} onReview={() => openAccount()} />
+      <AccountAlerts account={shell.account} link={shell.link} where="bar" onRemovePasskey={removePasskeyThere} onReview={() => openAccount()} />
       <PushMovedNotice />
       {keyState === "behind" && <OldKeyNotice onRetry={() => machine.recheckKey(true)} />}
       {channel === "error" && machine.channel.blocked && <BlockedNotice kind={machine.channel.blocked} />}
@@ -627,7 +615,6 @@ export function MachineSwitcher({ shell, current }: { shell: HubShell; current: 
         <ul data-testid="machine-switcher-list" className="flex flex-col">
           {machines.map((info) => {
             const note = switcherNote(info, t);
-            const online = info.state === "online";
             return (
               <li key={info.key}>
                 <button
@@ -637,10 +624,7 @@ export function MachineSwitcher({ shell, current }: { shell: HubShell; current: 
                   onClick={() => pick(info.key)}
                   className="flex h-7 w-full items-center gap-2 px-2 text-left font-mono text-2xs text-fg hover:bg-hover"
                 >
-                  <span
-                    data-signal={info.state === "offline" ? "offline" : undefined}
-                    className={cn("size-[7px] shrink-0", online ? "bg-fg" : info.state === "unknown" ? "shadow-[inset_0_0_0_1.25px_var(--color-faint)]" : "bg-danger")}
-                  />
+                  <DeviceDot state={info.state} title={null} />
                   <span className="max-w-[60%] shrink-0 truncate" title={info.key}>
                     {info.name}
                   </span>

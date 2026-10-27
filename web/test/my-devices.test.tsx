@@ -2,7 +2,7 @@
 // `/devices`, one way to it from the bar (「设备」), and one list on it —
 // every device, the ones that run AI among them — under what the plan uses
 // and this device's own settings. No filter: an old `?view=` link opens the
-// same page, and the address drops it.
+// same page.
 import * as React from "react";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -10,7 +10,7 @@ import test from "node:test";
 import i18next from "i18next";
 import { I18nextProvider, initReactI18next } from "react-i18next";
 import { renderToStaticMarkup } from "react-dom/server";
-import { askedPlace, cleanDevicesAddress, DEVICES_PATH, isDevicesPath } from "../src/features/cloud/devices-route.js";
+import { askedPlace, DEVICES_PATH, isDevicesPath } from "../src/features/cloud/devices-route.js";
 import { AccountName, DevicesButton, MyDevicesScreen } from "../src/features/cloud/my-devices.js";
 import { AccountNotices, DevicesPanel, ThisDeviceSection } from "../src/features/cloud/devices.js";
 import { openRelayPicker } from "../src/features/cloud/cloud-bar.js";
@@ -51,15 +51,10 @@ function draw(node: React.ReactElement, lng = "en"): string {
   return renderToStaticMarkup(<I18nextProvider i18n={i18n}>{node}</I18nextProvider>);
 }
 
-test("「我的设备」 is /devices, and an old link's `?view=` is dropped from the address", () => {
+test("「我的设备」 is /devices", () => {
   assert.ok(isDevicesPath("/devices") && isDevicesPath("/devices/"));
   assert.ok(!isDevicesPath("/sessions") && !isDevicesPath("/devices/x") && !isDevicesPath("/"));
   assert.equal(DEVICES_PATH, "/devices");
-  assert.equal(cleanDevicesAddress("/devices", "?view=ai"), "/devices");
-  assert.equal(cleanDevicesAddress("/devices/", "?view=all"), "/devices");
-  assert.equal(cleanDevicesAddress("/devices", "?view=ai&x=1"), "/devices?x=1", "anything else is kept");
-  assert.equal(cleanDevicesAddress("/devices", ""), null, "nothing to drop");
-  assert.equal(cleanDevicesAddress("/sessions", "?view=ai"), null, "off the page: the app's address is left alone");
 });
 
 /** An account with `hosts` computers that run AI and `others` browsers or phones. */
@@ -79,7 +74,7 @@ function account(hosts: number, others = 1) {
 function shown(acct: ReturnType<typeof account>) {
   let out: React.ReactElement | null = null;
   function Probe() {
-    out = MyDevicesScreen({ account: acct as never, link: {} as never, origin: "wss://hub.example" }) as React.ReactElement;
+    out = MyDevicesScreen({ account: acct as never, link: {} as never }) as React.ReactElement;
     return null;
   }
   draw(<Probe />);
@@ -92,7 +87,12 @@ test("one page whatever the account has: the list of every device, devices that 
   for (const acct of [account(2, 3), account(0, 2)]) {
     const page = shown(acct);
     assert.equal(page.body, DevicesPanel);
-    assert.equal(page.props.origin, "wss://hub.example", "the guide's one-time code needs the hub");
+    assert.deepEqual(Object.keys(page.props).sort(), ["account", "link"], "the panel reads the hub origin itself (hubOrigin())");
+    assert.match(
+      readFileSync(new URL("../src/features/cloud/devices.tsx", import.meta.url), "utf8"),
+      /origin=\{hubOrigin\(\) \?\? ""\}/,
+      "the guide's one-time code takes the hub from the page's marker",
+    );
   }
   // The same with a link of the old filter in the address.
   place.search = "?view=ai";
@@ -100,7 +100,8 @@ test("one page whatever the account has: the list of every device, devices that 
   place.search = "";
   const frame = readFileSync(new URL("../src/features/cloud/my-devices.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(frame, /TabsList|DevicesViewSwitch|DevicesDashboard/, "no filter, no dashboard");
-  assert.equal(frame.match(/<AccountNotices /g)?.length, 1, "the account's notices, once, above the list");
+  const alerts = readFileSync(new URL("../src/features/cloud/account-alerts.tsx", import.meta.url), "utf8");
+  assert.equal(alerts.match(/<AccountNotices /g)?.length, 1, "the account's notices, once, above the list");
 });
 
 test("the bar has one way to 「我的设备」 — 「设备」, a grid — and nothing else leaves the app for a machine list", () => {
@@ -128,7 +129,7 @@ test("the bar names the account by its e-mail once /v1/me says it, its id until 
 
 test("“change relay…” opens 「我的设备」 at the relay picker, under 「这台设备」, unfolded", () => {
   const selected: (string | null)[] = [];
-  setHubShell({ select: (key: string | null) => void selected.push(key) } as never);
+  setHubShell({ kind: "hub", select: (key: string | null) => void selected.push(key) } as never);
   try {
     openRelayPicker();
     assert.deepEqual(selected, [null], "out of the app, onto the page");
@@ -169,6 +170,7 @@ test("the relay picker on 「我的设备」 is about the device the app last sh
   const relays = { directory: null, refresh: async () => undefined, measure: async () => undefined, onChange: () => () => undefined, manual: null };
   const channel = { status: "open" };
   setHubShell({
+    kind: "hub",
     focus: constantStore(null),
     lastShown: "m-0",
     relays,

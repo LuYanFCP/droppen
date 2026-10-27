@@ -61,19 +61,31 @@ import type { MachineKey } from "@/lib/machines/key";
 import { invalidateMachine } from "@/lib/machines/query";
 import { closeMachine, homeMachine, isOpen, type MachineDriver, runtimeFor, setHome } from "@/lib/machines/registry";
 import { machinePath, splitMachinePath } from "@/lib/machines/routes";
-import type { AppShell, MachineInfo, MachineRuntime } from "@/lib/machines/runtime";
+import { type AppShell, type MachineInfo, type MachineRuntime, sameMachineInfo } from "@/lib/machines/runtime";
 import { enterHubShell, openHubMachine } from "@/lib/machines/shells/hub";
-import { hubShell } from "@/features/machines/shells";
+import { hubShell, setHubShell } from "@/features/machines/shells";
+import { setRenewalRunner } from "@/lib/hub/renewal";
 import { createStore, type Store, type WritableStore } from "@/lib/machines/store";
 import { onPageResume } from "@/lib/page-resume";
 import { type Pipe, type PipeMessage, type PipeOpener, tunnelTransport } from "@/lib/transport/tunnel";
 import { feedHubFor } from "@/app/global-feed";
 import { copySessions, type SessionsStore } from "@/features/machines/copy-sessions";
 import { agentVersionOf, systemLabel } from "@/features/machines/device-facts";
-import { ModeController, SwitchingTransport } from "./cloud-transport";
+import { ModeController, SwitchingTransport } from "@/lib/transport/switching";
 import { DEVICES_PATH, isShellPagePath } from "./devices-route";
 import { shownName } from "./machine-name";
-import { offlineTransport, type OfflineOptions } from "./offline-transport";
+import { offlineTransport, type OfflineOptions } from "@/lib/transport/offline";
+
+/**
+ * End the page's hub shell: stop it, drop the slot, and stop renewals. Every
+ * path that leaves the account (refused, forked, removed, signed out) goes
+ * through here, so none of them keeps a shell or a renewal runner running.
+ */
+export function endHubShell(): void {
+  hubShell()?.stop();
+  setHubShell(null);
+  setRenewalRunner(null);
+}
 
 /** What the offline copy says in the app, in the page's language at the moment it is said. */
 const offlineMessages: OfflineOptions["messages"] = {
@@ -155,24 +167,6 @@ export interface HubShellOptions {
 /** A choice of main device the hub could not take (unreachable, unavailable) is sent again after this, doubling up to {@link MAIN_RETRY_MAX_MS}, and whenever the link opens. */
 export const MAIN_RETRY_MS = 5_000;
 const MAIN_RETRY_MAX_MS = 60_000;
-
-/** What a machine is shown as, its info compared field by field (the path's too). */
-function sameInfo(a: MachineInfo, b: MachineInfo): boolean {
-  return (
-    a.key === b.key &&
-    a.name === b.name &&
-    a.state === b.state &&
-    a.since === b.since &&
-    a.copyAsOf === b.copyAsOf &&
-    a.agentVersion === b.agentVersion &&
-    a.os === b.os &&
-    a.canManage === b.canManage &&
-    a.live === b.live &&
-    a.path?.kind === b.path?.kind &&
-    a.path?.relay === b.path?.relay &&
-    a.path?.rttMs === b.path?.rttMs
-  );
-}
 
 /**
  * One machine of the account on droppen.app: its copy, its channel, the
@@ -283,7 +277,7 @@ export class HubMachine implements MachineDriver {
       },
     });
     this.presenceSince = { state: this.presence(), since: now() };
-    this.info = createStore(this.read(), sameInfo);
+    this.info = createStore(this.read(), sameMachineInfo);
     const refresh = () => this.refresh();
     this.offs.push(
       link.onPresence(refresh),

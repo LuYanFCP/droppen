@@ -42,6 +42,7 @@ import { askedPlace } from "./devices-route";
 import { FirstHostCard } from "./first-host";
 import { sessionPath, shellCourier } from "./hub-shell";
 import { hubShell, useFocusedMachine, useShellMachines } from "@/features/machines/shells";
+import { freshLimit } from "@/lib/hub/me";
 import { MachineNotes, noteRenamed, RenameMachineForm, renameThroughNewChannel, shownName, useMachineStatuses, useRenamed } from "./machine-name";
 import { addAsked } from "./onboarding";
 import { AddDeviceHint } from "./onboarding-hints";
@@ -207,12 +208,6 @@ function ResendLine({ state }: { state: ResendState | undefined }) {
 export interface DevicesPanelProps {
   account: CloudAccount;
   link: HubLink;
-  /** The hub's origin, for the 「添加可运行 AI 的设备」 guide's one-time code. */
-  origin?: string;
-  /** Open a device that runs AI (the app on it). */
-  onSelect?: (machine: string) => void;
-  /** Open a device that runs AI on one of its pages (a session, its terminals). */
-  onOpenAt?: (machine: string, path: string) => void;
 }
 
 /**
@@ -220,7 +215,7 @@ export interface DevicesPanelProps {
  * of the account as one list — the ones that run AI among them, each with
  * the way into it — and what can be done with them.
  */
-export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: DevicesPanelProps) {
+export function DevicesPanel({ account, link }: DevicesPanelProps) {
   const { t } = useTranslation();
   useAccountVersion(account);
   usePresenceVersion(link);
@@ -312,8 +307,8 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
     }
   };
   const courier = () => shellCourier(link, account);
-  const open = (id: string) => (onSelect ? onSelect(id) : shell?.select(id));
-  const openAt = (id: string, path: string) => (onOpenAt ? onOpenAt(id, path) : shell?.openAt(id, path));
+  const open = (id: string) => shell?.select(id);
+  const openAt = (id: string, path: string) => shell?.openAt(id, path);
   const listOf = new Map(lists.map((l) => [l.machine, l]));
   const view = (d: DeviceRecord): DeviceRowView => {
     const id = d.info.id;
@@ -624,7 +619,7 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
           <AddComputer
             account={account}
             link={link}
-            origin={origin ?? hubOrigin() ?? ""}
+            origin={hubOrigin() ?? ""}
             onDone={() => setSection({ kind: "list" })}
             pairWith={pairWith}
             initialMode={section.code ? "code" : "guide"}
@@ -668,11 +663,7 @@ export function DevicesPanel({ account, link, origin, onSelect, onOpenAt }: Devi
       {section.kind === "list" && done && (
         <div data-testid="change-report" data-signal="ok" className="mx-6 my-4 flex flex-col gap-1 border border-border p-3 shadow-[inset_2px_0_0_var(--color-ok)] max-md:mx-4">
           <span className="font-mono text-xs text-ok">{done.title}</span>
-          {reportLines(done.report, t).map((line, i) => (
-            <span key={i} className={cn("font-mono text-2xs", alarmLine(done.report, line) ? "text-danger" : "text-muted")} data-signal={alarmLine(done.report, line) ? "alarm" : undefined}>
-              {line}
-            </span>
-          ))}
+          <ReportLines report={done.report} t={t} />
           <Button variant="ghost" className="self-start" onClick={() => setDone(null)}>
             {t("done")}
           </Button>
@@ -1069,11 +1060,7 @@ export function UpgradeAccount({
     return (
       <div data-testid="upgraded" data-signal="ok" className="flex flex-col gap-1 border-b border-border px-6 py-3 shadow-[inset_2px_0_0_var(--color-ok)] max-md:px-4">
         <span className="font-mono text-xs text-ok">{t("the account is on chain v3")}</span>
-        {reportLines(report, t).map((line, i) => (
-          <span key={i} className="font-mono text-2xs text-muted">
-            {line}
-          </span>
-        ))}
+        <ReportLines report={report} t={t} alarm={false} />
       </div>
     );
   }
@@ -1598,6 +1585,22 @@ function alarmLine(report: RotationReport, line: string): boolean {
   return report.machines.some((m) => m.keyring && (line.startsWith(`${m.machine}:`) || line.startsWith(`${m.machine}：`)) && line.includes(m.keyring));
 }
 
+/** A rotation report's lines; `alarm` marks the machine whose new key the keyring did not take (`UpgradeAccount` never did). */
+function ReportLines({ report, t, alarm = true }: { report: RotationReport; t: (key: string, opts?: Record<string, unknown>) => string; alarm?: boolean }) {
+  return (
+    <>
+      {reportLines(report, t).map((line, i) => {
+        const alarmHere = alarm && alarmLine(report, line);
+        return (
+          <span key={i} className={cn("font-mono text-2xs", alarmHere ? "text-danger" : "text-muted")} data-signal={alarmHere ? "alarm" : undefined}>
+            {line}
+          </span>
+        );
+      })}
+    </>
+  );
+}
+
 function reportLines(report: RotationReport, t: (key: string, opts?: Record<string, unknown>) => string): string[] {
   const lines =
     report.ukEpoch === null
@@ -1682,11 +1685,7 @@ function RemoveDevice({
     return (
       <div data-signal="ok" className="flex flex-col gap-1 border border-border p-3 shadow-[inset_2px_0_0_var(--color-ok)]">
         <span className="font-mono text-xs text-ok">{t("removed {{id}}", { id: device })}</span>
-        {reportLines(report, t).map((line, i) => (
-          <span key={i} className={cn("font-mono text-2xs", alarmLine(report, line) ? "text-danger" : "text-muted")} data-signal={alarmLine(report, line) ? "alarm" : undefined}>
-            {line}
-          </span>
-        ))}
+        <ReportLines report={report} t={t} />
         <div className="flex gap-2">
           <button type="button" className={quiet} onClick={onDone}>
             {t("done")}
@@ -1804,11 +1803,7 @@ function RotateKeys({ account, link, due }: { account: CloudAccount; link: HubLi
     return (
       <div data-testid="rotated" data-signal="ok" className="mx-6 my-4 flex flex-col gap-1 border border-border p-3 shadow-[inset_2px_0_0_var(--color-ok)] max-md:mx-4">
         <span className="font-mono text-xs text-ok">{t("keys rotated")}</span>
-        {reportLines(report, t).map((line, i) => (
-          <span key={i} className={cn("font-mono text-2xs", alarmLine(report, line) ? "text-danger" : "text-muted")} data-signal={alarmLine(report, line) ? "alarm" : undefined}>
-            {line}
-          </span>
-        ))}
+        <ReportLines report={report} t={t} />
         <Button variant="ghost" className="self-start" onClick={() => setReport(null)}>
           {t("done")}
         </Button>
@@ -2119,11 +2114,7 @@ export function RetireReplacedPrompt({
     return (
       <div data-testid="retire-replaced-done" className="flex flex-col gap-1">
         <span className="font-mono text-xs text-ok">{t("removed {{id}}", { id: device })}</span>
-        {reportLines(report, t).map((line, i) => (
-          <span key={i} className={cn("font-mono text-2xs", alarmLine(report, line) ? "text-danger" : "text-muted")} data-signal={alarmLine(report, line) ? "alarm" : undefined}>
-            {line}
-          </span>
-        ))}
+        <ReportLines report={report} t={t} />
       </div>
     );
   }
@@ -2519,12 +2510,7 @@ export function ConfirmCandidate({
               // An addition (not a device pairing again): the plan's device
               // limit, freshly read, before anything is signed (§4.3).
               if (me && !account.chain?.deviceRecord(candidate.device)) {
-                try {
-                  await me.refresh();
-                } catch (err) {
-                  console.warn("cloud: /v1/me before adding a device:", err);
-                }
-                const hit = atLimit(me.plan, DEVICES_KEY);
+                const hit = await freshLimit(me, DEVICES_KEY, (err) => console.warn("cloud: /v1/me before adding a device:", err));
                 if (hit) {
                   setLimit(hit);
                   setBusy(false);
