@@ -913,6 +913,8 @@ mod tests {
             unread: false,
             unread_count: 0,
             asking: false,
+            children: Vec::new(),
+            parent_id: Nullable(None),
         };
         // What `notify_inner` captures, before the overlay touches anything.
         let transcript_status = summary.status;

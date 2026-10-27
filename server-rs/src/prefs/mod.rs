@@ -1,6 +1,6 @@
 //! UI preferences.
 //!
-//! Port of the former TypeScript server's `prefs.ts`: seven settings, one row
+//! Port of the former TypeScript server's `prefs.ts`: eight settings, one row
 //! each in the machine-wide state database ([`crate::db`]) under
 //! [`scope::PREFS`], keyed by the same camelCase names the wire uses. A row per
 //! field rather than one row holding the document, because that is the shape
@@ -42,6 +42,21 @@ pub enum SessionGrouping {
     Flat,
     /// Grouped by the session's working directory.
     Directory,
+}
+
+/// Whether the session list shows the subagents each session delegated to.
+///
+/// Opt-in: off until somebody turns it on, and while it is off the list is
+/// exactly what it was before the tree existed — the subagents are not even
+/// looked for ([`crate::sessions::subagents`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Schematic)]
+#[serde(rename_all = "lowercase")]
+pub enum SubagentTree {
+    /// No subagents in the list.
+    #[default]
+    Off,
+    /// Each session's subagents as a tree under its row.
+    On,
 }
 
 /// What sends a composer message.
@@ -146,6 +161,12 @@ pub struct Prefs {
     // Defaulted for the same reason as `math`.
     #[serde(default)]
     pub diagrams: DiagramStyle,
+    /// Whether the session list shows each session's subagents; a body
+    /// without it means `off`.
+    // Defaulted for the same reason as `math`: off is also what a page from
+    // before the setting means, since it never showed the tree.
+    #[serde(default)]
+    pub subagent_tree: SubagentTree,
 }
 
 /// One field of a parsed preferences file, or its default.
@@ -172,6 +193,7 @@ fn prefs_from_value(raw: &Value) -> Prefs {
         transcript_style: field(raw, "transcriptStyle"),
         math: field(raw, "math"),
         diagrams: field(raw, "diagrams"),
+        subagent_tree: field(raw, "subagentTree"),
     }
 }
 
@@ -243,9 +265,15 @@ pub async fn get_prefs(State(state): State<AppState>) -> Json<Prefs> {
 /// Persist the UI preferences and hand them straight back.
 #[api(id = "put_prefs", group = "prefs", summary = "Update UI preferences")]
 pub async fn put_prefs(State(state): State<AppState>, ApiJson(prefs): ApiJson<Prefs>) -> Result<Json<Prefs>, ApiError> {
+    let before = read_prefs(state.paths.as_ref()).await;
     write_prefs(state.paths.as_ref(), &prefs)
         .await
         .map_err(|error| ApiError::internal(format!("failed to write prefs: {error}")))?;
+    // The one setting the server itself acts on: every open list is re-sent,
+    // with the subagents or without them.
+    if before.subagent_tree != prefs.subagent_tree {
+        state.global.request_refresh(None);
+    }
     Ok(Json(prefs))
 }
 
@@ -281,6 +309,7 @@ mod tests {
         assert_eq!(prefs.transcript_style, TranscriptStyle::Flat);
         assert_eq!(prefs.math, MathStyle::Rendered, "math is typeset unless the user asks for the source");
         assert_eq!(prefs.diagrams, DiagramStyle::Rendered, "and so are diagrams drawn");
+        assert_eq!(prefs.subagent_tree, SubagentTree::Off, "opt-in");
     }
 
     #[test]
@@ -293,8 +322,10 @@ mod tests {
             "transcriptStyle": "bubble",
             "math": "source",
             "diagrams": "source",
+            "subagentTree": "on",
         });
         let prefs = prefs_from_value(&raw);
+        assert_eq!(prefs.subagent_tree, SubagentTree::On);
         assert_eq!(prefs.session_grouping, SessionGrouping::Directory);
         assert_eq!(prefs.composer_send, ComposerSend::Modifier);
         assert_eq!(prefs.font_size, FontSize::Xlarge);
@@ -337,8 +368,10 @@ mod tests {
             transcript_style: TranscriptStyle::Bubble,
             math: MathStyle::Source,
             diagrams: DiagramStyle::Source,
+            subagent_tree: SubagentTree::On,
         };
         let encoded = serde_json::to_value(&prefs).expect("encode");
+        assert_eq!(encoded["subagentTree"], "on", "a string, which is what the store keeps");
         assert_eq!(encoded["sessionGrouping"], "directory");
         assert_eq!(encoded["composerSend"], "modifier");
         assert_eq!(encoded["fontSize"], "xlarge");
@@ -397,6 +430,7 @@ mod tests {
             transcript_style: TranscriptStyle::Bubble,
             math: MathStyle::Source,
             diagrams: DiagramStyle::Source,
+            subagent_tree: SubagentTree::On,
         }
     }
 
@@ -451,6 +485,16 @@ mod tests {
         assert_eq!(read_prefs(&paths).await.language, Language::Ja, "the import does not run a second time");
     }
 
+    #[test]
+    fn a_client_from_before_the_tree_can_still_save() {
+        let older = serde_json::json!({"sessionGrouping": "directory", "composerSend": "enter", "fontSize": "default", "language": "auto", "transcriptStyle": "flat"});
+        let prefs: Prefs = serde_json::from_value(older).expect("accepted without the new field");
+        assert_eq!(
+            (prefs.session_grouping, prefs.subagent_tree),
+            (SessionGrouping::Directory, SubagentTree::Off)
+        );
+    }
+
     #[tokio::test]
     async fn a_setting_is_still_there_through_a_fresh_connection() {
         let (_dir, paths) = paths();
@@ -459,8 +503,13 @@ mod tests {
         let reopened = crate::db::Db::open(paths.config_db());
         assert_eq!(reopened.kv_scope(scope::PREFS).get("language").map(String::as_str), Some("ja"));
         assert_eq!(
+            reopened.kv_scope(scope::PREFS).get("subagentTree").map(String::as_str),
+            Some("on"),
+            "kept, as a string"
+        );
+        assert_eq!(
             reopened.kv_scope(scope::PREFS).len(),
-            7,
+            8,
             "one row per field, and the row is the wire spelling"
         );
     }

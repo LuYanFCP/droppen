@@ -18,6 +18,7 @@ import {
   ScreenView,
   SessionDetail,
   SetupView,
+  SubagentDetail,
   TerminalsView,
 } from "./lazy-views";
 import { MachineRoute } from "./machine-route";
@@ -142,6 +143,13 @@ const sessionDetailRoute = createRoute({
   getParentRoute: () => sessionsRoute,
   path: "$source/$id",
   component: SessionDetail,
+});
+
+/** One of a session's Claude subagents, on a page of its own (`subagent-view.tsx`). */
+const sessionAgentRoute = createRoute({
+  getParentRoute: () => sessionsRoute,
+  path: "$source/$id/agents/$agentId",
+  component: SubagentDetail,
 });
 
 /** A session about to be started: the empty session view (`new-session-view.tsx`). */
@@ -293,6 +301,12 @@ const machineSessionDetailRoute = createRoute({
   component: SessionDetail,
 });
 
+const machineSessionAgentRoute = createRoute({
+  getParentRoute: () => machineSessionsRoute,
+  path: "$source/$id/agents/$agentId",
+  component: SubagentDetail,
+});
+
 const machineSessionNewRoute = createRoute({
   getParentRoute: () => machineSessionsRoute,
   path: "new",
@@ -362,7 +376,7 @@ const routeTree = rootRoute.addChildren([
   loginRoute,
   setupRoute,
   welcomeRoute,
-  sessionsRoute.addChildren([sessionsIndexRoute, sessionNewRoute, sessionDetailRoute]),
+  sessionsRoute.addChildren([sessionsIndexRoute, sessionNewRoute, sessionDetailRoute, sessionAgentRoute]),
   chatRoute.addChildren([chatIndexRoute, chatClaudeRoute, chatCodexRoute, chatApiRoute]),
   terminalsRoute,
   filesRoute,
@@ -374,7 +388,7 @@ const routeTree = rootRoute.addChildren([
   screenRoute,
   machineRoute.addChildren([
     machineIndexRoute,
-    machineSessionsRoute.addChildren([machineSessionsIndexRoute, machineSessionNewRoute, machineSessionDetailRoute]),
+    machineSessionsRoute.addChildren([machineSessionsIndexRoute, machineSessionNewRoute, machineSessionDetailRoute, machineSessionAgentRoute]),
     machineChatRoute.addChildren([machineChatIndexRoute, machineChatClaudeRoute, machineChatCodexRoute, machineChatApiRoute]),
     machineTerminalsRoute,
     machineFilesRoute,

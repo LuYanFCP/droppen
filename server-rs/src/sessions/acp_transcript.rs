@@ -542,6 +542,8 @@ async fn summary_of(paths: &Paths, source: Source, id: &str, titles: &HashMap<St
         // Every permission request the agent makes is answered by the client,
         // so the session never stops to ask.
         asking: false,
+        children: Vec::new(),
+        parent_id: Nullable(None),
     })
 }
 

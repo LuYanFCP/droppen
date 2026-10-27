@@ -357,6 +357,105 @@ fn query_thread_row(db: &Path, id: &str) -> Option<Option<ThreadRow>> {
     }
 }
 
+/// A delegated subagent thread: a row of Codex's `thread_spawn_edges`, joined
+/// to the thread it names.
+///
+/// The edge table is the parent link Codex itself keeps. A thread whose
+/// `source` says subagent but which has no edge — Codex's own guardian review,
+/// which no conversation delegated — is not one of these, and stays hidden.
+#[derive(Debug, Clone)]
+pub(super) struct SpawnedThread {
+    pub(super) id: String,
+    pub(super) parent_id: String,
+    /// The name Codex gave it (`agent_nickname`), or its title.
+    pub(super) name: String,
+    /// What it was spawned as (`agent_role`), when Codex says.
+    pub(super) role: Option<String>,
+    pub(super) rollout_path: String,
+    pub(super) updated_ms: i64,
+}
+
+/// The parent of every delegated subagent thread, or nothing without the
+/// tables: an older Codex, or no Codex at all.
+fn spawned_threads_from_state_db(db: &Path) -> Option<Vec<SpawnedThread>> {
+    let connection = open_state_db(db)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT t.id, e.parent_thread_id, t.agent_nickname, t.agent_role, t.title, t.rollout_path, t.updated_at, t.updated_at_ms \
+             FROM thread_spawn_edges e JOIN threads t ON t.id = e.child_thread_id WHERE t.archived = 0",
+        )
+        .ok()?;
+    let rows = statement
+        .query_map([], |row| {
+            let nickname: Option<String> = row.get(2)?;
+            let title: Option<String> = row.get(4)?;
+            let updated_at: i64 = row.get::<_, Option<i64>>(6)?.unwrap_or(0);
+            Ok(SpawnedThread {
+                id: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                parent_id: row.get(1)?,
+                name: nickname
+                    .filter(|name| !name.trim().is_empty())
+                    .or_else(|| title.map(|title| title_line(&title)))
+                    .unwrap_or_else(|| "subagent".to_string()),
+                role: row.get(3)?,
+                rollout_path: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                updated_ms: row.get::<_, Option<i64>>(7)?.unwrap_or(updated_at * 1000),
+            })
+        })
+        .ok()?;
+    Some(rows.filter_map(Result::ok).filter(|thread| !thread.id.is_empty()).collect())
+}
+
+/// Every delegated subagent thread Codex knows of.
+pub(super) async fn spawned_threads(paths: &Paths) -> Vec<SpawnedThread> {
+    on_state_db(paths, spawned_threads_from_state_db).await.flatten().unwrap_or_default()
+}
+
+/// How a subagent thread is doing: whether it is still working, and whether
+/// its last turn ended in an error or was aborted.
+pub(super) async fn spawned_thread_state(thread: &SpawnedThread) -> (bool, bool) {
+    let path = Path::new(&thread.rollout_path);
+    let failed = match read_tail_lines(path, TAIL_BYTES).await {
+        Ok(lines) => lines
+            .iter()
+            .rev()
+            .filter_map(|line| try_parse(line))
+            .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("event_msg"))
+            .find_map(
+                |entry| match entry.get("payload").and_then(|payload| payload.get("type")).and_then(Value::as_str) {
+                    Some("error" | "turn_aborted") => Some(true),
+                    Some("task_complete" | "task_started" | "agent_message" | "user_message") => Some(false),
+                    _ => None,
+                },
+            )
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+    // `codex_status` reads past an `error` to the message before it, which
+    // says a turn is in flight; the error is what ended that turn.
+    let working = !failed && codex_status(path, thread.updated_ms).await == SessionStatus::Running;
+    (working, failed)
+}
+
+/// The delegated subagent thread `id`, when it is one: the thread row, and
+/// the thread that spawned it.
+fn query_spawned_thread_row(db: &Path, id: &str) -> Option<(ThreadRow, String)> {
+    let connection = open_state_db(db)?;
+    let mut statement = connection
+        .prepare(
+            // The columns of [`THREAD_COLUMNS`], in its order, so
+            // [`read_thread_row`] reads them; the parent is the tenth. Titled
+            // by its nickname, as its row under the parent is: Codex leaves a
+            // subagent's own title empty.
+            "SELECT t.id, COALESCE(NULLIF(t.agent_nickname, ''), t.title), t.first_user_message, t.cwd, t.git_branch, t.updated_at, t.updated_at_ms, t.rollout_path, t.created_at, \
+             e.parent_thread_id FROM threads t JOIN thread_spawn_edges e ON e.child_thread_id = t.id WHERE t.id = ? AND t.archived = 0",
+        )
+        .ok()?;
+    statement
+        .query_row([id], |row| Ok((read_thread_row(row)?, row.get::<_, String>(9)?)))
+        .ok()
+}
+
 /// Run a state-database query off the async runtime's worker threads.
 ///
 /// SQLite is a blocking API, and a cold page cache on a large index is long
@@ -411,6 +510,8 @@ fn row_to_summary(row: &ThreadRow, size_bytes: u64) -> (SessionSummary, i64) {
         // request the app server makes is refused (`inject::app_server`), so a
         // codex thread has no way to stop and ask.
         asking: false,
+        children: Vec::new(),
+        parent_id: Nullable(None),
     };
     (summary, updated_ms)
 }
@@ -446,6 +547,8 @@ fn meta_to_summary(meta: &FileMeta, names: &HashMap<String, String>) -> SessionS
         unread: false,
         unread_count: 0,
         asking: false,
+        children: Vec::new(),
+        parent_id: Nullable(None),
     }
 }
 
@@ -573,8 +676,20 @@ pub async fn find_codex_session(paths: &Paths, id: &str) -> Option<SessionSummar
     .await
     .flatten()
     {
-        // Archived, a subagent thread, or unknown: stay hidden.
-        Some(None) => return None,
+        // Archived, a subagent thread, or unknown: stay hidden — unless it is a
+        // thread a conversation delegated, which opens from its parent's tree.
+        Some(None) => {
+            let (row, parent_id) = on_state_db(paths, {
+                let id = id.to_string();
+                move |db| query_spawned_thread_row(db, &id)
+            })
+            .await
+            .flatten()?;
+            let metadata = tokio::fs::metadata(&row.rollout_path).await.ok()?;
+            let (mut summary, updated_ms) = row_to_summary(&row, metadata.len());
+            summary.parent_id = Nullable(Some(parent_id));
+            with_codex_status(summary, updated_ms).await
+        }
         Some(Some(row)) => {
             let metadata = tokio::fs::metadata(&row.rollout_path).await.ok()?;
             let (summary, updated_ms) = row_to_summary(&row, metadata.len());

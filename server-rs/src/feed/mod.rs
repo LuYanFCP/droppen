@@ -455,6 +455,7 @@ pub async fn load_session_state(drive: &Arc<Drive>, source: Source, id: &str) ->
     // session is unread, or which repository it groups under.
     // `crate::sessions::list_and_filter` says the same for the list; this is the
     // single-session path.
+    crate::sessions::subagents::apply(&drive.paths, std::slice::from_mut(&mut summary)).await;
     crate::attention::apply(&drive.paths, std::slice::from_mut(&mut summary)).await;
     crate::sessions::repo::apply(std::slice::from_mut(&mut summary)).await;
     // Only claude sessions rotate, and only this instance's log knows about it.

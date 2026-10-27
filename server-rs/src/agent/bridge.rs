@@ -248,6 +248,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = {
         ("GET", "/api/sessions/{source}/{id}/first-unread", Use),
         ("GET", "/api/sessions/{source}/{id}/agents", Use),
         ("GET", "/api/sessions/{source}/{id}/agents/{agentId}", Use),
+        ("POST", "/api/sessions/{source}/{id}/agents/{agentId}/seen", Use),
         ("GET", "/api/sessions/{source}/{id}/checklist", Use),
         ("GET", "/api/sessions/recent-cwds", Use),
         ("GET", "/api/composer-prefs", Use),

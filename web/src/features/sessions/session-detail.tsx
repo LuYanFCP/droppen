@@ -3,6 +3,7 @@ import { SourceIcon } from "@/components/source-icon";
 import { useParams } from "@tanstack/react-router";
 import {
   ArrowDown,
+  Bot,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -655,7 +656,7 @@ export function BubbleRun({
  * that list, and giving it a different reader would have been two answers to
  * "what did this agent do".
  */
-function useAgentTranscript(session: SubagentCtx, agentId: string | null, open: boolean) {
+export function useAgentTranscript(session: SubagentCtx, agentId: string | null, open: boolean) {
   const api = useApi();
   const machine = useMachine();
   return useQuery({
@@ -675,19 +676,22 @@ function useAgentTranscript(session: SubagentCtx, agentId: string | null, open: 
 
 type AgentTranscriptQuery = ReturnType<typeof useAgentTranscript>;
 
-function AgentTranscriptBody({
+export function AgentTranscriptBody({
   query,
   session,
+  flush = false,
 }: {
   query: AgentTranscriptQuery;
   session: SubagentCtx;
+  /** The agent's own page rather than a card's drill-down: no indent, no rule. */
+  flush?: boolean;
 }) {
   const { t } = useTranslation();
   const { data, error, isFetching, refetch } = query;
   // The subagent's transcript is its own window, so it pairs on its own.
   const subPairing = useMemo(() => pairToolResults(data?.items ?? []), [data?.items]);
   return (
-    <div className="ml-3 border-l border-accent/30">
+    <div className={flush ? undefined : "ml-3 border-l border-accent/30"}>
       {/* A refused drill-down used to spin here for ever, which reads as a
           subagent that is still loading rather than as one that cannot be
           read at all — and the retry is one click, so offer it. */}
@@ -862,7 +866,7 @@ export function SubagentTool({
   );
 }
 
-interface SubagentCtx {
+export interface SubagentCtx {
   source: "claude" | "codex";
   id: string;
 }
@@ -2006,6 +2010,27 @@ export function SessionDetail() {
 }
 
 /**
+ * The way back from a subagent's thread to the session that delegated it
+ * (`summary.parentId`): its title as the feed has it, or its id while the feed
+ * does not carry it — the parent of a nested subagent is itself not listed.
+ */
+function ParentSessionLink({ source, id }: { source: Source; id: string }) {
+  const { t } = useTranslation();
+  const machine = useMachine();
+  const ref = useMemo(() => ({ machine, source, id }), [machine, source, id]);
+  const title = useFeedSessionTitle(ref) ?? id.slice(0, 8);
+  return (
+    <span data-parent-session={id} className="flex min-w-0 shrink items-center gap-1">
+      <Bot aria-hidden="true" className="size-3 shrink-0" />
+      <span className="shrink-0">{t("subagent of")}</span>
+      <MachineLink to="/sessions/$source/$id" params={{ source, id }} className="min-w-0 truncate text-fg hover:underline" title={title}>
+        {title}
+      </MachineLink>
+    </span>
+  );
+}
+
+/**
  * Separator for the running-task key below.
  *
  * A `tool_use` id is `toolu_` and base62, so any punctuation would do; a
@@ -2724,6 +2749,7 @@ export function SessionDetailInner({
           ) : (
             <SourceIcon source={summary.source} className="text-muted" />
           )}
+          {summary.parentId && <ParentSessionLink source={summary.source} id={summary.parentId} />}
           {/* An ACP agent runs on its own configuration: there is no account to show or bind. */}
           {!readOnly && summary.source !== "acp" && (
             <SessionAccountBadge
