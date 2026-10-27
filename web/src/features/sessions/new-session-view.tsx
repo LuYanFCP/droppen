@@ -58,7 +58,7 @@ import {
   useSendHint,
   type ComposerAttachment,
 } from "./composer-box";
-import { ComposerChoiceChips, ComposerSelect, useComposerChoice, useComposerStart } from "./composer-controls";
+import { ComposerChoiceChips, useComposerChoice, useComposerStart } from "./composer-controls";
 import { DeliveryPreviews, seedDeliveryPreview } from "./delivery-preview-view";
 import { nextDeliveryId, type DeliveryPreview } from "./delivery-preview";
 import { DirBrowser } from "./dir-browser";
@@ -83,10 +83,17 @@ import { agentKey, parseAgentKey, type CreationAttempt, type NewConversation, ty
 import { useCreateConversation, type AcceptedConversation } from "./use-create-conversation";
 import { useAcpAgents } from "./acp-agent";
 import { acpAgentGlyph } from "./acp-agent-icons";
+import { AgentSelect, type AgentChoice } from "./agent-select";
 import { cliGlyph } from "@/components/source-icon";
+import { agentsSearch, agoKey, checkFailed, TAB_NAME } from "@/features/settings/agents/agents-tabs";
 
-/** The CLIs that are always offered, with their marks; then one entry per configured ACP agent. */
-const CLI_SOURCES = (["claude", "codex"] as const).map((source) => ({ value: source, label: source, glyph: cliGlyph(source) }));
+/** The CLIs that are always offered, by their marks and names; then one entry per configured ACP agent. */
+const CLI_CHOICES: AgentChoice[] = (["claude", "codex"] as const).map((source) => ({
+  key: source,
+  label: TAB_NAME[source],
+  glyph: cliGlyph(source),
+  group: "cli",
+}));
 
 /** A message on its way to becoming a session's first. */
 interface Starting {
@@ -192,14 +199,26 @@ export function NewSessionView({
   // Each CLI runs under its own accounts: a Claude login cannot start a Codex
   // session. An ACP agent runs on its own configuration and has none.
   const acp = source === "acp";
-  const sources = [
-    ...CLI_SOURCES,
-    ...acpAgents.map((agent) => ({ value: agentKey({ source: "acp", acpAgent: agent.id }), label: agent.name, glyph: acpAgentGlyph(agent.id) })),
+  // An agent whose last check failed is offered in red and can still be
+  // picked; picked, the composer says why, with the way to its details.
+  const failingWord = (agent: (typeof acpAgents)[number]) =>
+    checkFailed(agent.lastCheck) ? t(agent.lastCheck?.state === "not_found" ? "command not found" : "does not start") : null;
+  const choices: AgentChoice[] = [
+    ...CLI_CHOICES,
+    ...acpAgents.map((agent): AgentChoice => ({
+      key: agentKey({ source: "acp", acpAgent: agent.id }),
+      label: agent.name,
+      glyph: acpAgentGlyph(agent.id),
+      group: "acp",
+      failing: failingWord(agent),
+    })),
     // The pick while the list is on its way, so the picker never shows a blank.
     ...(acp && acpAgent && !acpAgents.some((agent) => agent.id === acpAgent)
-      ? [{ value: agentKey({ source, acpAgent }), label: acpAgent, glyph: acpAgentGlyph(acpAgent) }]
+      ? [{ key: agentKey({ source, acpAgent }), label: acpAgent, glyph: acpAgentGlyph(acpAgent), group: "acp" as const }]
       : []),
   ];
+  const failing = acp ? acpAgents.find((agent) => agent.id === acpAgent && checkFailed(agent.lastCheck)) : undefined;
+  const manage = useMachineNavigate();
   const accounts = acp ? [] : accountsForProvider(accountList?.accounts ?? [], source);
   // Untouched, the picker shows where the server will start a session that
   // names no account — the default (moved off a rest), the local login, or,
@@ -534,11 +553,26 @@ export function NewSessionView({
                 <>
                   {t("or add an account")}
                   {" · "}
-                  <MachineLink to="/settings" className="underline hover:text-fg">
+                  <MachineLink to="/settings" search={agentsSearch(source === "codex" ? "codex" : "claude")} className="underline hover:text-fg">
                     {t("Settings")}
                   </MachineLink>
                 </>
               )}
+            </Notice>
+          )}
+          {failing?.lastCheck && !starting && (
+            <Notice signal="failed">
+              <span data-acp-failing={failing.id}>
+                {t("{{name}} cannot start: {{why}} (checked {{ago}})", {
+                  name: failing.name,
+                  why: failingWord(failing),
+                  ago: t(agoKey(failing.lastCheck.checkedAt).key, { n: agoKey(failing.lastCheck.checkedAt).n }),
+                })}
+              </span>
+              {" · "}
+              <MachineLink to="/settings" search={agentsSearch("acp", failing.id)} className="underline hover:text-fg">
+                {t("agents & accounts")}
+              </MachineLink>
             </Notice>
           )}
           <ComposerBox
@@ -552,15 +586,14 @@ export function NewSessionView({
             chips={<>
               {/* Never another device shown read-only here (the local app's gateway): nothing starts there. */}
               {onDevice && <DevicePicker ghost forStarting writable value={machine} onSelect={switchDevice} disabled={busy} />}
-              <ComposerSelect
-                ghost
-                label={t("cli")}
+              <AgentSelect
                 value={agentKey({ source, acpAgent })}
-                options={sources}
+                choices={choices}
                 onChange={(v) => {
                   const next = parseAgentKey(v);
                   if (next) setSource(next.source, next.acpAgent);
                 }}
+                onManage={() => void manage({ to: "/settings", search: agentsSearch(source) })}
               />
               <DirectoryChip cwd={cwd} onShow={showList} disabled={busy} />
               <ComposerChoiceChips

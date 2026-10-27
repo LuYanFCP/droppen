@@ -8,6 +8,14 @@ import { ACP_GLYPH, acpAgentGlyph, acpAgentLook, glyphsById } from "../src/featu
 import { applyPreset, CUSTOM_PRESET, newAgentId, type AcpAgentDraft } from "../src/features/sessions/acp-agent-presets.js";
 import { agentKey, canCreateConversation, creationRequest, parseAgentKey, type NewConversation } from "../src/features/sessions/new-session-flow.js";
 import { prefillFromSearch, readNewSessionDraft, writeNewSessionDraft, EMPTY_NEW_SESSION_DRAFT } from "../src/features/sessions/new-session.js";
+import {
+  accountsSignal,
+  acpSignal,
+  acpStatus,
+  agentsSearch,
+  agoKey,
+  openingTab,
+} from "../src/features/settings/agents/agents-tabs.js";
 import { LOCAL } from "../src/lib/machines/key.js";
 
 const ICONS = fileURLToPath(new URL("../src/features/sessions/presets/icons/", import.meta.url));
@@ -83,8 +91,8 @@ test("every agent mark is path data on a view box, named for an agent id, and no
 });
 
 const PRESETS = [
-  { id: "one", name: "One", command: "one", args: ["acp"] },
-  { id: "two", name: "Two", command: "two", args: ["--acp", "--stdio"], homepage: "https://two.example/" },
+  { id: "one", name: "One", command: "one", args: ["acp"], onPath: false },
+  { id: "two", name: "Two", command: "two", args: ["--acp", "--stdio"], homepage: "https://two.example/", onPath: true },
 ];
 
 test("choosing a preset fills in the name, executable and arguments, and the custom choice leaves them", () => {
@@ -160,4 +168,58 @@ test("the new-session draft keeps the ACP agent picked, and an address can name 
   assert.deepEqual(prefillFromSearch({ agent: "acp:bub" }), { source: "acp", acpAgent: "bub" });
   assert.deepEqual(prefillFromSearch({ agent: "acp" }), { source: "acp" });
   assert.equal(prefillFromSearch({ agent: "acp:Not An Id" }), null);
+});
+
+test("the agents page opens on the address's tab, else the one this browser used last, else Claude Code", () => {
+  assert.equal(openingTab("acp", "codex"), "acp");
+  assert.equal(openingTab(undefined, "codex"), "codex");
+  assert.equal(openingTab("gemini", "nonsense"), "claude", "neither names a tab");
+  assert.equal(openingTab(undefined, null), "claude");
+  assert.deepEqual(agentsSearch("acp", "bub"), { section: "accounts", tab: "acp", agent: "bub" });
+  assert.deepEqual(agentsSearch("codex"), { section: "accounts", tab: "codex" });
+});
+
+const AT = Date.parse("2026-10-28T12:00:00Z");
+const check = (state: string, minutes = 5) => ({ state, checkedAt: new Date(AT - minutes * 60_000).toISOString() }) as never;
+
+test("the ACP tab counts in red every agent whose last check failed; one never checked is not a failure", () => {
+  const agents = [
+    { ...LIST.agents[0]!, id: "a", lastCheck: check("ready") },
+    { ...LIST.agents[0]!, id: "b", lastCheck: check("not_found") },
+    { ...LIST.agents[0]!, id: "c", lastCheck: check("failed") },
+    { ...LIST.agents[0]!, id: "d" },
+  ];
+  assert.deepEqual(acpSignal(agents), { warn: 0, danger: 2 });
+  assert.deepEqual(acpSignal(undefined), { warn: 0, danger: 0 });
+  assert.equal(acpStatus(undefined).kind, "unchecked");
+  assert.equal(acpStatus(check("ready"), true).kind, "checking", "a check under way wins");
+  assert.equal(acpStatus(check("not_found")).kind, "not_found");
+  assert.deepEqual(agoKey(new Date(AT - 30_000).toISOString(), AT), { key: "just now" });
+  assert.deepEqual(agoKey(new Date(AT - 5 * 60_000).toISOString(), AT), { key: "{{n}} min ago", n: 5 });
+  assert.deepEqual(agoKey(new Date(AT - 3 * 3_600_000).toISOString(), AT), { key: "{{n}} h ago", n: 3 });
+  assert.deepEqual(agoKey(new Date(AT - 50 * 3_600_000).toISOString(), AT), { key: "{{n}} d ago", n: 2 });
+});
+
+test("a CLI tab counts a signed-out local login and an expired usage login in amber, a refused credential in red, and not a limit rest", () => {
+  const rest = (klass: string) => ({ scope: "all", class: klass, untilAt: null, reason: "", observedAt: "2026-10-28T11:00:00Z", sessionId: null, source: "claude:result" });
+  const oauth = (id: string, extra: Record<string, unknown> = {}) => ({
+    id, label: id, kind: "oauth_token", provider: "claude", usageEnabled: true, rotation: true, rest: [],
+    createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", ...extra,
+  });
+  const list = {
+    accounts: [
+      oauth("refused", { rest: [rest("auth")] }),
+      oauth("resting", { rest: [{ ...rest("session"), untilAt: "2099-01-01T00:00:00Z" }] }),
+      oauth("expired"),
+      oauth("not-enabled", { usageEnabled: false }),
+      { ...oauth("codex-key"), provider: "codex", kind: "env" },
+    ],
+    defaultAccountId: null,
+    defaultCodexAccountId: null,
+    local: { claude: { state: "signed_out", rest: [], isDefault: false }, codex: { state: "unknown", rest: [], isDefault: false } },
+  } as never;
+  const quota = { accounts: [{ id: "expired", windows: [], error: "not_logged_in", updatedAt: null }], claude: null, codex: null } as never;
+  assert.deepEqual(accountsSignal(list, quota, "claude", AT), { warn: 2, danger: 1 });
+  assert.deepEqual(accountsSignal(list, quota, "codex", AT), { warn: 0, danger: 0 });
+  assert.deepEqual(accountsSignal(undefined, quota, "claude", AT), { warn: 0, danger: 0 });
 });
