@@ -11,6 +11,7 @@
 //! away from silently describing something else.
 
 use droppen_plugin_sdk as sdk;
+use gotcha::axum::response::IntoResponse;
 use gotcha::Schematic;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -65,12 +66,16 @@ impl Schematic for PluginName {
 pub struct PluginStatus {
     /// `^[a-z][a-z0-9-]{1,31}$`.
     pub id: String,
-    /// The bundled package version.
+    /// The installed package version.
     pub version: String,
     /// Display name.
     pub name: PluginName,
     /// On for this instance, and compatible.
     pub enabled: bool,
+    /// Switched on (by the configuration or this instance), whether or not
+    /// this host can run it: with `compatible: false`, a plugin a host
+    /// upgrade left behind, which the page names rather than drops.
+    pub switched_on: bool,
     /// The host satisfies the plugin's `engines.droppen`.
     pub compatible: bool,
     /// The configuration pins it on or off; the switch is read-only.
@@ -82,6 +87,15 @@ pub struct PluginStatus {
     pub notice: Nullable<String>,
     /// Every notice, oldest first.
     pub notices: Vec<PluginNotice>,
+    /// `<version>-<first 12 hex of the tarball's sha256>`: this exact code.
+    pub build: String,
+    /// Where a page imports the plugin from, when it is enabled and
+    /// compatible (`/plugins/<key>/<id>/<build>/<entry>`); `null` otherwise.
+    pub entry: Nullable<String>,
+    /// The old top-level paths the host redirects to `/p/<id>/`.
+    pub aliases: Vec<String>,
+    /// What it asks the host for (`storage`, `sessions:read`, `notify`).
+    pub permissions: Vec<String>,
 }
 
 /// One thing a plugin's host wants the user to see.
@@ -119,11 +133,16 @@ impl From<sdk::PluginStatus> for PluginStatus {
             version: status.version.to_string(),
             name: PluginName(status.name),
             enabled: status.enabled,
+            switched_on: status.switched_on,
             compatible: status.compatible,
             forced: status.forced,
             reason: status.reason.into(),
             notice: status.notice.into(),
             notices: status.notices.into_iter().map(Into::into).collect(),
+            build: status.build,
+            entry: status.entry.into(),
+            aliases: status.aliases,
+            permissions: status.permissions.into_iter().map(|permission| permission.as_str().to_string()).collect(),
         }
     }
 }
@@ -131,8 +150,75 @@ impl From<sdk::PluginStatus> for PluginStatus {
 /// `GET /api/plugins`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Schematic)]
 pub struct PluginList {
-    /// Every plugin this build bundles.
+    /// Every plugin installed in this instance.
     pub plugins: Vec<PluginStatus>,
+}
+
+/// The `400` of `POST /api/plugins`: the package was refused, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Schematic)]
+pub struct PluginInvalidPackage {
+    /// Always `invalid_package`.
+    pub error: String,
+    /// Human-readable; says which rule the package broke.
+    pub message: String,
+}
+
+/// The body of `POST /api/plugins`: the package's bytes, gzip'd tar.
+///
+/// A schema for the OpenAPI document only — the handler reads raw bytes.
+pub struct PluginTarballBody;
+
+impl Schematic for PluginTarballBody {
+    fn name() -> &'static str {
+        "PluginTarballBody"
+    }
+
+    fn required() -> bool {
+        true
+    }
+
+    fn type_() -> &'static str {
+        "string"
+    }
+
+    fn generate_schema() -> gotcha_core::EnhancedSchema {
+        let schema = gotcha::oas::Schema {
+            _type: Some("string".to_string()),
+            format: Some("binary".to_string()),
+            nullable: None,
+            description: Some("The plugin package: a gzip'd tar whose entries are under `package/`.".to_string()),
+            extras: Default::default(),
+        };
+        gotcha_core::EnhancedSchema { schema, required: true }
+    }
+}
+
+/// The empty answer to `DELETE /api/plugins/{id}`: axum sends `204`, and the
+/// empty-body machinery documents it without a schema.
+pub struct PluginDeleted;
+
+impl IntoResponse for PluginDeleted {
+    fn into_response(self) -> gotcha::axum::response::Response {
+        gotcha::axum::http::StatusCode::NO_CONTENT.into_response()
+    }
+}
+
+impl Schematic for PluginDeleted {
+    fn name() -> &'static str {
+        "void"
+    }
+
+    fn required() -> bool {
+        false
+    }
+
+    fn type_() -> &'static str {
+        "void"
+    }
+
+    fn empty_body() -> bool {
+        true
+    }
 }
 
 /// The body of `PUT /api/plugins/{id}/enabled`.
@@ -379,6 +465,7 @@ mod tests {
                     version: "1.2.3".parse().unwrap(),
                     name: name.clone(),
                     enabled: true,
+                    switched_on: true,
                     compatible: true,
                     forced: false,
                     notices: notice
@@ -393,6 +480,10 @@ mod tests {
                         .collect(),
                     reason,
                     notice,
+                    build: "1.2.3-0123456789ab".into(),
+                    entry: Some("/plugins/k/tasks/1.2.3-0123456789ab/dist/index.js".into()),
+                    aliases: vec!["/tasks".into()],
+                    permissions: vec![sdk::Permission::Storage],
                 };
                 same(&status, &PluginStatus::from(status.clone()));
             }
