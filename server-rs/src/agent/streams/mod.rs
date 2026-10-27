@@ -1,7 +1,7 @@
-//! The agent's encrypted streams (M2, architecture doc §5 "加密流"): a copy
-//! of this machine's session list, status and session transcripts on the hub,
-//! sealed under keys derived from `MK`, so the account's devices can read them
-//! while the machine is off.
+//! The agent's encrypted streams (`docs/cross-machine-architecture.md` §5
+//! "加密流"): a copy of this machine's session list, status and session
+//! transcripts on the hub, sealed under keys derived from `MK`, so the
+//! account's devices can read them while the machine is off.
 //!
 //! - **index** — the session list's rows ([`content::index_rows`]): the
 //!   machine's own sessions of the last 30 days ([`content::Scope`]).
@@ -25,7 +25,7 @@
 //! so is one whose tail has been idle for [`COMPACT_IDLE`], whose oldest
 //! uncovered record is [`COMPACT_OLDEST`] old (the hub keeps tails in Redis,
 //! short), or that the hub refused an append for with `compact`; one
-//! the hub disagrees with (a `CONFLICT`), whose transcript was rewritten under
+//! the hub disagrees with (a `CONFLICT`), whose transcript is rewritten under
 //! it, or that is in an older `MK` epoch, is rebuilt from the transcript with a
 //! rebase. [`writer`] has the write-ahead and `ACK` rules, [`store`] the
 //! persistence.
@@ -73,10 +73,10 @@ use super::hub::now_ms;
 pub const LIST_EVERY: Duration = Duration::from_secs(3);
 /// How often the machine status is gathered.
 pub const STATUS_EVERY: Duration = Duration::from_secs(60);
-/// Heartbeat heads, every stream alike (M2 review: index and status
-/// streams beat every minute and sessions every half hour, which told the hub
-/// which stream was which). The index's beat is what "as of" means offline,
-/// so that is good to five minutes.
+/// Heartbeat heads, every stream alike: index and status streams beating
+/// every minute and sessions every half hour would tell the hub which stream
+/// is which. The index's beat is what "as of" means offline, so that is good
+/// to five minutes.
 pub const HEARTBEAT_EVERY: Duration = Duration::from_secs(5 * 60);
 /// Requests in flight at once, over all streams.
 pub const MAX_IN_FLIGHT: usize = 4;
@@ -86,15 +86,15 @@ pub const BACKFILL_BYTES_PER_SEC: u64 = 1024 * 1024;
 pub const PAGES_OVER: usize = 64 * 1024;
 /// A delta bigger than this is sent as a rebuild (pages) instead.
 pub const REBUILD_OVER: usize = 4 * 1024 * 1024;
-/// Compaction: when the tail has this many records (`RH_AGENT_COMPACT_RECORDS`)…
+/// Compaction: when the tail has this many records (`DROPPEN_AGENT_COMPACT_RECORDS`)…
 pub const COMPACT_RECORDS: u64 = 128;
 /// …or more bytes than this and than the state it describes.
 pub const COMPACT_MIN_BYTES: i64 = 512 * 1024;
-/// The least time between two checkpoints of one stream (`RH_AGENT_COMPACT_EVERY_SECS`).
+/// The least time between two checkpoints of one stream (`DROPPEN_AGENT_COMPACT_EVERY_SECS`).
 pub const COMPACT_EVERY: Duration = Duration::from_secs(60);
-/// …and a tail with no append for this long is compacted (`RH_AGENT_COMPACT_IDLE_SECS`)…
+/// …and a tail with no append for this long is compacted (`DROPPEN_AGENT_COMPACT_IDLE_SECS`)…
 pub const COMPACT_IDLE: Duration = Duration::from_secs(5 * 60);
-/// …as is one whose oldest uncovered record is this old (`RH_AGENT_COMPACT_OLDEST_SECS`).
+/// …as is one whose oldest uncovered record is this old (`DROPPEN_AGENT_COMPACT_OLDEST_SECS`).
 pub const COMPACT_OLDEST: Duration = Duration::from_secs(30 * 60);
 
 /// When to compact, overridable for tests and the acceptance run.
@@ -369,7 +369,7 @@ struct Sync {
     text: Option<mpsc::UnboundedSender<String>>,
     /// Streams the hub refused an append for with `compact`: checkpoint first.
     compact_now: HashSet<StreamId>,
-    /// `RH_AGENT_SYNC_DAYS`: the window when the plan keeps longer, or says nothing.
+    /// `DROPPEN_AGENT_SYNC_DAYS`: the window when the plan keeps longer, or says nothing.
     env_days: u64,
     /// The account's plan as the hub last told it (kept in `streams.db`).
     plan: Option<HubPlan>,
@@ -743,7 +743,7 @@ impl Sync {
     /// The machine keys from `machine-keys.json` the chain committed — never
     /// one it does not (a key file left from an earlier enrollment, or one
     /// written ahead of the chain): new records are sealed under the newest
-    /// of these, not the newest in the file (M2 re-review).
+    /// of these, not the newest in the file.
     fn load_keys(&mut self) {
         match super::state::load_machine_keys(&self.paths) {
             Ok(keys) => {
@@ -950,7 +950,7 @@ impl Sync {
         }
     }
 
-    /// `stream`'s manifest needs no signing again (any more).
+    /// `stream`'s manifest needs no signing again.
     fn resigned(&mut self, stream: &StreamId) {
         if self.resign.remove(stream) {
             save_resign(&self.writer.store, &self.resign);
@@ -1975,8 +1975,9 @@ mod tests {
         }
     }
 
-    /// M2 re-review: the writer sealed under the newest epoch in
-    /// `machine-keys.json`, whatever the chain said; now only committed keys count.
+    /// The writer seals only under the newest epoch in `machine-keys.json`
+    /// that the chain committed: whatever the file says, a key the chain has
+    /// not committed is not used.
     #[test]
     fn only_keys_the_chain_committed_reach_the_writer() {
         let keys: BTreeMap<u32, zeroize::Zeroizing<[u8; 32]>> = [(0, [1u8; 32]), (1, [2; 32]), (5, [9; 32])]

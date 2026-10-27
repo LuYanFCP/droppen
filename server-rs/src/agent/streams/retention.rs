@@ -7,10 +7,10 @@
 //!   limit), "usage_bytes" (the whole account), "machine_usage_bytes" (this
 //!   machine's pages), "grace_until_ms"?}` ([`HubPlan`]). The agent keeps the
 //!   last one in `streams.db`, so a restart starts with it; before any has
-//!   arrived (a hub from before plans) everything is as it was: a 30-day
-//!   window, no trimming, no eviction.
+//!   arrived (a hub from before plans) the copy is bounded by the 30-day
+//!   default, and nothing is trimmed or evicted.
 //! - **The window.** Sessions are copied while updated within
-//!   min(`RH_AGENT_SYNC_DAYS`, `retention_days`) days ([`window_days`]); the
+//!   min(`DROPPEN_AGENT_SYNC_DAYS`, `retention_days`) days ([`window_days`]); the
 //!   agent deletes the copies of those outside it itself, a day before the
 //!   hub's sweep would. A downgrade narrows it only when the hub's plan says
 //!   so (the hub applies the grace); an upgrade widens it and the backfill

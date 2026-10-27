@@ -21,7 +21,7 @@
 //!   address it resolves to is public — or, for a public-looking name, if
 //!   every one is a local proxy's fake address (`198.18.0.0/15`, fake-ip mode:
 //!   the proxy carries the connection, TLS still verifies the name); pings
-//!   follow no redirects and use no proxy. `RH_AGENT_RELAY_INSECURE=1` (local
+//!   follow no redirects and use no proxy. `DROPPEN_AGENT_RELAY_INSECURE=1` (local
 //!   testing only) allows loopback besides, and plain `ws://` to loopback only.
 //! - **Measuring.** Every 15 minutes (and when the list changes) the agent
 //!   times `GET /v1/ping` on every listed relay — four requests, the first
@@ -37,7 +37,7 @@
 //!   open on it. A relay that says `goaway` is draining: its channels move on
 //!   (the device opens new ones elsewhere) and the agent reconnects once it
 //!   is back.
-//! - `RH_AGENT_RELAYS=0` turns all of this off (then devices can reach this
+//! - `DROPPEN_AGENT_RELAYS=0` turns all of this off (then devices can reach this
 //!   machine only while the hub still relays; after the cut-over, not at all).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -153,7 +153,7 @@ struct Manager {
     rtts: BTreeMap<String, u32>,
     reported: Option<(BTreeMap<String, u32>, BTreeSet<String>)>,
     asked_ms: u64,
-    /// `RH_AGENT_RELAY_INSECURE=1`: relays on loopback too (local testing).
+    /// `DROPPEN_AGENT_RELAY_INSECURE=1`: relays on loopback too (local testing).
     insecure: bool,
     /// Pings, by the same rules as connections (`None` if it cannot be built).
     http: Option<reqwest::Client>,
@@ -924,8 +924,8 @@ mod tests {
         assert_eq!(web_of("ws://127.0.0.1:1"), "http://127.0.0.1:1");
     }
 
-    /// Security review: a relay (or a bad hub entry) could name any origin and
-    /// have this machine dial into its own network.
+    /// A relay (or a bad hub entry) could name any origin and have this
+    /// machine dial into its own network.
     #[test]
     fn relay_origins_must_be_public_and_wss() {
         let long = format!("wss://{}.example", "a".repeat(MAX_ORIGIN));
@@ -1130,10 +1130,10 @@ mod tests {
         addr
     }
 
-    /// Production (2026-10-23): a relay that refuses this machine's ticket as
-    /// revoked (the hub revoked its tickets) is not asked again with that
-    /// ticket until it nears expiry: the manager hears `Revoked` at once, and
-    /// the connection waits for a fresh ticket, then signs in with it.
+    /// A relay that refuses this machine's ticket as revoked (the hub revoked
+    /// its tickets) is not asked again with that ticket until it nears expiry:
+    /// the manager hears `Revoked` at once, and the connection waits for a
+    /// fresh ticket, then signs in with it.
     #[tokio::test]
     async fn a_ticket_refused_as_revoked_is_not_tried_again() {
         use axum::extract::ws::{CloseFrame, Message as WsMessage};
