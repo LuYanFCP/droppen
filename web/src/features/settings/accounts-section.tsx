@@ -62,7 +62,7 @@ class DuplicateAccountError extends Error {
 }
 
 /** Proper names, untranslated: they are the products' own spelling. */
-const PROVIDER_NAME: Record<AccountProvider, string> = { claude: "Claude", codex: "Codex" };
+const PROVIDER_NAME: Record<AccountProvider, string> = { claude: "Claude Code", codex: "Codex" };
 
 const field = SETTINGS_FIELD;
 

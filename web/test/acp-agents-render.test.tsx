@@ -52,8 +52,10 @@ const agent = (id: string, name: string, lastCheck?: unknown) => ({
   id, name, command: id, args: ["--acp"], envNames: ["API_TOKEN"], ...(lastCheck ? { lastCheck } : {}),
 });
 
+type DeviceState = { agents: unknown[]; remove?: number; check?: unknown; checkRefused?: boolean };
+
 /** The device: its agent list, and how it answers a removal and a check. */
-function device(sent: Sent[], state: { agents: unknown[]; remove?: number; check?: unknown }): Transport {
+function device(sent: Sent[], state: DeviceState): Transport {
   return {
     fetch: async (request: Request) => {
       const url = new URL(request.url);
@@ -61,7 +63,11 @@ function device(sent: Sent[], state: { agents: unknown[]; remove?: number; check
       sent.push({ method: request.method, path: url.pathname, body });
       if (url.pathname === "/api/acp/agents" && request.method === "GET") return Response.json({ agents: state.agents, presets: PRESETS });
       const id = /^\/api\/acp\/agents\/([^/]+)/.exec(url.pathname)?.[1];
-      if (id && url.pathname.endsWith("/check")) return Response.json(state.check ?? READY);
+      if (id && url.pathname.endsWith("/check")) {
+        return state.checkRefused
+          ? Response.json({ error: "limited_device", message: "this device cannot manage the account" }, { status: 403 })
+          : Response.json(state.check ?? READY);
+      }
       if (id && request.method === "PUT") {
         const saved = { ...agent(id, (body as { name?: string }).name ?? id), command: (body as { command?: string }).command ?? id };
         state.agents = [...state.agents, saved];
@@ -87,7 +93,7 @@ afterEach(async () => {
   root = null;
 });
 
-async function mount(sent: Sent[], state: { agents: unknown[]; remove?: number; check?: unknown }, address: string) {
+async function mount(sent: Sent[], state: DeviceState, address: string) {
   registry.setShell("local", LOCAL);
   registry.openMachine(LOCAL, device(sent, state), {
     info: constantStore({ key: LOCAL, name: "studio", state: "online" as const, since: 0, canManage: true, live: "live" as const }),
@@ -166,6 +172,14 @@ test("the details the address names show the check's error, and a running turn r
   await click(byText("[data-acp-details] button", "check again"));
   await until("the check", () => sent.some((s) => s.method === "POST" && s.path === "/api/acp/agents/lab-agent/check"));
   assert.equal(new URLSearchParams(routes.state.location.searchStr).get("agent"), "lab-agent");
+});
+
+test("a check the device refuses to run says why in the details", async () => {
+  const sent: Sent[] = [];
+  await mount(sent, { agents: [agent("lab-agent", "Lab agent", NOT_FOUND)], checkRefused: true }, "/settings?section=accounts&tab=acp&agent=lab-agent");
+  await until("the details", () => !!$('[data-acp-details="lab-agent"]'));
+  await click(byText("[data-acp-details] button", "check again"));
+  await until("the refusal", () => /a limited device cannot do this/.test($('[data-acp-details] p[data-signal="failed"]')?.textContent ?? ""));
 });
 
 test("with no agent, a preset starts the add dialog filled in, which stays open on a failed check", async () => {

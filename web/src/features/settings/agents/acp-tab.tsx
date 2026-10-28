@@ -697,12 +697,17 @@ function AgentDialog({
   );
 }
 
-/** The details dialog, wired to the device: check, edit, remove. */
+/**
+ * The details dialog, wired to the device: check, edit, remove. `checkError`
+ * is why the last check of this agent was not run — the device refused it,
+ * or could not be reached — which no `lastCheck` records.
+ */
 function DetailsDialog({
   agent,
   status,
   confirmFirst,
   checking,
+  checkError,
   onCheck,
   onEdit,
   onClose,
@@ -711,6 +716,7 @@ function DetailsDialog({
   status: AcpStatus;
   confirmFirst: boolean;
   checking: boolean;
+  checkError: string | null;
   onCheck: () => void;
   onEdit: () => void;
   onClose: () => void;
@@ -746,7 +752,7 @@ function DetailsDialog({
           models={models?.models.length ? models.models.length : null}
           confirming={confirming}
           busy={remove.isPending}
-          error={remove.error ? errorText(remove.error) : null}
+          error={remove.error ? errorText(remove.error) : checkError}
           onCheck={onCheck}
           onEdit={onEdit}
           onAskRemove={() => setConfirming(true)}
@@ -820,6 +826,7 @@ export function AcpTab({ openAgent, onOpenAgent }: { openAgent: string | null; o
           status={statusOf(open)}
           confirmFirst={confirmFirst}
           checking={checking.has(open.id)}
+          checkError={check.isError && check.variables === open.id ? errorText(check.error) : null}
           onCheck={() => check.mutate(open.id)}
           onEdit={() => setEditing({ mode: "edit", id: open.id })}
           onClose={() => {
