@@ -155,111 +155,143 @@ pub struct CodexQuota {
 
 // ------------------------------------------------------- the app-server reply
 
-/// The windows, plan and blocked bit of one `account/rateLimits/read` result.
-///
-/// `None` when the reply names no window at all: an app server that answered
-/// something unreadable is not a reading, and the caller falls back.
+/// Reading the app server's `account/rateLimits/read` answer.
 ///
 /// The field names are the RPC's own — `usedPercent`, `windowDurationMins`,
 /// `resetsAt` — which are *not* the rollout file's `used_percent`,
 /// `window_minutes`, `resets_at`. Both spellings are parsed in this module and
 /// neither parser accepts the other's, deliberately: a silent rename is how a
 /// reading turns into an empty window list.
-fn rate_limits_reading(result: &Value, now: SystemTime) -> Option<CodexQuota> {
-    let limits = result.get("rateLimits")?;
-    let windows: Vec<QuotaWindow> = [limits.get("primary"), limits.get("secondary")]
-        .into_iter()
-        .filter_map(rpc_window)
-        .collect();
-    if windows.is_empty() {
-        return None;
+trait CodexReply {
+    /// The windows, plan and blocked bit of one result, or `None` when it names
+    /// no window at all: an app server that answered something unreadable is
+    /// not a reading, and the caller falls back.
+    fn rate_limits_reading(&self, now: SystemTime) -> Option<CodexQuota>;
+
+    /// Whether ordinary usage is blocked, from the two fields that say so.
+    ///
+    /// `ordinaryUsageAllowed` is the verdict — it is the flag the CLI itself
+    /// gates on — and `rateLimitReachedType` is the cross-check, present beside
+    /// it in the live reply as `"rate_limit_reached"`. Either one alone is
+    /// taken at its word; together they are or'd, because both spellings mean
+    /// "the account is out" and a disagreement is not a reason to tell the user
+    /// they are fine.
+    ///
+    /// `None` is unknown: a reply carrying neither field says nothing about
+    /// this, and inventing `false` for it is the same class of lie as a stale
+    /// percentage.
+    fn blocked(&self, limits: &Value) -> Option<bool>;
+}
+
+impl CodexReply for Value {
+    fn rate_limits_reading(&self, now: SystemTime) -> Option<CodexQuota> {
+        let limits = self.get("rateLimits")?;
+        let windows: Vec<QuotaWindow> = [limits.get("primary"), limits.get("secondary")]
+            .into_iter()
+            .filter_map(|raw| raw.rpc_window())
+            .collect();
+        if windows.is_empty() {
+            return None;
+        }
+        Some(CodexQuota {
+            plan: Nullable(
+                limits
+                    .get("planType")
+                    .and_then(Value::as_str)
+                    .filter(|plan| !plan.is_empty())
+                    .map(str::to_owned),
+            ),
+            // The reading is live by construction, so it is stamped now.
+            // Anything else here would be the stale reading this module exists
+            // to prevent.
+            updated_at: Nullable(Some(iso8601(now))),
+            windows,
+            source: CodexQuotaSource::AppServer,
+            blocked: Nullable(self.blocked(limits)),
+        })
     }
-    Some(CodexQuota {
-        plan: Nullable(
-            limits
-                .get("planType")
-                .and_then(Value::as_str)
-                .filter(|plan| !plan.is_empty())
-                .map(str::to_owned),
-        ),
-        // The reading is live by construction, so it is stamped now. Anything
-        // else here would be the stale reading this module exists to prevent.
-        updated_at: Nullable(Some(iso8601(now))),
-        windows,
-        source: CodexQuotaSource::AppServer,
-        blocked: Nullable(blocked(result, limits)),
-    })
+
+    fn blocked(&self, limits: &Value) -> Option<bool> {
+        let denied = self.get("ordinaryUsageAllowed").and_then(Value::as_bool).map(|allowed| !allowed);
+        let reached = limits
+            .get("rateLimitReachedType")
+            .and_then(Value::as_str)
+            .map(|kind| !matches!(kind.trim(), "" | "none" | "not_reached"));
+        match (denied, reached) {
+            (Some(denied), Some(reached)) => Some(denied || reached),
+            (denied, reached) => denied.or(reached),
+        }
+    }
 }
 
-/// One window of the RPC reply, or `None` for the `null` a plan with a single
-/// window puts in `secondary`.
-fn rpc_window(raw: Option<&Value>) -> Option<QuotaWindow> {
-    let object = raw?.as_object()?;
-    let used = object.get("usedPercent")?.as_f64()?;
-    let minutes = object.get("windowDurationMins").and_then(Value::as_i64).unwrap_or(0);
-    Some(window(window_label(minutes), minutes, used, resets_at(object.get("resetsAt"))))
+/// Reading one window object, in either of the two spellings.
+trait WindowValue {
+    /// One window of the RPC reply, or `None` for the `null` a plan with a
+    /// single window puts in `secondary`.
+    fn rpc_window(&self) -> Option<QuotaWindow>;
+
+    /// One `token_count` line's window, in the rollout file's own spelling.
+    fn log_window(&self) -> Option<QuotaWindow>;
+
+    /// A unix-seconds reset instant as ISO-8601.
+    ///
+    /// `Duration::from_secs_f64` panics on a negative, NaN or overflowing
+    /// value, and neither an RPC reply nor a rollout file is trusted input.
+    fn resets_at(&self) -> Option<String>;
 }
 
-/// A unix-seconds reset instant as ISO-8601.
-///
-/// `Duration::from_secs_f64` panics on a negative, NaN or overflowing value,
-/// and neither an RPC reply nor a rollout file is trusted input.
-fn resets_at(raw: Option<&Value>) -> Option<String> {
-    raw.and_then(Value::as_f64)
-        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0 && *seconds < 1e12)
-        .map(|seconds| iso8601(std::time::UNIX_EPOCH + Duration::from_secs_f64(seconds)))
-}
+impl WindowValue for Option<&Value> {
+    fn rpc_window(&self) -> Option<QuotaWindow> {
+        let object = (*self)?.as_object()?;
+        let used = object.get("usedPercent")?.as_f64()?;
+        let minutes = object.get("windowDurationMins").and_then(Value::as_i64).unwrap_or(0);
+        Some(window(window_label(minutes), minutes, used, object.get("resetsAt").resets_at()))
+    }
 
-/// Whether ordinary usage is blocked, from the two fields that say so.
-///
-/// `ordinaryUsageAllowed` is the verdict — it is the flag the CLI itself gates
-/// on — and `rateLimitReachedType` is the cross-check, present beside it in the
-/// live reply as `"rate_limit_reached"`. Either one alone is taken at its word;
-/// together they are or'd, because both spellings mean "the account is out" and
-/// a disagreement is not a reason to tell the user they are fine.
-///
-/// `None` is unknown: a reply carrying neither field says nothing about this,
-/// and inventing `false` for it is the same class of lie as a stale percentage.
-fn blocked(result: &Value, limits: &Value) -> Option<bool> {
-    let denied = result.get("ordinaryUsageAllowed").and_then(Value::as_bool).map(|allowed| !allowed);
-    let reached = limits
-        .get("rateLimitReachedType")
-        .and_then(Value::as_str)
-        .map(|kind| !matches!(kind.trim(), "" | "none" | "not_reached"));
-    match (denied, reached) {
-        (Some(denied), Some(reached)) => Some(denied || reached),
-        (denied, reached) => denied.or(reached),
+    fn log_window(&self) -> Option<QuotaWindow> {
+        let object = (*self)?.as_object()?;
+        let used = object.get("used_percent")?.as_f64()?;
+        let minutes = object.get("window_minutes").and_then(Value::as_i64).unwrap_or(0);
+        Some(window(window_label(minutes), minutes, used, object.get("resets_at").resets_at()))
+    }
+
+    fn resets_at(&self) -> Option<String> {
+        self.and_then(Value::as_f64)
+            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0 && *seconds < 1e12)
+            .map(|seconds| iso8601(std::time::UNIX_EPOCH + Duration::from_secs_f64(seconds)))
     }
 }
 
 // ------------------------------------------------------------------ the probe
 
-/// Start a `codex app-server`, ask it the one question, and take the windows
-/// out of its answer.
-///
-/// A short-lived child of this module's own rather than the session client in
-/// [`crate::inject::app_server`]: that one is one app server *per session* over
-/// the restart-safe shim, and it exists to keep a turn alive across a server
-/// restart — it claims the session lock, writes a run journal record and leaves
-/// shim sidecars on disk. None of that belongs to a read that needs no thread
-/// at all. This is the [`crate::models::probe`] shape instead: timeout,
-/// `kill_on_drop`, an explicit close, cached and TTL'd, fallback on any failure.
-///
-/// `None` for every failure there is — no CLI, one that will not start, one
-/// that never answers, an answer that is not JSON, an error reply, a reply with
-/// no windows in it. The caller falls back to the session logs, so none of them
-/// need telling apart.
-async fn probe_app_server(paths: &Paths) -> Option<CodexQuota> {
+impl Paths {
+    /// Start a `codex app-server`, ask it the one question, and take the windows
+    /// out of its answer.
+    ///
+    /// A short-lived child of this module's own rather than the session client in
+    /// [`crate::inject::app_server`]: that one is one app server *per session* over
+    /// the restart-safe shim, and it exists to keep a turn alive across a server
+    /// restart — it claims the session lock, writes a run journal record and leaves
+    /// shim sidecars on disk. None of that belongs to a read that needs no thread
+    /// at all. This is the [`crate::models::probe`] shape instead: timeout,
+    /// `kill_on_drop`, an explicit close, cached and TTL'd, fallback on any failure.
+    ///
+    /// `None` for every failure there is — no CLI, one that will not start, one
+    /// that never answers, an answer that is not JSON, an error reply, a reply with
+    /// no windows in it. The caller falls back to the session logs, so none of them
+    /// need telling apart.
+    async fn probe_app_server(&self) -> Option<CodexQuota> {
     // The user's own home, exactly as the Claude probes are spawned: the app
     // server reads the login this machine's `codex` would use, which is the
     // login whose windows the panel is about.
-    let reading = app_server_call(Path::new("codex"), &paths.home, &clean_env_bare(), RATE_LIMITS, PROBE_TIMEOUT)
+    let reading = app_server_call(Path::new("codex"), &self.home, &clean_env_bare(), RATE_LIMITS, PROBE_TIMEOUT)
         .await
-        .and_then(|result| rate_limits_reading(&result, SystemTime::now()));
+        .and_then(|result| result.rate_limits_reading(SystemTime::now()));
     if reading.is_none() {
         tracing::debug!("the codex app server answered no rate limits; falling back to the session logs");
     }
-    reading
+        reading
+    }
 }
 
 /// One question put to a short-lived `codex app-server`: the handshake, one
@@ -271,7 +303,7 @@ async fn probe_app_server(paths: &Paths) -> Option<CodexQuota> {
 /// `codex` for the probe and the binary the guide found for the guide;
 /// `timeout` bounds the conversation, not the exit grace after it.
 ///
-/// `None` for every failure, as [`probe_app_server`] describes, and an `error`
+/// `None` for every failure, as [`Paths::probe_app_server`] describes, and an `error`
 /// reply is one of them: its message describes the account and is not ours to
 /// quote (see the module's security note).
 pub(crate) async fn app_server_call(program: &Path, cwd: &Path, env: &crate::process_env::Env, method: &str, timeout: Duration) -> Option<Value> {
@@ -365,14 +397,6 @@ async fn reply<R: tokio::io::AsyncBufRead + Unpin>(lines: &mut tokio::io::Lines<
 
 // --------------------------------------------------------------- the fallback
 
-/// One `token_count` line's windows, in the rollout file's own spelling.
-fn log_window(raw: Option<&Value>) -> Option<QuotaWindow> {
-    let object = raw?.as_object()?;
-    let used = object.get("used_percent")?.as_f64()?;
-    let minutes = object.get("window_minutes").and_then(Value::as_i64).unwrap_or(0);
-    Some(window(window_label(minutes), minutes, used, resets_at(object.get("resets_at"))))
-}
-
 /// The newest usable reading in one rollout file, with the epoch millis it was
 /// written at, or `None` when the file has none inside [`LOG_MAX_AGE`].
 ///
@@ -407,7 +431,7 @@ async fn file_reading(path: &Path, floor_ms: i64) -> Option<(i64, CodexQuota)> {
         let Some(limits) = payload.get("rate_limits") else { continue };
         let windows: Vec<QuotaWindow> = [limits.get("primary"), limits.get("secondary")]
             .into_iter()
-            .filter_map(log_window)
+            .filter_map(|raw| raw.log_window())
             .collect();
         if windows.is_empty() {
             continue;
@@ -426,11 +450,12 @@ async fn file_reading(path: &Path, floor_ms: i64) -> Option<(i64, CodexQuota)> {
     None
 }
 
-/// The newest rollout files under the date-partitioned sessions tree, freshest
-/// mtime first.
-async fn newest_codex_files(paths: &Paths, keep: usize) -> Vec<PathBuf> {
+impl Paths {
+    /// The newest rollout files under the date-partitioned sessions tree, freshest
+    /// mtime first.
+    async fn newest_codex_files(&self, keep: usize) -> Vec<PathBuf> {
     let mut found: Vec<(PathBuf, f64)> = Vec::new();
-    let mut stack = vec![paths.codex_sessions()];
+    let mut stack = vec![self.codex_sessions()];
     while let Some(dir) = stack.pop() {
         let Ok(mut entries) = tokio::fs::read_dir(&dir).await else { continue };
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -450,24 +475,26 @@ async fn newest_codex_files(paths: &Paths, keep: usize) -> Vec<PathBuf> {
     }
     found.sort_by(|(_, left), (_, right)| right.partial_cmp(left).unwrap_or(std::cmp::Ordering::Equal));
     found.truncate(keep);
-    found.into_iter().map(|(path, _)| path).collect()
+        found.into_iter().map(|(path, _)| path).collect()
+    }
 }
 
-/// The newest reading the session logs can still vouch for.
-///
-/// Newest by *timestamp* across the [`LOG_FILES`] newest files, not the newest
-/// file's own answer: mtime orders when a file was last touched, which is not
-/// when its numbers were read. Resuming a fortnight-old session for one turn
-/// makes it the newest file on disk while a younger session holds the newer
-/// windows, and picking by mtime alone is half of the bug this module prevents.
-async fn log_reading(paths: &Paths, now: SystemTime) -> Option<CodexQuota> {
+impl Paths {
+    /// The newest reading the session logs can still vouch for.
+    ///
+    /// Newest by *timestamp* across the [`LOG_FILES`] newest files, not the newest
+    /// file's own answer: mtime orders when a file was last touched, which is not
+    /// when its numbers were read. Resuming a fortnight-old session for one turn
+    /// makes it the newest file on disk while a younger session holds the newer
+    /// windows, and picking by mtime alone is half of the bug this module prevents.
+    async fn log_reading(&self, now: SystemTime) -> Option<CodexQuota> {
     let floor_ms = now
         .checked_sub(LOG_MAX_AGE)
         .and_then(|floor| floor.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|since| since.as_millis() as i64)
         .unwrap_or(0);
     let mut best: Option<(i64, CodexQuota)> = None;
-    for path in newest_codex_files(paths, LOG_FILES).await {
+    for path in self.newest_codex_files(LOG_FILES).await {
         let Some((at, quota)) = file_reading(&path, floor_ms).await else {
             continue;
         };
@@ -475,7 +502,8 @@ async fn log_reading(paths: &Paths, now: SystemTime) -> Option<CodexQuota> {
             best = Some((at, quota));
         }
     }
-    best.map(|(_, quota)| quota)
+        best.map(|(_, quota)| quota)
+    }
 }
 
 // ------------------------------------------------------------------ the cache
@@ -540,7 +568,7 @@ impl CodexQuotaCache {
 
         let cache = self.clone();
         let pending: Pending = async move {
-            let quota = probe(&cache.paths).await;
+            let quota = cache.paths.probe_codex().await;
             cache.store(quota);
             *cache.in_flight.lock().expect("codex quota probe poisoned") = None;
         }
@@ -565,12 +593,15 @@ impl CodexQuotaCache {
     }
 }
 
-/// The live reading if the app server can be reached, the session logs if not.
-async fn probe(paths: &Paths) -> Option<CodexQuota> {
-    if let Some(live) = probe_app_server(paths).await {
-        return Some(live);
+impl Paths {
+    /// The live reading if the app server can be reached, the session logs if
+    /// not.
+    async fn probe_codex(&self) -> Option<CodexQuota> {
+        if let Some(live) = self.probe_app_server().await {
+            return Some(live);
+        }
+        self.log_reading(SystemTime::now()).await
     }
-    log_reading(paths, SystemTime::now()).await
 }
 
 #[cfg(test)]
@@ -618,7 +649,7 @@ mod tests {
 
     #[test]
     fn the_live_reply_reads_as_a_spent_weekly_window() {
-        let quota = rate_limits_reading(&live_reply(), now()).expect("a reading");
+        let quota = live_reply().rate_limits_reading(now()).expect("a reading");
 
         assert_eq!(quota.source, CodexQuotaSource::AppServer);
         assert_eq!(quota.plan, Nullable(Some("pro".to_string())));
@@ -641,34 +672,32 @@ mod tests {
         let rpc = json!({"usedPercent": 40.0, "windowDurationMins": 300, "resetsAt": 1_722_470_400i64});
         let log = json!({"used_percent": 40.0, "window_minutes": 300, "resets_at": 1_722_470_400i64});
 
-        let from_rpc = rpc_window(Some(&rpc)).expect("an rpc window");
+        let from_rpc = Some(&rpc).rpc_window().expect("an rpc window");
         assert_eq!(from_rpc.label, "5h");
         assert_eq!(from_rpc.remaining_percent, 60.0);
         assert_eq!(from_rpc.resets_at.as_ref().map(String::as_str), Some("2024-08-01T00:00:00.000Z"));
-        assert_eq!(log_window(Some(&log)), Some(from_rpc), "the same window, in the log's spelling");
+        assert_eq!(Some(&log).log_window(), Some(from_rpc), "the same window, in the log's spelling");
 
-        assert!(rpc_window(Some(&log)).is_none(), "the log spelling is not an rpc window");
-        assert!(log_window(Some(&rpc)).is_none(), "and the rpc spelling is not a log one");
-        assert!(rpc_window(None).is_none(), "a null secondary is not a window");
+        assert!(Some(&log).rpc_window().is_none(), "the log spelling is not an rpc window");
+        assert!(Some(&rpc).log_window().is_none(), "and the rpc spelling is not a log one");
+        assert!(None.rpc_window().is_none(), "a null secondary is not a window");
         assert!(
-            rpc_window(Some(&json!({"windowDurationMins": 300}))).is_none(),
+            Some(&json!({"windowDurationMins": 300})).rpc_window().is_none(),
             "no percentage, no window"
         );
     }
 
     #[test]
     fn a_plan_with_two_windows_keeps_both() {
-        let quota = rate_limits_reading(
-            &json!({
-                "ordinaryUsageAllowed": true,
-                "rateLimits": {
-                    "primary": {"usedPercent": 12.0, "windowDurationMins": 300},
-                    "secondary": {"usedPercent": 83.0, "windowDurationMins": 10080, "resetsAt": 1_722_470_400i64},
-                    "planType": "plus",
-                }
-            }),
-            now(),
-        )
+        let quota = json!({
+            "ordinaryUsageAllowed": true,
+            "rateLimits": {
+                "primary": {"usedPercent": 12.0, "windowDurationMins": 300},
+                "secondary": {"usedPercent": 83.0, "windowDurationMins": 10080, "resetsAt": 1_722_470_400i64},
+                "planType": "plus",
+            }
+        })
+        .rate_limits_reading(now())
         .expect("a reading");
         let labels: Vec<&str> = quota.windows.iter().map(|w| w.label.as_str()).collect();
         assert_eq!(labels, ["5h", "weekly"]);
@@ -683,7 +712,7 @@ mod tests {
             json!({"rateLimits": {"primary": {"windowDurationMins": 300}}}),
             json!({"rateLimits": {"primary": {"used_percent": 50.0, "window_minutes": 300}}}),
         ] {
-            assert!(rate_limits_reading(&reply, now()).is_none(), "{reply} must not answer");
+            assert!(reply.rate_limits_reading(now()).is_none(), "{reply} must not answer");
         }
     }
 
@@ -692,7 +721,7 @@ mod tests {
     fn blocked_is_unknown_until_something_says_otherwise() {
         let of = |reply: Value| {
             let limits = reply.get("rateLimits").cloned().unwrap_or(json!({}));
-            blocked(&reply, &limits)
+            reply.blocked(&limits)
         };
         assert_eq!(of(json!({"ordinaryUsageAllowed": false})), Some(true));
         assert_eq!(of(json!({"ordinaryUsageAllowed": true})), Some(false));
@@ -763,7 +792,7 @@ mod tests {
         ])
         .await;
 
-        let quota = log_reading(&paths, now()).await.expect("a reading");
+        let quota = paths.log_reading(now()).await.expect("a reading");
         assert_eq!(quota.source, CodexQuotaSource::SessionLog);
         assert_eq!(quota.windows[0].used_percent, 100.0, "the newest numbers, not the newest file's");
         assert_eq!(quota.updated_at, Nullable(Some(stamp(60 * 60 * 1000))));
@@ -778,11 +807,11 @@ mod tests {
         let limits = json!({"plan_type": "pro", "primary": {"used_percent": 30.0, "window_minutes": 10080}});
 
         let (_home, paths) = sessions(&[("old.jsonl", format!("{}\n", log_line(&stamp(just_outside), limits.clone())))]).await;
-        assert!(log_reading(&paths, now()).await.is_none(), "three days of drift must not read as current");
+        assert!(paths.log_reading(now()).await.is_none(), "three days of drift must not read as current");
 
         let (_home, paths) = sessions(&[("recent.jsonl", format!("{}\n", log_line(&stamp(just_inside), limits)))]).await;
         assert!(
-            log_reading(&paths, now()).await.is_some(),
+            paths.log_reading(now()).await.is_some(),
             "and the cutoff is a floor, not a freshness rule"
         );
     }
@@ -807,7 +836,7 @@ mod tests {
         )])
         .await;
 
-        let quota = log_reading(&paths, now()).await.expect("a reading");
+        let quota = paths.log_reading(now()).await.expect("a reading");
         assert_eq!(quota.plan, Nullable(Some("pro".to_string())));
         assert_eq!(quota.source, CodexQuotaSource::SessionLog);
         assert_eq!(quota.blocked, Nullable(None), "the logs never say whether usage is blocked");
@@ -823,7 +852,7 @@ mod tests {
     #[tokio::test]
     async fn no_sessions_at_all_is_no_reading() {
         let home = tempfile::tempdir().expect("tempdir");
-        assert!(log_reading(&Paths::new(home.path().to_path_buf()), now()).await.is_none());
+        assert!(Paths::new(home.path().to_path_buf()).log_reading(now()).await.is_none());
     }
 
     // --------------------------------------------------------------- the cache
@@ -837,7 +866,7 @@ mod tests {
     #[tokio::test]
     async fn a_fresh_reading_is_not_re_probed_and_a_failure_keeps_the_last_one() {
         let (_home, cache) = cache();
-        let good = rate_limits_reading(&live_reply(), now()).expect("a reading");
+        let good = live_reply().rate_limits_reading(now()).expect("a reading");
 
         // Planted rather than probed: nothing is spawned in a unit test.
         cache.store(Some(good.clone()));
@@ -865,7 +894,7 @@ mod tests {
     #[ignore = "spawns the real codex CLI"]
     async fn the_installed_app_server_answers_with_live_windows() {
         let paths = Paths::new(dirs_home());
-        let quota = probe_app_server(&paths).await.expect("the app server answered");
+        let quota = paths.probe_app_server().await.expect("the app server answered");
         println!("{quota:?}");
         assert_eq!(quota.source, CodexQuotaSource::AppServer);
         assert!(!quota.windows.is_empty());
