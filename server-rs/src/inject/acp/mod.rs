@@ -76,10 +76,12 @@ const INSTALL_HINT: &str = "Check its executable and arguments in Settings";
 /// How long a check waits for `initialize` to be answered.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The configured agent `id`, or why a new session cannot run on it.
-fn configured(paths: &Paths, id: &str) -> Result<AcpAgent, InjectError> {
-    crate::acp_agent::agent(paths, id)
-        .ok_or_else(|| InjectError::message(format!("no ACP agent \"{id}\" is configured; add it in Settings")))
+impl Paths {
+    /// The configured agent `id`, or why a new session cannot run on it.
+    fn configured_acp_agent(&self, id: &str) -> Result<AcpAgent, InjectError> {
+        self.acp_agent(id)
+            .ok_or_else(|| InjectError::message(format!("no ACP agent \"{id}\" is configured; add it in Settings")))
+    }
 }
 
 /// A session this server already has a transcript for.
@@ -323,7 +325,7 @@ impl InjectionRegistry {
                 agent.name
             ));
         }
-        let removed = crate::acp_agent::remove(&self.paths, &agent.id);
+        let removed = self.paths.remove_acp_agent(&agent.id);
         // Whatever it offered, an agent configured again under this id may not.
         self.forget_acp_options(&agent.id);
         Ok(removed)
@@ -390,7 +392,7 @@ impl InjectionRegistry {
         // The agent is read under the gate, which its removal holds too
         // ([`InjectionRegistry::remove_acp_agent`]).
         let _gate = self.spawn_gate.lock().await;
-        let agent = configured(&self.paths, agent)?;
+        let agent = self.paths.configured_acp_agent(agent)?;
         check_options(&agent, options)?;
         let message = message(text, options);
         // Checked before anything starts, against what the agent last offered:
@@ -411,7 +413,9 @@ impl InjectionRegistry {
             .ok_or_else(|| InjectError::message("ACP session not found"))?;
         // Under the gate, as in `acp_start`.
         let _gate = self.spawn_gate.lock().await;
-        let agent = crate::acp_agent::agent(&self.paths, &agent_id)
+        let agent = self
+            .paths
+            .acp_agent(&agent_id)
             .ok_or_else(|| InjectError::message(crate::acp_agent::removed(&agent_id)))?;
         check_options(&agent, options)?;
         let message = message(text, options);
@@ -469,7 +473,7 @@ impl InjectionRegistry {
         let (agent_id, from) = locate(&self.paths, id)
             .await
             .ok_or_else(|| ArchiveError("cannot archive the ACP session: it is gone".to_string()))?;
-        let name = crate::acp_agent::agent(&self.paths, &agent_id).map_or(agent_id.clone(), |agent| agent.name);
+        let name = self.paths.acp_agent(&agent_id).map_or(agent_id.clone(), |agent| agent.name);
         let _gate = self.spawn_gate.lock().await;
         if let Some(handle) = self.acp_handle(id).filter(Handle::alive) {
             if !handle.stop().await {

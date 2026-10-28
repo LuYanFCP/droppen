@@ -356,7 +356,7 @@ pub(crate) async fn model_ids(state: &AppState, source: Source, account_id: Opti
 /// models, which hides the pickers, and a `fallback` source, which says why.
 async fn acp_models(state: &AppState, agent: &str) -> (Vec<ModelInfo>, ModelListSource) {
     use crate::acp::{category, option_for};
-    let Some(agent) = crate::acp_agent::agent(&state.paths, agent) else {
+    let Some(agent) = state.paths.acp_agent(agent) else {
         return (Vec::new(), ModelListSource::Fallback);
     };
     let options = match state.drive.injections.acp_options(&agent).await {
