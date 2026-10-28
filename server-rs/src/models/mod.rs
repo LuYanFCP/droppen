@@ -354,6 +354,10 @@ pub(crate) async fn model_ids(state: &AppState, source: Source, account_id: Opti
 /// The agent's list is the whole list: there is no static guess to fall back
 /// on, so an agent that cannot be asked — or is not configured — yields no
 /// models, which hides the pickers, and a `fallback` source, which says why.
+/// The longest model id, effort or label, in characters, an ACP agent's list
+/// shows.
+const MAX_ACP_MODEL_WORD: usize = 256;
+
 async fn acp_models(state: &AppState, agent: &str) -> (Vec<ModelInfo>, ModelListSource) {
     use crate::acp::{category, option_for};
     let Some(agent) = state.paths.acp_agent(agent) else {
@@ -366,17 +370,32 @@ async fn acp_models(state: &AppState, agent: &str) -> (Vec<ModelInfo>, ModelList
             return (Vec::new(), ModelListSource::Fallback);
         }
     };
+    // The agent's words, shown to whoever can start a session: redacted as
+    // its errors are, and no longer than a name. An id goes back to the agent
+    // as it is when picked, so one that redaction would change, or that is too
+    // long to show whole, is left out rather than shown altered.
+    let injections = &state.drive.injections;
+    let shown = |text: &str| crate::accounts::limits::clip(&injections.redact_acp(&agent, text), MAX_ACP_MODEL_WORD);
+    let usable = |id: &str| id.chars().count() <= MAX_ACP_MODEL_WORD && injections.redact_acp(&agent, id) == id;
     let effort = option_for(&options, category::THOUGHT_LEVEL);
-    let efforts = effort.map(|effort| effort.values().iter().map(|value| value.value.clone()).collect::<Vec<_>>());
-    let default_effort = effort.and_then(|effort| effort.current_value.clone());
+    let efforts = effort.map(|effort| {
+        effort
+            .values()
+            .iter()
+            .map(|value| value.value.clone())
+            .filter(|value| usable(value))
+            .collect::<Vec<_>>()
+    });
+    let default_effort = effort.and_then(|effort| effort.current_value.clone()).filter(|value| usable(value));
     let models = option_for(&options, category::MODEL)
         .map(|model| {
             model
                 .values()
                 .iter()
+                .filter(|value| usable(&value.value))
                 .map(|value| ModelInfo {
                     id: value.value.clone(),
-                    label: Nullable((!value.name.is_empty() && value.name != value.value).then(|| value.name.clone())),
+                    label: Nullable((!value.name.is_empty() && value.name != value.value).then(|| shown(&value.name))),
                     efforts: Nullable(efforts.clone()),
                     default_effort: Nullable(default_effort.clone()),
                 })

@@ -219,8 +219,9 @@ impl Conn {
     /// its options is not a conversation anybody should find later.
     pub(super) async fn close_session(&self, id: &str) {
         if self.can_close {
-            if let Err(error) = self.call("session/close", json!({ "sessionId": id })).await {
-                tracing::debug!(%error, "the agent did not close a probe session");
+            if self.call("session/close", json!({ "sessionId": id })).await.is_err() {
+                // Not what it said: the agent's own words are not logged.
+                tracing::debug!("the agent did not close a probe session");
             }
         }
     }
@@ -266,6 +267,8 @@ impl Conn {
 /// whole file the agent writes through the client is one line — and a bound on
 /// what a program that is not speaking ACP can make this server hold.
 const MAX_LINE: usize = 64 * 1024 * 1024;
+/// What the line buffer keeps between lines: one long line is not held on to.
+const KEEP_LINE: usize = 64 * 1024;
 
 /// The agent's stdout, a line at a time, none longer than `max`.
 struct Lines<R> {
@@ -290,6 +293,7 @@ impl<R: tokio::io::AsyncRead + Unpin> Lines<R> {
     async fn next(&mut self) -> Option<String> {
         loop {
             self.line.clear();
+            self.line.shrink_to(KEEP_LINE);
             let read = (&mut self.reader)
                 .take(self.max as u64 + 1)
                 .read_until(b'\n', &mut self.line)
@@ -333,7 +337,12 @@ async fn read(stdout: ChildStdout, writer: Writer, pending: Arc<Mutex<Pending>>,
                 Ok(notification) => {
                     let _ = events.send(Event::Update(notification));
                 }
-                Err(error) => tracing::debug!(%error, "skipping a session/update this build cannot read"),
+                // Where it failed, not the message: serde quotes the values it saw.
+                Err(error) => tracing::debug!(
+                    category = ?error.classify(),
+                    column = error.column(),
+                    "skipping a session/update this build cannot read"
+                ),
             },
             (Some(_), None) => {}
             // An answer to one of this client's requests.

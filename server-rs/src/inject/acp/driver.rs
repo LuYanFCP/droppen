@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -24,6 +25,9 @@ pub(super) const IDLE_EXIT: Duration = Duration::from_secs(30 * 60);
 /// How much of the agent's stderr is kept for the message a failure is
 /// reported with.
 const STDERR_TAIL: usize = 4 * 1024;
+/// How long a model or effort switch may take before the agent is taken for
+/// dead: nothing else reaches it until that answer comes.
+const CONFIG_TIMEOUT: Duration = if cfg!(test) { Duration::from_secs(5) } else { Duration::from_secs(60) };
 
 /// The driver's state, readable without awaiting it.
 #[derive(Clone, Debug, Default)]
@@ -66,10 +70,41 @@ pub(super) struct Message {
 /// What the send path and the routes hold on to.
 #[derive(Clone)]
 pub(in crate::inject) struct Handle {
-    pub(super) tx: mpsc::UnboundedSender<Cmd>,
+    tx: mpsc::UnboundedSender<Cmd>,
     shared: Arc<Mutex<State>>,
     /// The id of the agent the session runs on.
     agent: Arc<str>,
+    /// Messages sent to the driver that it has not taken yet.
+    in_flight: Arc<AtomicUsize>,
+    /// The agent's command line or environment changed: the process ends
+    /// once it has nothing to do, and the next message starts a new one.
+    retire: Arc<AtomicBool>,
+}
+
+/// A message on its way to the driver, counted on its [`Handle`] until the
+/// driver takes it or is gone.
+pub(super) struct Delivery {
+    reply: oneshot::Receiver<Sent>,
+    _counted: InFlight,
+}
+
+/// One message in [`Handle::in_flight`], for as long as this lives.
+struct InFlight(Arc<AtomicUsize>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl Delivery {
+    /// Wait for the driver to take the message. Not under the spawn gate: a
+    /// driver may take a while to read it, and nothing else should wait on it.
+    pub(super) async fn taken(self, name: &str) -> Result<Sent, InjectError> {
+        self.reply
+            .await
+            .map_err(|_| InjectError::message(format!("{name} exited before it took the message")))
+    }
 }
 
 impl Handle {
@@ -78,6 +113,8 @@ impl Handle {
             tx,
             shared: Arc::default(),
             agent: agent.into(),
+            in_flight: Arc::default(),
+            retire: Arc::default(),
         }
     }
 
@@ -86,14 +123,59 @@ impl Handle {
         &*self.agent == agent
     }
 
-    /// A turn is running, or a message is waiting for one.
+    /// A turn is running, or a message is waiting for one — in the driver's
+    /// queue, or on its way there.
     pub(super) fn busy(&self) -> bool {
         let state = self.shared.lock().unwrap();
-        self.alive() && (state.active || !state.queue.is_empty())
+        self.alive() && (self.in_flight.load(Ordering::Acquire) > 0 || state.active || !state.queue.is_empty())
     }
 
     pub(super) fn shared(&self) -> Arc<Mutex<State>> {
         self.shared.clone()
+    }
+
+    /// Whether this handle is the one whose state is `shared`.
+    pub(super) fn shares(&self, shared: &Arc<Mutex<State>>) -> bool {
+        Arc::ptr_eq(&self.shared, shared)
+    }
+
+    /// Send the driver its next message, counted as in flight until it is
+    /// taken. A driver that is gone drops it, which [`Delivery::taken`] says.
+    pub(super) fn deliver(&self, message: Message) -> Delivery {
+        self.in_flight.fetch_add(1, Ordering::AcqRel);
+        let counted = InFlight(self.in_flight.clone());
+        let (reply, taken) = oneshot::channel();
+        let _ = self.tx.send(Cmd::Deliver(message, reply));
+        Delivery { reply: taken, _counted: counted }
+    }
+
+    /// Whether a message for this session goes to this process: it is alive,
+    /// and not on its way out for a changed configuration with nothing left
+    /// to do.
+    pub(super) fn takes_messages(&self) -> bool {
+        self.alive() && (!self.retiring() || self.busy())
+    }
+
+    /// Ask the driver to end its process if it has nothing to do; the answer
+    /// says whether it did. `None` when it is gone already.
+    pub(super) fn request_stop(&self) -> Option<oneshot::Receiver<bool>> {
+        let (reply, answer) = oneshot::channel();
+        self.tx.send(Cmd::Stop(reply)).ok()?;
+        Some(answer)
+    }
+
+    /// End the process once it has nothing to do ([`Handle::retire`]).
+    pub(super) fn retire(&self) {
+        self.retire.store(true, Ordering::Release);
+    }
+
+    pub(super) fn retiring(&self) -> bool {
+        self.retire.load(Ordering::Acquire)
+    }
+
+    /// What the driver reads of its handle.
+    pub(super) fn counters(&self) -> (Arc<AtomicUsize>, Arc<AtomicBool>) {
+        (self.in_flight.clone(), self.retire.clone())
     }
 
     /// The session's configuration options as they stand.
@@ -153,11 +235,6 @@ impl Handle {
         }
         rx.await.unwrap_or(QueueOutcome::Unreachable)
     }
-
-    pub(super) async fn stop(&self) -> bool {
-        let (reply, rx) = oneshot::channel();
-        self.tx.send(Cmd::Stop(reply)).is_ok() && rx.await.unwrap_or(false)
-    }
 }
 
 pub(in crate::inject) enum Cmd {
@@ -181,10 +258,28 @@ impl Process {
         Self(child)
     }
 
-    /// Wait up to `grace` for it to exit on its own; then [`Process::kill`] it.
+    /// Wait up to `grace` for it to exit on its own, then [`Process::kill`] it
+    /// — exited or not, while it is unreaped, so what it left running in its
+    /// group goes too.
     pub(super) async fn end(&mut self, grace: Duration) {
-        if tokio::time::timeout(grace, self.0.wait()).await.is_err() {
-            self.kill().await;
+        let deadline = Instant::now() + grace;
+        while !self.exited() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        self.kill().await;
+    }
+
+    /// Whether it has exited, seen without reaping it: `waitid` with
+    /// `WNOWAIT` leaves it a zombie, so its pid still names its group.
+    fn exited(&self) -> bool {
+        let Some(pid) = self.0.id() else { return true };
+        // SAFETY: a zeroed `siginfo_t` is a valid out-parameter, and `waitid`
+        // with `WNOHANG | WNOWAIT` on a child of this process only reads its
+        // state.
+        unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            let found = libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT);
+            found == 0 && info.si_pid() != 0
         }
     }
 
@@ -323,6 +418,16 @@ impl Transcript {
     }
 }
 
+/// Why a message's model or effort was not set.
+enum Unset {
+    /// The agent has no such value, or refused it: the message fails, and the
+    /// session goes on.
+    Refused(String),
+    /// The agent did not answer: the message fails, and the agent is taken for
+    /// dead.
+    Silent(String),
+}
+
 pub(super) struct Driver {
     pub(super) registry: Arc<InjectionRegistry>,
     /// The agent the session runs on, as it was configured when this process
@@ -343,6 +448,10 @@ pub(super) struct Driver {
     pub(super) state: State,
     pub(super) shared: Arc<Mutex<State>>,
     pub(super) rx: mpsc::UnboundedReceiver<Cmd>,
+    /// Its handle's count of messages on their way ([`Handle::deliver`]).
+    pub(super) in_flight: Arc<AtomicUsize>,
+    /// Its handle's [`Handle::retire`].
+    pub(super) retire: Arc<AtomicBool>,
     /// A cancel was sent for the turn in flight.
     pub(super) interrupted: bool,
     /// The model and effort the transcript last recorded the session running
@@ -356,9 +465,26 @@ impl Driver {
         self.registry.poke_feed(Source::Acp, &self.id);
     }
 
+    /// Take this driver's handle out of the registry's map, if it is still
+    /// the one there.
+    fn leave(&self) {
+        let key = self.registry.key_of(Source::Acp, &self.id);
+        let mut servers = self.registry.acp_servers.lock().unwrap();
+        if servers.get(&key).is_some_and(|handle| handle.shares(&self.shared)) {
+            servers.remove(&key);
+        }
+    }
+
     pub(super) async fn run(mut self) {
         let mut idle_since = Instant::now();
         loop {
+            let idle = !self.state.active && self.state.queue.is_empty() && self.in_flight.load(Ordering::Acquire) == 0;
+            if idle && self.retire.load(Ordering::Acquire) {
+                // The handle stays, closed, so the session row still says how
+                // the last turn ended; the next message starts a new process.
+                self.exit().await;
+                return;
+            }
             if !self.state.active {
                 if let Some(message) = self.state.queue.pop_front() {
                     if let Err(error) = self.submit(message).await {
@@ -414,8 +540,7 @@ impl Driver {
                 _ = tokio::time::sleep_until(idle_deadline.into()), if !self.state.active && self.state.queue.is_empty() => {
                     // Gone from the map first, so the next message starts a new
                     // process instead of finding this one on its way out.
-                    let key = self.registry.key_of(Source::Acp, &self.id);
-                    self.registry.acp_servers.lock().unwrap().remove(&key);
+                    self.leave();
                     self.exit().await;
                     return;
                 }
@@ -467,16 +592,20 @@ impl Driver {
                 json!({"text": message.text, "images": message.images, "files": message.files}),
             )])
             .await;
-        if let Err(reason) = self.configure(&message).await {
+        if let Err(unset) = self.configure(&message).await {
             // The turn never starts: the session would have run on a model or
             // at an effort nobody asked for.
             self.registry
                 .note_receipt(Source::Acp, &self.id, &message.id, crate::inject::receipts::ReceiptStatus::Failed);
-            let message = self.redact(&reason);
-            self.transcript.append(&[record("error", json!({ "message": message }))]).await;
+            let (Unset::Refused(reason) | Unset::Silent(reason)) = &unset;
+            let said = self.redact(reason);
+            self.transcript.append(&[record("error", json!({ "message": said }))]).await;
             self.start_turn();
-            self.end_turn(Some(message), false);
-            return Ok(());
+            self.end_turn(Some(said.clone()), false);
+            return match unset {
+                Unset::Refused(_) => Ok(()),
+                Unset::Silent(_) => Err(InjectError::message(said)),
+            };
         }
         self.record_choice().await;
         self.conn.prompt(&self.agent_session, message.prompt).await?;
@@ -503,8 +632,9 @@ impl Driver {
     }
 
     /// Set the session's model and effort to what the message picked, where
-    /// they differ: one `session/set_config_option` each.
-    async fn configure(&mut self, message: &Message) -> Result<(), String> {
+    /// they differ: one `session/set_config_option` each, answered within
+    /// [`CONFIG_TIMEOUT`].
+    async fn configure(&mut self, message: &Message) -> Result<(), Unset> {
         let name = self.agent.name.clone();
         let picks = [
             (category::MODEL, "model", message.model.as_deref()),
@@ -513,19 +643,25 @@ impl Driver {
         for (category, what, wanted) in picks {
             let Some(wanted) = wanted else { continue };
             let Some(option) = option_for(&self.state.options, category).cloned() else {
-                return Err(format!("{name} offers no {what} to choose"));
+                return Err(Unset::Refused(format!("{name} offers no {what} to choose")));
             };
             if option.current_value.as_deref() == Some(wanted) {
                 continue;
             }
             if !option.accepts(wanted) {
-                return Err(format!("{name} has no {what} \"{wanted}\""));
+                return Err(Unset::Refused(format!("{name} has no {what} \"{wanted}\"")));
             }
-            let options = self
-                .conn
-                .set_config_option(&self.agent_session, &option.id, wanted)
-                .await
-                .map_err(|error| format!("{name} did not switch its {what} to {wanted}: {error}"))?;
+            let switched = tokio::time::timeout(CONFIG_TIMEOUT, self.conn.set_config_option(&self.agent_session, &option.id, wanted)).await;
+            let options = match switched {
+                Ok(Ok(options)) => options,
+                Ok(Err(error)) => return Err(Unset::Refused(format!("{name} did not switch its {what} to {wanted}: {error}"))),
+                Err(_) => {
+                    return Err(Unset::Silent(format!(
+                        "{name} did not answer a switch of its {what} to {wanted} within {}s; it was stopped",
+                        CONFIG_TIMEOUT.as_secs()
+                    )))
+                }
+            };
             if options.is_empty() {
                 // An agent that answers without the list: the value it took.
                 if let Some(changed) = self.state.options.iter_mut().find(|candidate| candidate.id == option.id) {

@@ -7701,7 +7701,7 @@
     "/api/acp/agents/{id}": {
       "delete": {
         "deprecated": false,
-        "description": "Remove an ACP agent. Its sessions stay listed and readable; they cannot be\ncontinued until an agent with this id is configured again. Refused while a\nturn of the agent is running, or a message is waiting for one.",
+        "description": "Remove an ACP agent. Its sessions stay listed and readable; they cannot be\ncontinued until an agent with this id is configured again, which starts\ntheir processes afresh: the ones they had, idle by then, are stopped.\nRefused while a turn of the agent is running, or a message is waiting for\none.",
         "operationId": "delete_acp_agent",
         "parameters": [
           {
@@ -7752,7 +7752,7 @@
       },
       "put": {
         "deprecated": false,
-        "description": "Add an ACP agent or change how it is started. Applies to the next agent\nprocess; one already running keeps what it was started with.",
+        "description": "Add an ACP agent or change how it is started. A changed command line or\nenvironment renews the processes its sessions run in: one with nothing to\ndo ends now, one with a turn or messages waiting when they are done, and\neach session's next message starts the agent as it is configured now.",
         "operationId": "put_acp_agent",
         "parameters": [
           {

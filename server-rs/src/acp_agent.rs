@@ -147,6 +147,12 @@ impl AcpAgent {
         PathBuf::from(self.command.trim())
     }
 
+    /// Whether `other` starts the same process: the same command line and the
+    /// same environment.
+    pub fn launches_like(&self, other: &AcpAgent) -> bool {
+        self.command == other.command && self.args == other.args && self.env == other.env
+    }
+
     /// `base` with the configured variables laid over it.
     pub fn environment(&self, mut base: Env) -> Env {
         for var in &self.env {
@@ -510,8 +516,9 @@ pub struct AcpAuthMethod {
     pub description: Optional<String>,
 }
 
-/// The longest error a check keeps.
-const MAX_CHECK_ERROR: usize = 4096;
+/// The longest error a check keeps, and what an agent says in a session's
+/// error is cut to ([`crate::inject::InjectionRegistry::redact_acp`]).
+pub(crate) const MAX_CHECK_ERROR: usize = 4096;
 /// The longest name, title, version or id of what an agent says it is, in
 /// characters, and the longest description of a way to sign in.
 const MAX_CHECK_WORD: usize = 256;
@@ -647,23 +654,30 @@ pub async fn acp_agents(State(state): State<AppState>) -> Json<AcpAgentList> {
     })
 }
 
-/// Add an ACP agent or change how it is started. Applies to the next agent
-/// process; one already running keeps what it was started with.
+/// Add an ACP agent or change how it is started. A changed command line or
+/// environment renews the processes its sessions run in: one with nothing to
+/// do ends now, one with a turn or messages waiting when they are done, and
+/// each session's next message starts the agent as it is configured now.
 #[api(id = "put_acp_agent", group = "acp", summary = "Add or update an ACP agent")]
 pub async fn put_acp_agent(
     State(state): State<AppState>,
     ApiPath(id): ApiPath<String>,
     ApiJson(body): ApiJson<AcpAgentUpdate>,
 ) -> Result<Json<AcpAgentInfo>, ApiError> {
-    let agent = state.paths.update_acp_agent(&id, &body).map_err(ApiError::bad_request)?;
-    // Another executable or environment may offer other models.
-    state.drive.injections.forget_acp_options(&id);
+    let agent = state
+        .drive
+        .injections
+        .reconfigure_acp_agent(&id, &body)
+        .await
+        .map_err(ApiError::bad_request)?;
     Ok(Json(agent.info()))
 }
 
 /// Remove an ACP agent. Its sessions stay listed and readable; they cannot be
-/// continued until an agent with this id is configured again. Refused while a
-/// turn of the agent is running, or a message is waiting for one.
+/// continued until an agent with this id is configured again, which starts
+/// their processes afresh: the ones they had, idle by then, are stopped.
+/// Refused while a turn of the agent is running, or a message is waiting for
+/// one.
 #[api(id = "delete_acp_agent", group = "acp", summary = "Remove an ACP agent")]
 pub async fn delete_acp_agent(State(state): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Json<SendResult>, ApiError> {
     let Some(agent) = state.paths.acp_agent(&id) else {

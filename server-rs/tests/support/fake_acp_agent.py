@@ -9,7 +9,9 @@ working directory — or to `$FAKE_AGENT_LOG`, which a probe's scratch directory
 needs — so a test can read what it was sent. A prompt containing "wait" holds
 its turn open until it is cancelled. `FAKE_AGENT_SLOW=<method>=<seconds>,...`
 makes it take that long over a request, after writing it down, so a test can
-act while the request is in flight; `FAKE_AGENT_TITLE` is what it calls itself.
+act while the request is in flight; `FAKE_AGENT_DEAF` the same, but after
+answering, without reading what it is sent meanwhile. `FAKE_AGENT_TITLE` is
+what it calls itself.
 """
 import json
 import os
@@ -35,10 +37,15 @@ MODELS = [("fake:small", "Small"), ("openrouter:vendor/big", "Big")]
 EFFORTS = ["auto", "low", "high"]
 # Each session's model and effort, as set_config_option leaves them.
 runtime = {}
-slow = {
-    method: float(seconds)
-    for method, seconds in (pair.split("=", 1) for pair in os.environ.get("FAKE_AGENT_SLOW", "").split(",") if pair)
-}
+def pauses(variable):
+    return {
+        method: float(seconds)
+        for method, seconds in (pair.split("=", 1) for pair in os.environ.get(variable, "").split(",") if pair)
+    }
+
+
+slow = pauses("FAKE_AGENT_SLOW")
+deaf = pauses("FAKE_AGENT_DEAF")
 
 
 def config_options(session):
@@ -139,3 +146,4 @@ for raw in sys.stdin:
         threading.Thread(target=run_turn, args=(request,), daemon=True).start()
     elif "id" in request:
         emit({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32601, "message": "unknown"}})
+    time.sleep(deaf.get(method, 0))

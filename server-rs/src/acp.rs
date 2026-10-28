@@ -209,10 +209,7 @@ pub struct ConfigOptionUpdate {
 impl ConfigOptionUpdate {
     /// The options this build reads.
     pub fn options(&self) -> Vec<ConfigOption> {
-        self.config_options
-            .iter()
-            .filter_map(|option| serde_json::from_value(option.clone()).ok())
-            .collect()
+        read_options(&self.config_options)
     }
 }
 
@@ -301,6 +298,23 @@ impl ConfigOption {
     pub fn accepts(&self, value: &str) -> bool {
         self.values().iter().any(|candidate| candidate.value == value)
     }
+
+    /// This, with the first [`MAX_SELECT_VALUES`] of its values.
+    fn bounded(mut self) -> Self {
+        match &mut self.options {
+            Some(SelectOptions::Flat(values)) => values.truncate(MAX_SELECT_VALUES),
+            Some(SelectOptions::Grouped(groups)) => {
+                let mut left = MAX_SELECT_VALUES;
+                groups.retain_mut(|group| {
+                    group.options.truncate(left);
+                    left -= group.options.len();
+                    !group.options.is_empty()
+                });
+            }
+            None => {}
+        }
+        self
+    }
 }
 
 /// The select for `category` among `options`, if the agent offers one.
@@ -311,10 +325,23 @@ pub fn option_for<'a>(options: &'a [ConfigOption], category: &str) -> Option<&'a
 /// Read the `configOptions` of an answer, leniently: one this build cannot
 /// read is skipped, not the whole list.
 pub fn config_options(answer: &Value) -> Vec<ConfigOption> {
-    answer["configOptions"]
-        .as_array()
-        .map(|options| options.iter().filter_map(|option| serde_json::from_value(option.clone()).ok()).collect())
-        .unwrap_or_default()
+    answer["configOptions"].as_array().map(|options| read_options(options)).unwrap_or_default()
+}
+
+/// The most options a session's list keeps, and the most values one of them
+/// keeps: every change to a session copies its list, and the composer offers
+/// all of it.
+const MAX_CONFIG_OPTIONS: usize = 32;
+const MAX_SELECT_VALUES: usize = 256;
+
+/// The options among `values` this build reads, as many as are kept.
+fn read_options(values: &[Value]) -> Vec<ConfigOption> {
+    values
+        .iter()
+        .filter_map(|option| serde_json::from_value::<ConfigOption>(option.clone()).ok())
+        .take(MAX_CONFIG_OPTIONS)
+        .map(ConfigOption::bounded)
+        .collect()
 }
 
 /// The answer to `initialize`: what the agent is and says it can do.
@@ -517,6 +544,17 @@ pub struct TerminalParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_list_of_options_or_values_is_cut() {
+        let values: Vec<Value> = (0..MAX_SELECT_VALUES * 2).map(|i| json!({"value": format!("m{i}"), "name": "M"})).collect();
+        let option = |i: usize| json!({"id": format!("o{i}"), "name": "O", "type": "select", "currentValue": "m0", "options": values});
+        let options = config_options(&json!({"configOptions": (0..MAX_CONFIG_OPTIONS * 2).map(option).collect::<Vec<_>>()}));
+        assert_eq!(options.len(), MAX_CONFIG_OPTIONS);
+        assert!(options.iter().all(|option| option.values().len() == MAX_SELECT_VALUES));
+        let grouped = json!({"configOptions": [{"id": "g", "name": "G", "type": "select", "options": [{"options": values}, {"options": values}]}]});
+        assert_eq!(config_options(&grouped)[0].values().len(), MAX_SELECT_VALUES, "across its groups");
+    }
     use serde_json::json;
 
     #[test]

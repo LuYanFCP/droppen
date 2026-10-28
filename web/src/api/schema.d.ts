@@ -356,16 +356,20 @@ export interface paths {
         get?: never;
         /**
          * Add or update an ACP agent
-         * @description Add an ACP agent or change how it is started. Applies to the next agent
-         *     process; one already running keeps what it was started with.
+         * @description Add an ACP agent or change how it is started. A changed command line or
+         *     environment renews the processes its sessions run in: one with nothing to
+         *     do ends now, one with a turn or messages waiting when they are done, and
+         *     each session's next message starts the agent as it is configured now.
          */
         put: operations["put_acp_agent"];
         post?: never;
         /**
          * Remove an ACP agent
          * @description Remove an ACP agent. Its sessions stay listed and readable; they cannot be
-         *     continued until an agent with this id is configured again. Refused while a
-         *     turn of the agent is running, or a message is waiting for one.
+         *     continued until an agent with this id is configured again, which starts
+         *     their processes afresh: the ones they had, idle by then, are stopped.
+         *     Refused while a turn of the agent is running, or a message is waiting for
+         *     one.
          */
         delete: operations["delete_acp_agent"];
         options?: never;

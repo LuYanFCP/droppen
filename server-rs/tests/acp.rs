@@ -682,7 +682,7 @@ async fn a_removed_agents_sessions_stay_listed_and_cannot_be_continued() {
         detail["sendBlockReason"].as_str().is_some_and(|reason| reason.contains("no longer configured")),
         "{detail:#}"
     );
-    // Its idle process is still there, and is not sent to.
+    // Nothing is sent to it.
     let (status, body) = server
         .json("POST", &format!("/api/sessions/acp/{id}/message"), &json!({"text": "after"}))
         .await;
@@ -692,9 +692,19 @@ async fn a_removed_agents_sessions_stay_listed_and_cannot_be_continued() {
     let models = server.get_json("/api/models?source=acp&acpAgent=gone").await;
     assert_eq!((models["models"].clone(), models["source"].clone()), (json!([]), json!("fallback")));
 
-    // Configured again under its id, the agent picks its sessions back up.
-    configure_as(&server, "gone", &program, "mark").await;
+    // Configured again under its id, the agent picks its sessions back up, in
+    // a process of the agent as it is configured now.
+    configure_as(&server, "gone", &program, "mark-again").await;
     assert_eq!(server.get_json(&format!("/api/sessions/acp/{id}")).await["canSend"], true);
+    let (status, body) = server
+        .json("POST", &format!("/api/sessions/acp/{id}/message"), &json!({"text": "back"}))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    wait_for(&server, &id, "the turn after", |detail| texts(detail).len() == 10 && finished(detail)).await;
+    assert_eq!(
+        marked_calls(&workdir)[3..],
+        ["initialize", "session/load", "session/prompt"].map(|method| (method.to_string(), "mark-again".to_string()))
+    );
 
     // And a session of a removed agent can still be put away.
     let (status, _) = server.json("DELETE", "/api/acp/agents/gone", &json!({})).await;
@@ -904,21 +914,25 @@ async fn an_agent_is_not_removed_while_a_message_waits_for_its_turn() {
     let program = install_fake(home.path());
     let workdir = workdirs(home.path(), &["work"]).remove(0);
     let server = TestServer::start_at(home.path(), None).await;
-    configure_env(&server, "slow", &program, "FAKE_AGENT_SLOW=session/set_config_option=2").await;
+    // The stand-in answers the model switch and then reads nothing for a
+    // while, so a prompt too long for the pipe is not taken: the message is
+    // off the queue, its model set, and its turn not started.
+    configure_env(&server, "slow", &program, "FAKE_AGENT_DEAF=session/set_config_option=3").await;
     let id = start(&server, "slow", &workdir, "hello").await;
     wait_for(&server, &id, "the first turn", finished).await;
 
-    // A message that picks another model waits while the model is switched:
-    // its turn has not started, and the agent stays.
+    // Longer than a pipe holds, shorter than a message may be.
+    let long = "x".repeat(90_000);
     let (status, body) = server
         .json(
             "POST",
             &format!("/api/sessions/acp/{id}/message"),
-            &json!({"text": "next", "model": "openrouter:vendor/big"}),
+            &json!({"text": long, "model": "openrouter:vendor/big"}),
         )
         .await;
     assert_eq!(status, 200, "{body}");
     common::wait_for("the model switch", Duration::from_secs(20), || was_sent(&workdir, "session/set_config_option")).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     let detail = server.get_json(&format!("/api/sessions/acp/{id}")).await;
     assert_eq!(detail["injection"]["state"], "ok", "the last turn, not this one: {detail:#}");
     let (status, body) = server.json("DELETE", "/api/acp/agents/slow", &json!({})).await;
@@ -929,6 +943,65 @@ async fn an_agent_is_not_removed_while_a_message_waits_for_its_turn() {
     wait_for(&server, &id, "the second turn", |detail| replies(detail) == 2 && finished(detail)).await;
     let (status, body) = server.json("DELETE", "/api/acp/agents/slow", &json!({})).await;
     assert_eq!(status, 200, "{body}");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn a_changed_command_line_or_environment_reaches_the_next_process() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let program = install_fake(home.path());
+    let workdir = workdirs(home.path(), &["work"]).remove(0);
+    let server = TestServer::start_at(home.path(), None).await;
+    configure_as(&server, "fake", &program, "mark-one").await;
+    let id = start(&server, "fake", &workdir, "hello").await;
+    wait_for(&server, &id, "the first turn", finished).await;
+
+    // Another environment: the idle process ends, and the next message starts
+    // the agent with the new one, reopening the session.
+    let (status, body) = server.json("PUT", "/api/acp/agents/fake", &json!({"env": "FAKE_AGENT_MARK=mark-two"})).await;
+    assert_eq!(status, 200, "{body}");
+    let send = |text: &'static str| {
+        let server = &server;
+        let id = id.clone();
+        async move {
+            let (status, body) = server.json("POST", &format!("/api/sessions/acp/{id}/message"), &json!({ "text": text })).await;
+            assert_eq!(status, 200, "{body}");
+        }
+    };
+    send("again").await;
+    wait_for(&server, &id, "the second turn", |detail| texts(detail).len() == 10 && finished(detail)).await;
+    let pair = |method: &str, mark: &str| (method.to_string(), mark.to_string());
+    assert_eq!(
+        marked_calls(&workdir)[3..],
+        [pair("initialize", "mark-two"), pair("session/load", "mark-two"), pair("session/prompt", "mark-two")]
+    );
+
+    // A new name is the same process: it is kept.
+    let (status, body) = server.json("PUT", "/api/acp/agents/fake", &json!({"name": "Renamed"})).await;
+    assert_eq!(status, 200, "{body}");
+    send("third").await;
+    wait_for(&server, &id, "the third turn", |detail| texts(detail).len() == 15 && finished(detail)).await;
+    assert_eq!(marked_calls(&workdir)[6..], [pair("session/prompt", "mark-two")]);
+
+    // A busy one finishes its turn where it is, and ends after it.
+    send("wait for me").await;
+    wait_for(&server, &id, "the long turn", |detail| detail["injection"]["state"] == "running").await;
+    let (status, body) = server.json("PUT", "/api/acp/agents/fake", &json!({"env": "FAKE_AGENT_MARK=mark-three"})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(server.get_json(&format!("/api/sessions/acp/{id}")).await["injection"]["state"], "running", "not cut short");
+    server.json("POST", &format!("/api/sessions/acp/{id}/interrupt"), &json!({})).await;
+    wait_for(&server, &id, "the interruption", finished).await;
+    send("fourth").await;
+    wait_for(&server, &id, "the fourth turn", |detail| {
+        texts(detail).iter().filter(|(_, _, text)| text == "Hello from the agent").count() == 4 && finished(detail)
+    })
+    .await;
+    let calls = marked_calls(&workdir);
+    assert_eq!(calls[7], pair("session/prompt", "mark-two"), "the long turn ran where it started");
+    assert_eq!(
+        calls[calls.len() - 3..],
+        [pair("initialize", "mark-three"), pair("session/load", "mark-three"), pair("session/prompt", "mark-three")]
+    );
     server.stop().await;
 }
 
