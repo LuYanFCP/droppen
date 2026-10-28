@@ -963,6 +963,7 @@ export const ja: Record<string, string> = {
   "sign-in": "サインイン方法",
   "models": "モデル",
   "{{n}} offered by the agent": "{{n}} 個（エージェントが提供）",
+  "{{n}} of the agent's models are not shown: their ids look like credentials": "エージェントのモデルのうち {{n}} 個は表示していません。ID が認証情報のように見えます",
   "environment": "環境変数",
   "checked": "確認",
   "Delete {{name}}? Its {{n}} sessions stay readable; sending to them needs an agent with this id again.": "{{name}} を削除しますか？ {{n}} 個のセッションは読めますが、メッセージを送るには同じ id のエージェントを追加し直す必要があります。",

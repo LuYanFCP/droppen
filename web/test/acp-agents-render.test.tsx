@@ -213,6 +213,15 @@ test("a device that does not manage the computer is told why the error is not sh
   assert.equal($('[data-acp-details] p[data-signal="failed"]'), null, "and no error: the refusal is expected");
 });
 
+test("a model list that leaves an agent's models out says how many, and why", async () => {
+  const { ModelSourceHint } = await import("../src/features/sessions/composer-controls.js");
+  root = createRoot(container);
+  await act(async () => root!.render(<ModelSourceHint fallback={false} hidden={2} />));
+  assert.equal($('[data-signal="warn"]')?.getAttribute("title"), "2 of the agent's models are not shown: their ids look like credentials");
+  await act(async () => root!.render(<ModelSourceHint fallback={false} />));
+  assert.equal($('[data-signal="warn"]'), null, "nothing left out, nothing said");
+});
+
 test("with no agent, a preset starts the add dialog filled in, which stays open on a failed check", async () => {
   const sent: Sent[] = [];
   const state = { agents: [] as unknown[], check: NOT_FOUND };

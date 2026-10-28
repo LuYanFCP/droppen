@@ -962,6 +962,7 @@ export const zhCN: Record<string, string> = {
   "sign-in": "登录方式",
   "models": "模型",
   "{{n}} offered by the agent": "{{n}} 个（智能体提供）",
+  "{{n}} of the agent's models are not shown: their ids look like credentials": "智能体的 {{n}} 个模型没有显示：它们的 id 看起来像凭据",
   "environment": "环境变量",
   "checked": "检查",
   "Delete {{name}}? Its {{n}} sessions stay readable; sending to them needs an agent with this id again.": "删除 {{name}}？它的 {{n}} 个会话仍可阅读；要再发消息，需要重新添加同一 id 的智能体。",

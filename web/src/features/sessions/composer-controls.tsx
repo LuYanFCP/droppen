@@ -521,6 +521,7 @@ export function useComposerChoice(
       effortOptions: models.length ? effortOptions : [],
       activeEffort: models.length ? activeEffort : null,
       modelsAreFallback: false,
+      modelsHidden: modelData?.hidden ?? 0,
       pickModel: models.length ? pickModel : () => {},
       setEffort: (v: string) => save.mutate({ effort: v }),
       activePermission: "",
@@ -538,6 +539,8 @@ export function useComposerChoice(
     activeEffort,
     /** The list is the static guess, not the CLI's own; say so beside it. */
     modelsAreFallback,
+    /** How many of an ACP agent's models the list leaves out; none for a CLI. */
+    modelsHidden: 0,
     pickModel,
     setEffort: (v: string) => save.mutate({ effort: v }),
     activePermission,
@@ -685,7 +688,10 @@ export function ComposerChoiceChips({
   // An ACP agent offers its own models and efforts, and no permission
   // modes; with its list unknown there is nothing to pick at all.
   const acp = source === "acp";
-  if (acp && choice.models.length === 0) return null;
+  if (acp && choice.models.length === 0) {
+    // Every model left out still says why there is no picker.
+    return choice.modelsHidden > 0 ? <ModelSourceHint fallback={false} hidden={choice.modelsHidden} /> : null;
+  }
   return (
     <>
       <ModelSelect
@@ -696,7 +702,7 @@ export function ComposerChoiceChips({
         onChange={choice.pickModel}
         allowCustom={!acp}
       />
-      <ModelSourceHint fallback={choice.modelsAreFallback} />
+      <ModelSourceHint fallback={choice.modelsAreFallback} hidden={choice.modelsHidden} />
       {/* Absent, not disabled, for a model that takes no effort: an empty
           control in a toolbar reads as something that failed to load. */}
       {choice.activeEffort !== null && (
@@ -732,23 +738,27 @@ export function CliModelControls({ choice }: { choice: ReturnType<typeof useComp
       {choice.activeEffort !== null && (
         <ComposerSelect className="h-6.5 min-w-0 max-w-full" label={t("effort")} value={choice.activeEffort} options={choice.effortOptions} onChange={choice.setEffort} />
       )}
-      <ModelSourceHint fallback={choice.modelsAreFallback} />
+      <ModelSourceHint fallback={choice.modelsAreFallback} hidden={choice.modelsHidden} />
     </div>
   );
 }
 
 /**
- * A mark beside the model picker when the list it offers is the static guess.
+ * A mark beside the model picker when the list it offers is the static guess,
+ * or leaves out `hidden` of an ACP agent's models: ones whose ids look like a
+ * credential, which the device does not show or send back.
  *
  * Nothing at all in the normal case: a list read from the CLI's own cache is
  * simply correct, and a badge saying so on every session is noise. The fallback
  * is the one worth knowing about, because picking a model off it is picking one
  * this machine may not have.
  */
-export function ModelSourceHint({ fallback }: { fallback: boolean }) {
+export function ModelSourceHint({ fallback, hidden = 0 }: { fallback: boolean; hidden?: number }) {
   const { t } = useTranslation();
-  if (!fallback) return null;
-  const said = t("model list is a static fallback — the CLI's own list could not be read");
+  if (!fallback && hidden === 0) return null;
+  const said = hidden > 0
+    ? t("{{n}} of the agent's models are not shown: their ids look like credentials", { n: hidden })
+    : t("model list is a static fallback — the CLI's own list could not be read");
   return (
     // Native tooltip: the hint sits in a toolbar that already scrolls
     // horizontally on a phone, where a popover would be a trap.

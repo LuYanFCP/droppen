@@ -962,6 +962,7 @@ export const zhTW: Record<string, string> = {
   "sign-in": "登入方式",
   "models": "模型",
   "{{n}} offered by the agent": "{{n}} 個（代理提供）",
+  "{{n}} of the agent's models are not shown: their ids look like credentials": "代理的 {{n}} 個模型沒有顯示：它們的 id 看起來像憑證",
   "environment": "環境變數",
   "checked": "檢查",
   "Delete {{name}}? Its {{n}} sessions stay readable; sending to them needs an agent with this id again.": "刪除 {{name}}？它的 {{n}} 個工作階段仍可閱讀；要再傳訊息，需要重新新增同一 id 的代理。",
