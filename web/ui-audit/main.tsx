@@ -216,6 +216,7 @@ function AgentsFixture() {
               confirming={false}
               busy={false}
               error={null}
+              errorWithheld={false}
               onCheck={noop}
               onEdit={noop}
               onAskRemove={noop}

@@ -968,6 +968,7 @@ export const ja: Record<string, string> = {
   "Delete {{name}}? Its {{n}} sessions stay readable; sending to them needs an agent with this id again.": "{{name}} を削除しますか？ {{n}} 個のセッションは読めますが、メッセージを送るには同じ id のエージェントを追加し直す必要があります。",
   "Start from a known agent or any command; every field stays editable.": "既知のエージェントか任意のコマンドから始めます。どの項目も後で変更できます。",
   "agent check": "確認",
+  "only a full device can see why it failed": "失敗の理由はフルデバイスでだけ確認できます",
   "Starts the command with its environment, sends `initialize`, reads what the agent says it can do, and stops it. Nothing is sent to a model.": "環境変数付きでコマンドを起動し、`initialize` を送り、エージェントが宣言する機能を読んでから止めます。モデルには何も送りません。",
   "edit {{name}}": "{{name}} を編集",
   "add an ACP agent": "ACP エージェントを追加",

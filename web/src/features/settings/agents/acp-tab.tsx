@@ -29,7 +29,7 @@ import { GlyphIcon } from "@/components/glyph";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { RowMenu, type RowMenuItem } from "@/features/cloud/device-row";
-import { acpAgentsKey, splitArgs, useAcpAgents, type AcpAgentInfo } from "@/features/sessions/acp-agent";
+import { acpAgentsKey, splitArgs, useAcpAgents, useAcpCheck, type AcpAgentInfo } from "@/features/sessions/acp-agent";
 import { ACP_GLYPH, acpAgentGlyph } from "@/features/sessions/acp-agent-icons";
 import { applyPreset, CUSTOM_PRESET, newAgentId, type AcpAgentDraft, type AcpAgentPreset } from "@/features/sessions/acp-agent-presets";
 import {
@@ -322,6 +322,7 @@ export function AcpDetailsBody({
   confirming,
   busy,
   error,
+  errorWithheld,
   onCheck,
   onEdit,
   onAskRemove,
@@ -335,6 +336,8 @@ export function AcpDetailsBody({
   confirming: boolean;
   busy: boolean;
   error: string | null;
+  /** Why the check failed is kept from this device: it does not manage the computer. */
+  errorWithheld: boolean;
   onCheck: () => void;
   onEdit: () => void;
   onAskRemove: () => void;
@@ -351,6 +354,11 @@ export function AcpDetailsBody({
       </div>
       <CheckFacts agent={agent} status={status} sessions={sessions} models={models} />
       {check && checkFailed(check) && <CheckError check={check} />}
+      {check && checkFailed(check) && errorWithheld && (
+        <p data-acp-withheld="" className={ROW_HINT}>
+          {t("only a full device can see why it failed")}
+        </p>
+      )}
       {(agent.note || agent.homepage) && (
         <p className="text-2xs leading-4 text-faint">
           {agent.note}
@@ -700,7 +708,9 @@ function AgentDialog({
 /**
  * The details dialog, wired to the device: check, edit, remove. `checkError`
  * is why the last check of this agent was not run — the device refused it,
- * or could not be reached — which no `lastCheck` records.
+ * or could not be reached — which no `lastCheck` records. Why a check failed
+ * is not in the list: it is read from the check's own route, which answers
+ * only a device that manages the computer.
  */
 function DetailsDialog({
   agent,
@@ -732,6 +742,12 @@ function DetailsDialog({
     queryFn: async () => undefined,
     enabled: false,
   });
+  const failed = !!agent.lastCheck && checkFailed(agent.lastCheck);
+  const full = useAcpCheck(agent.id, failed);
+  // The full check only while it is the one the list names; a newer one is on its way.
+  const fullCheck = full.data && full.data.checkedAt === agent.lastCheck?.checkedAt ? full.data : null;
+  const withheld = full.error instanceof ApiError && full.error.code === "limited_device";
+  const fullError = full.error && !withheld ? errorText(full.error) : null;
   const remove = useMutation({
     mutationFn: async () => {
       const res = await api.DELETE("/api/acp/agents/{id}", { params: { path: { id: agent.id } } });
@@ -747,12 +763,13 @@ function DetailsDialog({
       <DialogContent title={agent.name} className={DIALOG_WIDTH}>
         <AcpDetailsBody
           agent={agent}
-          status={checking ? acpStatus(null, true) : status}
+          status={checking ? acpStatus(null, true) : fullCheck ? acpStatus(fullCheck) : status}
           sessions={sessions}
           models={models?.models.length ? models.models.length : null}
           confirming={confirming}
           busy={remove.isPending}
-          error={remove.error ? errorText(remove.error) : checkError}
+          error={remove.error ? errorText(remove.error) : (checkError ?? fullError)}
+          errorWithheld={withheld}
           onCheck={onCheck}
           onEdit={onEdit}
           onAskRemove={() => setConfirming(true)}

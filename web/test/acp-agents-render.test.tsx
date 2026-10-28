@@ -1,8 +1,10 @@
 // Settings › Agents & accounts › ACP, driven in a real DOM against a recording
 // device: agents as cards, a failing one in red and counted on its tab; the
-// details dialog the address opens (`&agent=<id>`), with the check's error and
-// a removal that a running turn refuses; and, with no agent yet, the presets
-// as one-click starts whose dialog stays open on a failed check.
+// details dialog the address opens (`&agent=<id>`), with the check's error read
+// from the check's own route — or, for a device that does not manage the
+// computer, a line saying so — and a removal that a running turn refuses; and,
+// with no agent yet, the presets as one-click starts whose dialog stays open on
+// a failed check.
 //
 // `import * as React` because the test directory is outside the tsconfig's
 // `include`, so tsx compiles JSX here with the classic runtime.
@@ -44,6 +46,8 @@ const NOT_FOUND = {
   state: "not_found",
   error: "lab-agent: no such executable\nPATH=/usr/local/bin:/usr/bin",
 };
+/** A check as the list carries it: how it ended, not why. */
+const listed = ({ error: _error, ...check }: { error?: string } & Record<string, unknown>) => check;
 const PRESETS = [
   { id: "bub", name: "Bub", command: "bub", args: ["acp"], onPath: false },
   { id: "opencode", name: "OpenCode", command: "opencode", args: ["acp"], onPath: true, homepage: "https://opencode.ai/docs/acp/" },
@@ -52,7 +56,16 @@ const agent = (id: string, name: string, lastCheck?: unknown) => ({
   id, name, command: id, args: ["--acp"], envNames: ["API_TOKEN"], ...(lastCheck ? { lastCheck } : {}),
 });
 
-type DeviceState = { agents: unknown[]; remove?: number; check?: unknown; checkRefused?: boolean };
+type DeviceState = {
+  agents: unknown[];
+  remove?: number;
+  /** What a check run now answers, or that it is refused. */
+  check?: unknown;
+  checkRefused?: boolean;
+  /** Each agent's last check in full, or that this device may not read it. */
+  full?: Record<string, unknown>;
+  fullRefused?: boolean;
+};
 
 /** The device: its agent list, and how it answers a removal and a check. */
 function device(sent: Sent[], state: DeviceState): Transport {
@@ -63,6 +76,11 @@ function device(sent: Sent[], state: DeviceState): Transport {
       sent.push({ method: request.method, path: url.pathname, body });
       if (url.pathname === "/api/acp/agents" && request.method === "GET") return Response.json({ agents: state.agents, presets: PRESETS });
       const id = /^\/api\/acp\/agents\/([^/]+)/.exec(url.pathname)?.[1];
+      if (id && url.pathname.endsWith("/check") && request.method === "GET") {
+        if (state.fullRefused) return Response.json({ error: "limited_device", message: "this device cannot manage the account" }, { status: 403 });
+        const full = state.full?.[id];
+        return full ? Response.json(full) : Response.json({ error: "this ACP agent has not been checked" }, { status: 404 });
+      }
       if (id && url.pathname.endsWith("/check")) {
         return state.checkRefused
           ? Response.json({ error: "limited_device", message: "this device cannot manage the account" }, { status: 403 })
@@ -141,7 +159,7 @@ const click = (el: HTMLElement | null) =>
 
 test("the ACP tab shows each agent as a card, a failing one in red and counted on the tab", async () => {
   const sent: Sent[] = [];
-  await mount(sent, { agents: [agent("bub", "Bub", READY), agent("lab-agent", "Lab agent", NOT_FOUND), agent("new", "New one")] }, "/settings?section=accounts&tab=acp");
+  await mount(sent, { agents: [agent("bub", "Bub", READY), agent("lab-agent", "Lab agent", listed(NOT_FOUND)), agent("new", "New one")] }, "/settings?section=accounts&tab=acp");
   await until("the cards", () => document.querySelectorAll("[data-acp-card]").length === 3);
   assert.match($('[data-acp-card="bub"]')!.textContent!, /Bub.*bub --acp.*API_TOKEN.*ready to run.*checked 2 min ago/);
   const failing = $('[data-acp-card="lab-agent"] [data-signal="failed"]');
@@ -156,10 +174,12 @@ test("the ACP tab shows each agent as a card, a failing one in red and counted o
 
 test("the details the address names show the check's error, and a running turn refuses the removal", async () => {
   const sent: Sent[] = [];
-  const state = { agents: [agent("lab-agent", "Lab agent", NOT_FOUND)], remove: 409 };
+  const state = { agents: [agent("lab-agent", "Lab agent", listed(NOT_FOUND))], full: { "lab-agent": NOT_FOUND }, remove: 409 };
   const routes = await mount(sent, state, "/settings?section=accounts&tab=acp&agent=lab-agent");
   await until("the details", () => !!$('[data-acp-details="lab-agent"]'));
+  await until("the error", () => !!$('[data-acp-details] pre[data-signal="failed"]'));
   assert.match($('[data-acp-details] pre[data-signal="failed"]')!.textContent!, /no such executable[\s\S]*PATH=/);
+  assert.ok(sent.some((s) => s.method === "GET" && s.path === "/api/acp/agents/lab-agent/check"), "read from the check's own route");
 
   await click(byText("[data-acp-details] button", "delete…"));
   assert.match($("[data-acp-remove-confirm]")!.textContent!, /Delete Lab agent\? Its 0 sessions stay readable/);
@@ -176,10 +196,21 @@ test("the details the address names show the check's error, and a running turn r
 
 test("a check the device refuses to run says why in the details", async () => {
   const sent: Sent[] = [];
-  await mount(sent, { agents: [agent("lab-agent", "Lab agent", NOT_FOUND)], checkRefused: true }, "/settings?section=accounts&tab=acp&agent=lab-agent");
+  await mount(sent, { agents: [agent("lab-agent", "Lab agent", listed(NOT_FOUND))], full: { "lab-agent": NOT_FOUND }, checkRefused: true }, "/settings?section=accounts&tab=acp&agent=lab-agent");
   await until("the details", () => !!$('[data-acp-details="lab-agent"]'));
   await click(byText("[data-acp-details] button", "check again"));
   await until("the refusal", () => /a limited device cannot do this/.test($('[data-acp-details] p[data-signal="failed"]')?.textContent ?? ""));
+});
+
+test("a device that does not manage the computer is told why the error is not shown", async () => {
+  const sent: Sent[] = [];
+  await mount(sent, { agents: [agent("lab-agent", "Lab agent", listed(NOT_FOUND))], fullRefused: true }, "/settings?section=accounts&tab=acp&agent=lab-agent");
+  await until("the details", () => !!$('[data-acp-details="lab-agent"]'));
+  await until("the line", () => !!$("[data-acp-withheld]"));
+  assert.equal($("[data-acp-withheld]")!.textContent, "only a full device can see why it failed");
+  assert.match($("[data-acp-details]")!.textContent!, /command not found/, "how it ended is still there");
+  assert.equal($('[data-acp-details] pre[data-signal="failed"]'), null, "no error well");
+  assert.equal($('[data-acp-details] p[data-signal="failed"]'), null, "and no error: the refusal is expected");
 });
 
 test("with no agent, a preset starts the add dialog filled in, which stays open on a failed check", async () => {

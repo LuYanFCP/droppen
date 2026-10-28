@@ -967,6 +967,7 @@ export const zhTW: Record<string, string> = {
   "Delete {{name}}? Its {{n}} sessions stay readable; sending to them needs an agent with this id again.": "刪除 {{name}}？它的 {{n}} 個工作階段仍可閱讀；要再傳訊息，需要重新新增同一 id 的代理。",
   "Start from a known agent or any command; every field stays editable.": "從已知的代理開始，或填寫任意命令；之後每一項都能改。",
   "agent check": "檢查",
+  "only a full device can see why it failed": "只有完整裝置才能看到失敗原因",
   "Starts the command with its environment, sends `initialize`, reads what the agent says it can do, and stops it. Nothing is sent to a model.": "用它的環境變數啟動命令，傳送 `initialize`，讀出代理宣告的能力，然後停掉它。不會向模型傳任何東西。",
   "edit {{name}}": "編輯 {{name}}",
   "add an ACP agent": "新增 ACP 代理",

@@ -967,6 +967,7 @@ export const zhCN: Record<string, string> = {
   "Delete {{name}}? Its {{n}} sessions stay readable; sending to them needs an agent with this id again.": "删除 {{name}}？它的 {{n}} 个会话仍可阅读；要再发消息，需要重新添加同一 id 的智能体。",
   "Start from a known agent or any command; every field stays editable.": "从已知的智能体开始，或填写任意命令；之后每一项都能改。",
   "agent check": "检查",
+  "only a full device can see why it failed": "只有完整设备才能看到失败原因",
   "Starts the command with its environment, sends `initialize`, reads what the agent says it can do, and stops it. Nothing is sent to a model.": "用它的环境变量启动命令，发送 `initialize`，读出智能体声明的能力，然后停掉它。不会向模型发任何东西。",
   "edit {{name}}": "编辑 {{name}}",
   "add an ACP agent": "添加 ACP 智能体",
