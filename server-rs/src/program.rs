@@ -164,30 +164,42 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// What a command typed on this device needs in its environment to act on
-/// the instance `paths` names, as `(name, value)` pairs to put before
-/// [`droppen_path`]: `APP_INSTANCE` for any instance but `default`, and
-/// `DROPPEN_DATA_DIR` / `DROPPEN_CONFIG_DIR` when this server keeps its files
-/// elsewhere than `~/.local/share/remote-hand` / `~/.config/remote-hand` (a
-/// second install beside the first). Nothing for the usual install. Paths
-/// have the home directory as `~`, for the reason [`droppen_path`] does.
-///
-/// Each directory under its old name too, `REMOTE_HAND_DATA_DIR` /
-/// `REMOTE_HAND_CONFIG_DIR`, with the same value: the `droppen` a person's
-/// shell finds may be another install's pre-rename binary, which reads only
-/// the old names and would act on its own files instead
-/// ([`crate::env`]).
-///
-/// Without these, `open`, `setup-code` and `user add` typed as the page says
-/// would act on the default instance of the default install: another
-/// server's setup code, typed here, is a wrong one that counts against the
-/// limit.
-pub fn droppen_env(paths: &crate::sessions::Paths) -> Vec<(String, String)> {
-    let home = std::env::var_os("HOME").filter(|home| !home.is_empty()).map(PathBuf::from);
-    droppen_env_for(paths, home.as_deref())
+impl crate::sessions::Paths {
+    /// What a command typed on this device needs in its environment to act on
+    /// the instance this `Paths` names, as `(name, value)` pairs to put before
+    /// [`droppen_path`]: `APP_INSTANCE` for any instance but `default`, and
+    /// `DROPPEN_DATA_DIR` / `DROPPEN_CONFIG_DIR` when this server keeps its files
+    /// elsewhere than `~/.local/share/remote-hand` / `~/.config/remote-hand` (a
+    /// second install beside the first). Nothing for the usual install. Paths
+    /// have the home directory as `~`, for the reason [`droppen_path`] does.
+    ///
+    /// Each directory under its old name too, `REMOTE_HAND_DATA_DIR` /
+    /// `REMOTE_HAND_CONFIG_DIR`, with the same value: the `droppen` a person's
+    /// shell finds may be another install's pre-rename binary, which reads only
+    /// the old names and would act on its own files instead
+    /// ([`crate::env`]).
+    ///
+    /// Without these, `open`, `setup-code` and `user add` typed as the page says
+    /// would act on the default instance of the default install: another
+    /// server's setup code, typed here, is a wrong one that counts against the
+    /// limit.
+    pub fn droppen_env(&self) -> Vec<(String, String)> {
+        let home = std::env::var_os("HOME").filter(|home| !home.is_empty()).map(PathBuf::from);
+        droppen_env_for(self, home.as_deref())
+    }
 }
 
-/// [`droppen_env`], with the home directory supplied.
+/// [`Paths::droppen_env`] as a person types it before a command: `NAME=value `
+/// for each, the values made shell words ([`shell_word`]); empty for the usual
+/// install.
+pub fn command_prefix(paths: &crate::sessions::Paths) -> String {
+    paths.droppen_env()
+        .into_iter()
+        .map(|(name, value)| format!("{name}={} ", shell_word(&value)))
+        .collect()
+}
+
+/// [`Paths::droppen_env`], with the home directory supplied.
 pub fn droppen_env_for(paths: &crate::sessions::Paths, home: Option<&Path>) -> Vec<(String, String)> {
     let mut env = Vec::new();
     if paths.instance() != crate::instance::DEFAULT_INSTANCE {
@@ -208,12 +220,6 @@ pub fn droppen_env_for(paths: &crate::sessions::Paths, home: Option<&Path>) -> V
     env
 }
 
-/// [`droppen_env`] as a person types it before a command: `NAME=value ` for
-/// each, the values made shell words ([`shell_word`]); empty for the usual
-/// install.
-pub fn command_prefix(paths: &crate::sessions::Paths) -> String {
-    droppen_env(paths).into_iter().map(|(name, value)| format!("{name}={} ", shell_word(&value))).collect()
-}
 
 /// `text` as one word of a POSIX shell: as it is when nothing in it is
 /// special, else in single quotes — after a leading `~/`, which expands only
