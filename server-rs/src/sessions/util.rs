@@ -5,7 +5,7 @@
 //! its `.openapi()` name in the former TypeScript server's `schemas.ts` rather
 //! than after the internal `NormalizedItem`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gotcha::Schematic;
 use serde::{Deserialize, Serialize};
@@ -227,6 +227,30 @@ pub struct ToolDisplay {
     pub detail: Option<String>,
     /// Whether the tool reported a failure.
     pub is_error: bool,
+}
+
+impl ToolDisplay {
+    /// A call row: the tool's name, its one-line summary, a caption and a fold.
+    pub fn call(tool: impl Into<String>, text: impl Into<String>, meta: Option<String>, detail: Option<String>) -> Self {
+        Self {
+            tool_name: Some(tool.into()),
+            text: text.into(),
+            meta,
+            detail,
+            is_error: false,
+        }
+    }
+
+    /// A result row, which inherits the tool name from the call it answers.
+    pub fn result(text: impl Into<String>, meta: Option<String>, detail: Option<String>, is_error: bool) -> Self {
+        Self {
+            tool_name: None,
+            text: text.into(),
+            meta,
+            detail,
+            is_error,
+        }
+    }
 }
 
 /// Build a text/thinking item, applying the emergency clip.
@@ -609,6 +633,114 @@ pub fn try_parse(line: &str) -> Option<serde_json::Map<String, serde_json::Value
     match serde_json::from_str::<serde_json::Value>(line) {
         Ok(serde_json::Value::Object(map)) => Some(map),
         _ => None,
+    }
+}
+
+impl TranscriptItem {
+    /// A user's text as one item, with the CLI's attachment suffix turned into
+    /// the image thumbnails and file chips it names.
+    ///
+    /// Both CLIs append the same suffix to a message that carried files, and the
+    /// paths in it are the only record of what was attached.
+    pub fn user_text(raw_text: &str, timestamp: Option<&str>) -> Self {
+        let split = parse_attachment_suffix(raw_text);
+        let mut item = make_item(Role::User, ItemKind::Text, &split.text, timestamp);
+        if !split.images.is_empty() {
+            item.images = Some(split.images);
+        }
+        if !split.files.is_empty() {
+            item.files = Some(split.files);
+        }
+        item
+    }
+}
+
+/// A map whose entries are dropped wholesale when it reaches a cap.
+///
+/// An LRU needs a second structure to maintain, and being wrong here only costs
+/// a lookup that falls through to the durable tier or a re-read.
+pub struct BoundedMap<K, V> {
+    entries: std::sync::Mutex<std::collections::HashMap<K, V>>,
+    max: usize,
+}
+
+impl<K: std::hash::Hash + Eq, V> BoundedMap<K, V> {
+    /// A map that empties itself once it holds `max` entries.
+    pub fn new(max: usize) -> Self {
+        Self {
+            entries: std::sync::Mutex::new(std::collections::HashMap::new()),
+            max,
+        }
+    }
+
+    /// The value held for `key`, when there is one.
+    pub fn get<Q>(&self, key: &Q) -> Option<V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+        V: Clone,
+    {
+        self.entries.lock().expect("bounded map poisoned").get(key).cloned()
+    }
+
+    /// Hold `value` for `key`.
+    ///
+    /// At the cap the whole map is emptied first — unless `key` is already in
+    /// it: refreshing an entry already held must never trigger the clear, or a
+    /// list of live rows would empty the map on every refresh and never hit it
+    /// again.
+    pub fn insert(&self, key: K, value: V) {
+        let mut entries = self.entries.lock().expect("bounded map poisoned");
+        if entries.len() >= self.max && !entries.contains_key(&key) {
+            entries.clear();
+        }
+        entries.insert(key, value);
+    }
+
+    /// How many entries are held. Tests and observability only.
+    pub fn len(&self) -> usize {
+        self.entries.lock().expect("bounded map poisoned").len()
+    }
+
+    /// Forget every entry. Tests only: the restart a real near tier would see.
+    pub fn clear(&self) {
+        self.entries.lock().expect("bounded map poisoned").clear();
+    }
+}
+
+/// A bounded, process-local cache of a value derived from a file, invalidated
+/// by the file's mtime and size.
+///
+/// The near tier in front of [`crate::db::index`]: a hit is a map lookup, and a
+/// miss falls through to the durable answer or a re-read. Both CLIs build their
+/// list rows this way, and both check the same two fields because those are
+/// what the durable tier's watermark is made of.
+pub struct FileCache<T> {
+    entries: BoundedMap<PathBuf, (f64, u64, T)>,
+}
+
+impl<T: Clone> FileCache<T> {
+    /// A cache holding at most `max` files' answers.
+    pub fn new(max: usize) -> Self {
+        Self {
+            entries: BoundedMap::new(max),
+        }
+    }
+
+    /// The value remembered for `path`, when it was read at this mtime and size.
+    pub fn get(&self, path: &Path, mtime: f64, size: u64) -> Option<T> {
+        let (cached_mtime, cached_size, value) = self.entries.get(path)?;
+        (cached_mtime == mtime && cached_size == size).then_some(value)
+    }
+
+    /// Hold `value` for `path`, read at this mtime and size.
+    pub fn put(&self, path: &Path, mtime: f64, size: u64, value: T) {
+        self.entries.insert(path.to_path_buf(), (mtime, size, value));
+    }
+
+    /// Forget every file. Tests only: the restart a real near tier would see.
+    pub fn clear(&self) {
+        self.entries.clear();
     }
 }
 

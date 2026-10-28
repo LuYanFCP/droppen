@@ -22,7 +22,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 
 use serde_json::Value;
 
@@ -30,7 +30,7 @@ use super::codex_claims::{Claims, Verdict};
 use super::codex_tools::{CodexTools, Context};
 use crate::time::now_ms;
 use super::transcript::title_line;
-use super::util::{make_item, parse_attachment_suffix, read_head_lines, read_tail_lines, try_parse, ItemKind, LossyLines, Role, TranscriptItem};
+use super::util::{make_item, read_head_lines, read_tail_lines, try_parse, FileCache, ItemKind, LossyLines, Role, TranscriptItem};
 use super::{iso8601, mtime_ms, owned_sessions, CliChoice, Paths, SessionActivity, SessionScope, SessionStatus, SessionSummary, Source};
 use crate::openapi_ext::Nullable;
 
@@ -118,18 +118,7 @@ const CACHE_MAX: usize = 2048;
 /// The near tier: what this process has already read, keyed by rollout path.
 /// Behind it is [`crate::db::index`], which remembers the same thing across a
 /// restart.
-static META_CACHE: LazyLock<Mutex<HashMap<PathBuf, (f64, FileMeta)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Hold a rollout's metadata in the near tier, keeping that tier bounded.
-fn remember(file_path: &Path, mtime: f64, meta: &FileMeta) {
-    let mut cache = META_CACHE.lock().expect("codex meta cache poisoned");
-    // Never let a refresh of a file already held trigger the clear; at the cap
-    // that would empty the cache on every list and never hit it again.
-    if cache.len() >= CACHE_MAX && !cache.contains_key(file_path) {
-        cache.clear();
-    }
-    cache.insert(file_path.to_path_buf(), (mtime, meta.clone()));
-}
+static META_CACHE: LazyLock<FileCache<FileMeta>> = LazyLock::new(|| FileCache::new(CACHE_MAX));
 
 /// `rollout-2026-05-09T16-39-49-<uuid>.jsonl` -> `<uuid>`
 fn id_from_file_name(name: &str) -> Option<String> {
@@ -186,12 +175,10 @@ async fn file_meta(file_path: &Path, id: &str) -> std::io::Result<FileMeta> {
     let metadata = tokio::fs::metadata(file_path).await?;
     let mtime = mtime_ms(&metadata);
     let mark = crate::db::index::Watermark::of(file_path, &metadata);
-    if let Some((cached_mtime, meta)) = META_CACHE.lock().expect("codex meta cache poisoned").get(file_path) {
+    if let Some(meta) = META_CACHE.get(file_path, mtime, metadata.len()) {
         // Size too, so this tier and the durable one agree on what "unchanged"
-        // means; the metadata already carries the length it was read at.
-        if *cached_mtime == mtime && meta.size_bytes == metadata.len() {
-            return Ok(meta.clone());
-        }
+        // means.
+        return Ok(meta);
     }
 
     // What a previous boot read out of this exact file. A rollout's head can be
@@ -199,7 +186,7 @@ async fn file_meta(file_path: &Path, id: &str) -> std::io::Result<FileMeta> {
     // instructions — so this is the read worth not repeating.
     let index = crate::db::index::current();
     if let Some(meta) = index.as_ref().and_then(|index| index.summary::<FileMeta>(Source::Codex, id, mark)) {
-        remember(file_path, mtime, &meta);
+        META_CACHE.put(file_path, mtime, meta.size_bytes, meta.clone());
         return Ok(meta);
     }
 
@@ -257,7 +244,7 @@ async fn file_meta(file_path: &Path, id: &str) -> std::io::Result<FileMeta> {
         created_at: created_at.unwrap_or_else(|| metadata.created().or_else(|_| metadata.modified()).map(iso8601).unwrap_or_default()),
         size_bytes: metadata.len(),
     };
-    remember(file_path, mtime, &meta);
+    META_CACHE.put(file_path, mtime, meta.size_bytes, meta.clone());
     if let Some(index) = index {
         index.remember_summary(Source::Codex, id, mark, &meta);
     }
@@ -571,15 +558,7 @@ pub async fn list_codex_sessions(paths: &Paths) -> Vec<SessionSummary> {
         None => list_by_scanning(paths).await,
     };
 
-    let titles = super::claude::custom_titles(paths, Source::Codex).await;
-    if !titles.is_empty() {
-        for summary in &mut summaries {
-            if let Some(custom) = titles.get(&summary.id) {
-                summary.title = custom.clone();
-            }
-        }
-    }
-    apply_ownership(paths, &mut summaries).await;
+    summaries.finish(paths, Claims::all(paths).await).await;
     summaries
 }
 
@@ -603,24 +582,47 @@ pub(super) async fn rollout_ids(paths: &Paths) -> Option<HashSet<String>> {
     )
 }
 
+/// The overlays a listing and a single-row lookup both apply to Codex rows.
+trait FinishExt {
+    /// Apply the user's own title and the ownership verdict.
+    ///
+    /// `claims` is every claim on the machine for a listing, and just this
+    /// thread's for a one-row lookup. Both paths drop a `Hidden` row rather than
+    /// labelling it, so a thread another instance made cannot be opened by its id
+    /// either.
+    async fn finish(&mut self, paths: &Paths, claims: Claims);
+}
+
+impl FinishExt for Vec<SessionSummary> {
+    async fn finish(&mut self, paths: &Paths, claims: Claims) {
+        let titles = super::custom_titles(paths, Source::Codex).await;
+        if !titles.is_empty() {
+            for summary in self.iter_mut() {
+                if let Some(custom) = titles.get(&summary.id) {
+                    summary.title = custom.clone();
+                }
+            }
+        }
+        apply_ownership(paths, self, claims).await;
+    }
+}
+
 /// Promote this instance's own threads, and drop the ones a sibling made.
 ///
 /// Every user-visible codex row in the crate is built by this file, so this is
 /// the one place the three-way verdict of [`super::codex_claims`] has to be
 /// applied — the chat list, the global feed and the session count all flow from
 /// [`list_codex_sessions`], and the detail view from [`find_codex_session`],
-/// which applies the same verdict to its single row so a hidden thread cannot be
-/// opened by typing its URL.
+/// which runs [`FinishExt::finish`] on its single row so a hidden thread cannot
+/// be opened by typing its URL.
 ///
 /// Dropping rather than marking, for the rows another instance claimed: an
 /// account-backed claude session lives in a root a sibling server cannot even
 /// see, and this is what gives codex the same silence with one `~/.codex`.
 ///
-/// One read of the registry and one of the claim directory per listing, not one
-/// per row.
-async fn apply_ownership(paths: &Paths, summaries: &mut Vec<SessionSummary>) {
+/// One read of the registry per pass, not one per row.
+async fn apply_ownership(paths: &Paths, summaries: &mut Vec<SessionSummary>, claims: Claims) {
     let owned = owned_sessions::read(paths).await;
-    let claims = Claims::all(paths).await;
     let me = paths.instance();
     let local = super::ServerId::local(paths);
     summaries.retain_mut(|summary| {
@@ -665,7 +667,7 @@ pub async fn find_codex_session(paths: &Paths, id: &str) -> Option<SessionSummar
     // reason to open a database.
     crate::db::index::install(paths);
 
-    let mut summary = match on_state_db(paths, {
+    let summary = match on_state_db(paths, {
         let id = id.to_string();
         move |db| query_thread_row(db, &id)
     })
@@ -701,53 +703,29 @@ pub async fn find_codex_session(paths: &Paths, id: &str) -> Option<SessionSummar
         }
     };
 
-    // The list overlays user-set titles; a detail that disagreed with the row the
-    // user clicked would read as a different session.
-    if let Some(custom) = super::claude::custom_titles(paths, Source::Codex).await.get(id) {
-        summary.title = custom.clone();
-    }
-    // And the same for ownership: the composer's verdict is read off this row,
-    // so it has to say what the list said — including saying nothing at all for
-    // a thread another instance made, which the list does not show and this must
-    // not resolve.
-    let owned = owned_sessions::read(paths).await;
-    summary.server = owned.server_of(Source::Codex, id).unwrap_or(&super::ServerId::local(paths)).to_string();
-    match Claims::just(paths, id)
-        .await
-        .verdict(paths.instance(), id, owned.contains(Source::Codex, id))
-    {
-        Verdict::Owned => summary.scope = SessionScope::Owned,
-        Verdict::External => {}
-        Verdict::Hidden => return None,
-    }
-    Some(summary)
+    // The list overlays user-set titles and ownership; a detail that disagreed
+    // with the row the user clicked would read as a different session. A thread
+    // another instance made is dropped by the ownership verdict, so it does not
+    // resolve here either.
+    let mut summaries = vec![summary];
+    summaries.finish(paths, Claims::just(paths, id).await).await;
+    summaries.pop()
 }
 
 /// The model/effort a Codex session last ran with.
 ///
 /// Port of `codexChoice` in the former TypeScript server's `session-choice.ts`.
 pub async fn read_codex_cli_choice(file_path: &Path) -> Option<CliChoice> {
-    let lines = read_tail_lines(file_path, CHOICE_TAIL_BYTES).await.ok()?;
-    for line in lines.iter().rev() {
-        let Some(entry) = try_parse(line) else { continue };
+    CliChoice::read_tail(file_path, CHOICE_TAIL_BYTES, |entry| {
         if entry.get("type").and_then(Value::as_str) != Some("turn_context") {
-            continue;
+            return None;
         }
-        let Some(payload) = entry.get("payload").and_then(Value::as_object) else {
-            continue;
-        };
+        let payload = entry.get("payload").and_then(Value::as_object)?;
         let model = payload.get("model").and_then(Value::as_str).map(str::to_owned);
         let effort = payload.get("effort").and_then(Value::as_str).map(str::to_owned);
-        if model.is_none() && effort.is_none() {
-            continue;
-        }
-        return Some(CliChoice {
-            model: Nullable(model),
-            effort: Nullable(effort),
-            at: Nullable(entry.get("timestamp").and_then(Value::as_str).map(str::to_owned)),
-        });
-    }
-    None
+        (model.is_some() || effort.is_some()).then_some((model, effort))
+    })
+    .await
 }
 
 /// Codex JSONL -> normalized transcript items.
@@ -845,15 +823,7 @@ fn push_message(items: &mut Vec<TranscriptItem>, payload: &serde_json::Map<Strin
             items.push(by_model(make_item(role, ItemKind::Text, text, timestamp), model));
             continue;
         }
-        let split = parse_attachment_suffix(text);
-        let mut item = make_item(role, ItemKind::Text, &split.text, timestamp);
-        if !split.images.is_empty() {
-            item.images = Some(split.images);
-        }
-        if !split.files.is_empty() {
-            item.files = Some(split.files);
-        }
-        items.push(item);
+        items.push(TranscriptItem::user_text(text, timestamp));
     }
 }
 
@@ -1119,7 +1089,7 @@ mod tests {
         let first = file_meta(&path, id).await.expect("meta");
         assert_eq!(first.title_fallback.as_deref(), Some("from the rollout"));
 
-        META_CACHE.lock().expect("codex meta cache poisoned").clear();
+        META_CACHE.clear();
         let index = crate::db::index::open(&paths);
         let metadata = std::fs::metadata(&path).expect("stat");
         let planted = FileMeta {

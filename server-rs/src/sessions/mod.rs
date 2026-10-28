@@ -715,6 +715,33 @@ pub struct CliChoice {
     pub at: Nullable<String>,
 }
 
+impl CliChoice {
+    /// The newest model/effort pair a transcript's tail names.
+    ///
+    /// Both CLIs record the pair once per turn — Claude on every assistant
+    /// entry, Codex in the `turn_context` that opens one — so the newest entry
+    /// that names either is what the session is set to run. `extract` reads one
+    /// entry and returns its pair, or `None` when the entry says nothing about
+    /// them.
+    pub async fn read_tail(
+        path: &Path,
+        tail_bytes: u64,
+        extract: impl Fn(&serde_json::Map<String, serde_json::Value>) -> Option<(Option<String>, Option<String>)>,
+    ) -> Option<Self> {
+        let lines = util::read_tail_lines(path, tail_bytes).await.ok()?;
+        for line in lines.iter().rev() {
+            let Some(entry) = util::try_parse(line) else { continue };
+            let Some((model, effort)) = extract(&entry) else { continue };
+            return Some(Self {
+                model: Nullable(model),
+                effort: Nullable(effort),
+                at: Nullable(entry.get("timestamp").and_then(serde_json::Value::as_str).map(str::to_owned)),
+            });
+        }
+        None
+    }
+}
+
 /// Session state plus a page of its transcript.
 #[derive(Debug, Clone, Serialize, Deserialize, Schematic)]
 #[serde(rename_all = "camelCase")]
@@ -1283,6 +1310,21 @@ pub fn sendability(source: Source, scope: SessionScope, status: SessionStatus, i
         (Source::Codex, SessionStatus::Running) => (false, Some("session is currently running".into())),
         _ => (true, None),
     }
+}
+
+/// User-set titles, which outrank anything derived from a transcript.
+///
+/// Keyed `source:id` in one shared sidecar, so both CLIs read them through the
+/// same filter.
+async fn custom_titles(paths: &Paths, source: Source) -> HashMap<String, String> {
+    let prefix = format!("{source}:");
+    crate::drive::titles::all(paths)
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let id = key.strip_prefix(&prefix)?;
+            Some((id.to_string(), value))
+        })
+        .collect()
 }
 
 /// The mtime+size signature the transcript cache and the `?sig=` poll share.

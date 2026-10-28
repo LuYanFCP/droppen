@@ -534,7 +534,7 @@ pub async fn has_conversation(file_path: &Path) -> bool {
 /// Every ACP session this server made, on every agent, configured or not; the
 /// order is the caller's.
 pub async fn list_sessions(paths: &Paths) -> Vec<SessionSummary> {
-    let titles = super::claude::custom_titles(paths, Source::Acp).await;
+    let titles = super::custom_titles(paths, Source::Acp).await;
     let mut out = Vec::new();
     for agent in agent_dirs(paths).await {
         let dir = paths.acp_sessions().join(&agent);
@@ -553,7 +553,7 @@ pub async fn list_sessions(paths: &Paths) -> Vec<SessionSummary> {
 /// One session's list row, or `None` when there is no such session.
 pub async fn find_session(paths: &Paths, id: &str) -> Option<SessionSummary> {
     let (agent, file_path) = locate(paths, id).await?;
-    let titles = super::claude::custom_titles(paths, Source::Acp).await;
+    let titles = super::custom_titles(paths, Source::Acp).await;
     summary_of(paths, &agent, &file_path, id, &titles).await
 }
 
