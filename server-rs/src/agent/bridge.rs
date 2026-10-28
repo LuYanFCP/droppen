@@ -7,10 +7,8 @@
 //! Each request carries the per-boot internal credential (`x-rh-agent`) that
 //! `auth::guard` accepts only from a loopback peer, and the device id the
 //! channel was authorised for (`x-rh-agent-device`), which becomes the
-//! request's identity (`cloud:<device>`); an `rpc` from a device that may manage
-//! this machine also carries `x-rh-agent-posture` ([`POSTURE_HEADER`]). Nothing
-//! the device sends can set any of them: a request's headers are rebuilt from
-//! an allowlist.
+//! request's identity (`cloud:<device>`). Nothing the device sends can set
+//! either: a request's headers are rebuilt from an allowlist.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -26,11 +24,6 @@ use tokio_tungstenite::tungstenite::Message;
 pub const CREDENTIAL_HEADER: &str = "x-rh-agent";
 /// The header naming the device a bridged request is from.
 pub const DEVICE_HEADER: &str = "x-rh-agent-device";
-/// The header saying a bridged request's device may manage this machine
-/// ([`Standing::manages`]), for a route every device reaches that keeps part
-/// of its answer for those (`crate::auth::Manages`). Honoured, like the
-/// device, only with the credential.
-pub const POSTURE_HEADER: &str = "x-rh-agent-posture";
 /// The largest rpc request body the bridge buffers.
 const MAX_BODY: usize = 64 * 1024 * 1024;
 
@@ -129,14 +122,6 @@ pub struct Standing {
     /// when a request is dispatched, which can be long after its stream
     /// opened.
     pub controls: bool,
-}
-
-impl Standing {
-    /// It would be let through an admin-only route ([`RouteClass::Posture`],
-    /// [`refusal`]): it may manage this machine.
-    pub fn manages(&self) -> bool {
-        self.controls && self.admin && self.view == View::Fresh
-    }
 }
 
 /// This agent's view of the account, for a management request
@@ -324,8 +309,10 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = {
         ("GET", "/api/acp/agents", Use),
         ("PUT", "/api/acp/agents/{id}", Posture),
         ("DELETE", "/api/acp/agents/{id}", Posture),
-        // A check starts the program an agent names.
+        // A check starts the program an agent names; the last one's error is
+        // what the program wrote to stderr.
         ("POST", "/api/acp/agents/{id}/check", Posture),
+        ("GET", "/api/acp/agents/{id}/check", Posture),
         ("GET", "/api/fs/list", Use),
         ("GET", "/api/fs/read", Use),
         ("GET", "/api/fs/download", Use),
@@ -695,12 +682,10 @@ async fn request_body(stream: &mut Stream, max: usize) -> Option<Vec<u8>> {
 
 /// Whether a request whose body has just arrived is still to be served: judged
 /// again on where its device stands now, since a device can open a stream and
-/// hold back its `End` for as long as it likes. `None`: it was answered; else
-/// the stream and where the device stands.
-async fn still_served(stream: Stream, head: &RequestHead, device: &str, local: &dyn Local) -> Option<(Stream, Standing)> {
-    let standing = local.standing(device);
-    match refusal(&head.method, &head.path, standing) {
-        None => Some((stream, standing)),
+/// hold back its `End` for as long as it likes. `None`: it was answered.
+async fn still_served(stream: Stream, head: &RequestHead, device: &str, local: &dyn Local) -> Option<Stream> {
+    match refusal(&head.method, &head.path, local.standing(device)) {
+        None => Some(stream),
         Some(refused) => {
             let route = head.path.split(['?', '#']).next().unwrap_or_default();
             tracing::warn!(%device, method = %head.method, %route, ?refused, "refused a request over a channel as it was dispatched");
@@ -715,7 +700,7 @@ async fn local_rpc(mut stream: Stream, head: RequestHead, device: &str, local: &
     let Some(body) = request_body(&mut stream, 64 * 1024).await else {
         return;
     };
-    let Some((stream, _)) = still_served(stream, &head, device, local).await else {
+    let Some(stream) = still_served(stream, &head, device, local).await else {
         return;
     };
     let path = head.path.split(['?', '#']).next().unwrap_or_default().to_string();
@@ -727,7 +712,7 @@ async fn rpc(mut stream: Stream, head: RequestHead, device: &str, loopback: &Loo
     let Some(body) = request_body(&mut stream, MAX_BODY).await else {
         return;
     };
-    let Some((stream, standing)) = still_served(stream, &head, device, local).await else {
+    let Some(stream) = still_served(stream, &head, device, local).await else {
         return;
     };
     if push_key_route(&head.method, &head.path) && local.push_renewing() {
@@ -743,9 +728,6 @@ async fn rpc(mut stream: Stream, head: RequestHead, device: &str, loopback: &Loo
         .request(method, url)
         .header(CREDENTIAL_HEADER, &loopback.credential)
         .header(DEVICE_HEADER, device);
-    if standing.manages() {
-        request = request.header(POSTURE_HEADER, "1");
-    }
     for (name, value) in &head.headers {
         if FORWARDED.contains(&name.to_ascii_lowercase().as_str()) {
             request = request.header(name.as_str(), value.as_str());
@@ -970,6 +952,7 @@ mod tests {
             ("PUT", "/api/acp/agents/bub"),
             ("DELETE", "/api/acp/agents/bub"),
             ("POST", "/api/acp/agents/bub/check"),
+            ("GET", "/api/acp/agents/bub/check"),
             ("POST", "/api/push/subscriptions"),
             ("GET", "/api/push/vapid"),
             ("POST", "/rh/machine-key"),
@@ -1100,22 +1083,6 @@ mod tests {
         }
         let (status, body) = Refusal::Lapsed.answer();
         assert_eq!((status, body["error"].as_str(), body["reason"].as_str()), (412, Some("stale"), Some("lapsed")));
-    }
-
-    /// What the posture header says of a device is what an admin-only route
-    /// would make of it.
-    #[test]
-    fn a_device_manages_this_machine_exactly_when_an_admin_route_takes_it() {
-        let lapsed = Standing { controls: false, ..ADMIN };
-        let behind = Standing { view: View::Behind, ..ADMIN };
-        for standing in [PLAIN, ADMIN, STALE_ADMIN, lapsed, behind] {
-            assert_eq!(
-                standing.manages(),
-                refusal("PUT", "/api/acp/agents/x", standing).is_none(),
-                "{standing:?}"
-            );
-        }
-        assert!(ADMIN.manages());
     }
 
     /// `(METHOD, path template)` of every route the server's source

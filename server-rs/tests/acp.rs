@@ -817,8 +817,14 @@ async fn a_check_says_what_the_agent_is_and_why_it_cannot_start() {
     let error = check["error"].as_str().unwrap();
     assert!(error.contains("cannot load: token"), "the agent's own words: {error}");
     assert!(!body.contains("tok-very-secret"), "a value never comes back: {body}");
-    let listed = server.get("/api/acp/agents").await.1;
-    assert!(!listed.contains("tok-very-secret"), "{listed}");
+    // The list says how it ended; the check's own route says why, as redacted.
+    let listed = server.get_json("/api/acp/agents").await;
+    let row = listed["agents"].as_array().unwrap().iter().find(|agent| agent["id"] == "broken").cloned().unwrap();
+    assert_eq!(row["lastCheck"]["state"], "failed", "{row:#}");
+    assert!(row["lastCheck"].get("error").is_none(), "{row:#}");
+    let kept = server.get_json("/api/acp/agents/broken/check").await;
+    assert_eq!(kept["error"], check["error"], "{kept:#}");
+    assert!(!kept.to_string().contains("tok-very-secret"), "{kept:#}");
 
     // An edit of the command line forgets what the last check found.
     server

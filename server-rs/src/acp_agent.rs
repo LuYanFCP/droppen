@@ -52,7 +52,6 @@ use crate::accounts::store::{parse_env_block, EnvVar};
 use crate::api::error::ApiError;
 use crate::api::extract::{ApiJson, ApiPath};
 use crate::api::{ApiRouter, AppState, SendResult};
-use crate::auth::Manages;
 use crate::db::scope;
 use crate::openapi_ext::{ExtraResponses, Optional};
 use crate::process_env::{clean_env_bare, resolve_on_path, Env};
@@ -167,7 +166,7 @@ impl AcpAgent {
             env_names: self.env.iter().map(|var| var.key.clone()).collect(),
             homepage: preset.and_then(|preset| preset.homepage.0.clone()).into(),
             note: preset.and_then(|preset| preset.note.0.clone()).into(),
-            last_check: self.last_check.clone().into(),
+            last_check: self.last_check.clone().map(AcpCheck::without_error).into(),
         }
     }
 
@@ -414,22 +413,11 @@ pub struct AcpAgentInfo {
     /// What a built-in agent needs before it can run.
     #[serde(default, skip_serializing_if = "Optional::is_none")]
     pub note: Optional<String>,
-    /// What the last check of its command line and environment found; absent
-    /// until one ran. Its `error` is only for a caller that may manage this
-    /// machine.
+    /// What the last check of its command line and environment found, without
+    /// its `error` (`GET /api/acp/agents/{id}/check` has it); absent until one
+    /// ran.
     #[serde(default, skip_serializing_if = "Optional::is_none")]
     pub last_check: Optional<AcpCheck>,
-}
-
-impl AcpAgentInfo {
-    /// This, for a caller that may not manage the machine: how the last check
-    /// ended, without what the agent said.
-    fn without_check_error(mut self) -> Self {
-        if let Some(check) = self.last_check.0.as_mut() {
-            check.error = None.into();
-        }
-        self
-    }
 }
 
 /// How a check of an agent ended.
@@ -471,8 +459,8 @@ pub struct AcpCheck {
     pub auth_methods: Optional<Vec<AcpAuthMethod>>,
     /// Why it is not ready: the error, the end of what it wrote to stderr and
     /// the `PATH` it was looked up on, with the agent's variable values and
-    /// anything that looks like a key taken out. In a list of the agents, only
-    /// for a caller that may manage this machine.
+    /// anything that looks like a key taken out. Never in a list of the agents,
+    /// which every device may read: only in a check's own answer.
     #[serde(default, skip_serializing_if = "Optional::is_none")]
     pub error: Optional<String>,
 }
@@ -609,6 +597,15 @@ impl AcpCheck {
     pub fn failed(&self) -> bool {
         self.state != AcpCheckState::Ready
     }
+
+    /// This, without what the agent said: how it ended and what it is, as an
+    /// agent's listing reports it.
+    fn without_error(self) -> Self {
+        Self {
+            error: None.into(),
+            ..self
+        }
+    }
 }
 
 /// `GET /api/acp/agents`.
@@ -641,20 +638,11 @@ pub struct AcpAgentUpdate {
 }
 
 /// The ACP agents configured on this machine, and the built-in descriptions.
-///
-/// A last check's `error` is the agent's own words, the end of its stderr
-/// included, and is sent only to a caller that may manage this machine;
-/// another device is told how the check ended and when.
 #[api(id = "acp_agents", group = "acp", summary = "ACP agents")]
-pub async fn acp_agents(State(state): State<AppState>, #[api(skip)] Manages(manages): Manages) -> Json<AcpAgentList> {
+pub async fn acp_agents(State(state): State<AppState>) -> Json<AcpAgentList> {
     let env = clean_env_bare();
     Json(AcpAgentList {
-        agents: state
-            .paths
-            .acp_agents()
-            .iter()
-            .map(|agent| if manages { agent.info() } else { agent.info().without_check_error() })
-            .collect(),
+        agents: state.paths.acp_agents().iter().map(AcpAgent::info).collect(),
         presets: presets().iter().map(|preset| preset.looked_up(&env)).collect(),
     })
 }
@@ -699,6 +687,18 @@ pub async fn check_acp_agent(State(state): State<AppState>, ApiPath(id): ApiPath
     Ok(Json(check))
 }
 
+/// An ACP agent's last check in full: the error it ended with included, which
+/// is the agent's own words, the end of its stderr among them. A route of its
+/// own so that the list, which every device reads, never carries it.
+#[api(id = "last_acp_check", group = "acp", summary = "The last check of an ACP agent")]
+pub async fn last_acp_check(State(state): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Json<AcpCheck>, ApiError> {
+    let agent = state.paths.acp_agent(&id).ok_or_else(|| ApiError::not_found("no such ACP agent"))?;
+    agent
+        .last_check
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("this ACP agent has not been checked"))
+}
+
 /// Register this module's routes.
 pub fn routes(router: ApiRouter) -> ApiRouter {
     router
@@ -706,6 +706,7 @@ pub fn routes(router: ApiRouter) -> ApiRouter {
         .put("/api/acp/agents/{id}", put_acp_agent)
         .delete("/api/acp/agents/{id}", delete_acp_agent)
         .post("/api/acp/agents/{id}/check", check_acp_agent)
+        .get("/api/acp/agents/{id}/check", last_acp_check)
 }
 
 /// Everything gotcha cannot express about those routes.
@@ -737,7 +738,14 @@ pub fn describe(reg: &mut ExtraResponses) {
         200,
         "What the check found: ready, or why the agent cannot start",
     )
-    .error("POST", "/api/acp/agents/{id}/check", 404, "No such ACP agent");
+    .error("POST", "/api/acp/agents/{id}/check", 404, "No such ACP agent")
+    .describe("GET", "/api/acp/agents/{id}/check", 200, "The agent's last check, its error included")
+    .error(
+        "GET",
+        "/api/acp/agents/{id}/check",
+        404,
+        "No such ACP agent, or it has not been checked",
+    );
 }
 
 #[cfg(test)]
@@ -890,7 +898,8 @@ mod tests {
         let found = AcpCheck::ended(AcpCheckState::NotFound, Some("gone".into()));
         assert!(configured.record_check(&paths, &found));
         assert_eq!(agent_check(&paths, "x"), Some(AcpCheckState::NotFound));
-        assert_eq!(paths.acp_agent("x").unwrap().info().last_check.0.and_then(|check| check.error.0), Some("gone".into()));
+        assert_eq!(paths.acp_agent("x").unwrap().last_check.and_then(|check| check.error.0), Some("gone".into()));
+        assert_eq!(paths.acp_agent("x").unwrap().info().last_check.0.map(|check| check.error.0), Some(None), "a listing leaves it out");
 
         // A new name is the same process: the check stands.
         paths.update_acp_agent("x", &AcpAgentUpdate { name: Some("Renamed".into()).into(), ..AcpAgentUpdate::default() }).expect("saved");
@@ -953,15 +962,16 @@ mod tests {
         assert!(methods.iter().all(|method| method.name == "[redacted]"), "{methods:?}");
     }
 
-    /// A last check's error is the agent's own words: it is listed for a
-    /// caller that may manage this machine — this computer, or a device the
-    /// bridge says may — and only how the check ended for another device.
+    /// A last check's error is the agent's own words. The list, which every
+    /// device may read, never carries it, whoever asks; the check's own route
+    /// does, and a device reaches that only when it manages this computer.
     #[tokio::test]
-    async fn a_check_error_is_listed_only_for_a_caller_that_may_manage_the_machine() {
+    async fn a_check_error_is_only_on_the_checks_own_route() {
+        use crate::agent::bridge::{refusal, Standing, View};
         use tower_service::Service;
 
-        async fn last_check(router: &mut gotcha::axum::Router, headers: &[(&str, &str)]) -> serde_json::Value {
-            let mut request = gotcha::axum::http::Request::get("/api/acp/agents").header("host", "127.0.0.1:8700");
+        async fn get(router: &mut gotcha::axum::Router, path: &str, headers: &[(&str, &str)]) -> (u16, serde_json::Value) {
+            let mut request = gotcha::axum::http::Request::get(path).header("host", "127.0.0.1:8700");
             for (name, value) in headers {
                 request = request.header(*name, *value);
             }
@@ -969,10 +979,9 @@ mod tests {
             let peer: std::net::SocketAddr = "127.0.0.1:50000".parse().expect("peer");
             request.extensions_mut().insert(gotcha::axum::extract::ConnectInfo(peer));
             let response = router.call(request).await.expect("infallible");
-            assert_eq!(response.status(), 200);
+            let status = response.status().as_u16();
             let body = gotcha::axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
-            let list: serde_json::Value = serde_json::from_slice(&body).expect("json");
-            list["agents"][0]["lastCheck"].clone()
+            (status, serde_json::from_slice(&body).expect("json"))
         }
 
         let home = tempfile::tempdir().expect("tempdir");
@@ -980,19 +989,39 @@ mod tests {
         state.paths.update_acp_agent("x", &patch(Some("/x/agent"), None, None)).expect("saved");
         let failed = AcpCheck::ended(AcpCheckState::Failed, Some("the agent's own words".into()));
         assert!(state.paths.acp_agent("x").unwrap().record_check(&state.paths, &failed));
-
-        assert_eq!(last_check(&mut router, &[]).await["error"], "the agent's own words", "this computer");
         let credential = state.drive.auth.internal_credential().to_string();
         let device = [
             (crate::agent::bridge::CREDENTIAL_HEADER, credential.as_str()),
             (crate::agent::bridge::DEVICE_HEADER, "d-1"),
         ];
-        let plain = last_check(&mut router, &device).await;
-        assert_eq!(plain["state"], "failed", "{plain:#}");
-        assert!(plain["checkedAt"].is_string(), "{plain:#}");
-        assert!(plain.get("error").is_none(), "another device: {plain:#}");
-        let manager = last_check(&mut router, &[device[0], device[1], (crate::agent::bridge::POSTURE_HEADER, "1")]).await;
-        assert_eq!(manager["error"], "the agent's own words", "a device that may manage it");
+
+        // This computer, and a device bridged in: how the check ended, not why.
+        for headers in [&[][..], &device[..]] {
+            let (status, list) = get(&mut router, "/api/acp/agents", headers).await;
+            assert_eq!(status, 200, "{list:#}");
+            let check = &list["agents"][0]["lastCheck"];
+            assert_eq!(check["state"], "failed", "{list:#}");
+            assert!(check["checkedAt"].is_string(), "{list:#}");
+            assert!(check.get("error").is_none(), "{list:#}");
+        }
+
+        // The bridge lets every device list the agents, and only one that
+        // manages this computer ask for the check in full.
+        let plain = Standing {
+            admin: false,
+            view: View::Fresh,
+            controls: true,
+        };
+        let admin = Standing { admin: true, ..plain };
+        assert_eq!(refusal("GET", "/api/acp/agents", plain), None);
+        assert_eq!(refusal("GET", "/api/acp/agents/x/check", plain).map(|refused| refused.answer().0), Some(403));
+        assert_eq!(refusal("GET", "/api/acp/agents/x/check", admin), None);
+        let (status, check) = get(&mut router, "/api/acp/agents/x/check", &device).await;
+        assert_eq!((status, check["error"].as_str()), (200, Some("the agent's own words")), "{check:#}");
+
+        state.paths.update_acp_agent("y", &patch(Some("/y/agent"), None, None)).expect("saved");
+        assert_eq!(get(&mut router, "/api/acp/agents/y/check", &[]).await.0, 404, "never checked");
+        assert_eq!(get(&mut router, "/api/acp/agents/z/check", &[]).await.0, 404, "no such agent");
     }
 
     #[test]

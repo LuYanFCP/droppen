@@ -336,10 +336,6 @@ export interface paths {
         /**
          * ACP agents
          * @description The ACP agents configured on this machine, and the built-in descriptions.
-         *
-         *     A last check's `error` is the agent's own words, the end of its stderr
-         *     included, and is sent only to a caller that may manage this machine;
-         *     another device is told how the check ended and when.
          */
         get: operations["acp_agents"];
         put?: never;
@@ -384,7 +380,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * The last check of an ACP agent
+         * @description An ACP agent's last check in full: the error it ended with included, which
+         *     is the agent's own words, the end of its stderr among them. A route of its
+         *     own so that the list, which every device reads, never carries it.
+         */
+        get: operations["last_acp_check"];
         put?: never;
         /**
          * Check an ACP agent
@@ -2902,9 +2904,9 @@ export interface components {
             /** @description Its id: what sessions record, and what `presets/icons/<id>.svg` draws. */
             id: string;
             /**
-             * @description What the last check of its command line and environment found; absent
-             *     until one ran. Its `error` is only for a caller that may manage this
-             *     machine.
+             * @description What the last check of its command line and environment found, without
+             *     its `error` (`GET /api/acp/agents/{id}/check` has it); absent until one
+             *     ran.
              */
             lastCheck?: components["schemas"]["AcpCheck"];
             /** @description What the user calls it. */
@@ -2996,8 +2998,8 @@ export interface components {
             /**
              * @description Why it is not ready: the error, the end of what it wrote to stderr and
              *     the `PATH` it was looked up on, with the agent's variable values and
-             *     anything that looks like a key taken out. In a list of the agents, only
-             *     for a caller that may manage this machine.
+             *     anything that looks like a key taken out. Never in a list of the agents,
+             *     which every device may read: only in a check's own answer.
              */
             error?: string;
             /** @description The ACP version it agreed to. */
@@ -7149,6 +7151,37 @@ export interface operations {
             };
             /** @description A turn of the agent is running, or a message is waiting for one */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    last_acp_check: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The agent's last check, its error included */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcpCheck"];
+                };
+            };
+            /** @description No such ACP agent, or it has not been checked */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

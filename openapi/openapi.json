@@ -533,7 +533,7 @@
           },
           "lastCheck": {
             "$ref": "#/components/schemas/AcpCheck",
-            "description": "What the last check of its command line and environment found; absent\nuntil one ran. Its `error` is only for a caller that may manage this\nmachine."
+            "description": "What the last check of its command line and environment found, without\nits `error` (`GET /api/acp/agents/{id}/check` has it); absent until one\nran."
           },
           "name": {
             "description": "What the user calls it.",
@@ -729,7 +729,7 @@
             "type": "string"
           },
           "error": {
-            "description": "Why it is not ready: the error, the end of what it wrote to stderr and\nthe `PATH` it was looked up on, with the agent's variable values and\nanything that looks like a key taken out. In a list of the agents, only\nfor a caller that may manage this machine.",
+            "description": "Why it is not ready: the error, the end of what it wrote to stderr and\nthe `PATH` it was looked up on, with the agent's variable values and\nanything that looks like a key taken out. Never in a list of the agents,\nwhich every device may read: only in a check's own answer.",
             "type": "string"
           },
           "protocolVersion": {
@@ -7677,7 +7677,7 @@
     "/api/acp/agents": {
       "get": {
         "deprecated": false,
-        "description": "The ACP agents configured on this machine, and the built-in descriptions.\n\nA last check's `error` is the agent's own words, the end of its stderr\nincluded, and is sent only to a caller that may manage this machine;\nanother device is told how the check ended and when.",
+        "description": "The ACP agents configured on this machine, and the built-in descriptions.",
         "operationId": "acp_agents",
         "parameters": [],
         "responses": {
@@ -7804,6 +7804,47 @@
       }
     },
     "/api/acp/agents/{id}/check": {
+      "get": {
+        "deprecated": false,
+        "description": "An ACP agent's last check in full: the error it ended with included, which\nis the agent's own words, the end of its stderr among them. A route of its\nown so that the list, which every device reads, never carries it.",
+        "operationId": "last_acp_check",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcpCheck"
+                }
+              }
+            },
+            "description": "The agent's last check, its error included"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No such ACP agent, or it has not been checked"
+          }
+        },
+        "summary": "The last check of an ACP agent",
+        "tags": [
+          "acp"
+        ]
+      },
       "post": {
         "deprecated": false,
         "description": "Check an ACP agent: start it with its environment, send `initialize`, read\nwhat it says it is and can do, and stop it. Nothing is sent to a model. The\nanswer is kept as the agent's `lastCheck`.",

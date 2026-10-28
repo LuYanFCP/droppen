@@ -529,13 +529,8 @@ pub async fn guard(auth: Arc<Auth>, mut request: Request, next: Next) -> Respons
         .get::<gotcha::axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|c| c.0);
     let bridged = auth.bridged(request.headers(), peer);
-    let bridged_manager = bridged.is_some() && request.headers().get(crate::agent::bridge::POSTURE_HEADER).is_some_and(|value| value == "1");
     request.headers_mut().remove(crate::agent::bridge::CREDENTIAL_HEADER);
     request.headers_mut().remove(crate::agent::bridge::DEVICE_HEADER);
-    request.headers_mut().remove(crate::agent::bridge::POSTURE_HEADER);
-    if bridged_manager {
-        request.extensions_mut().insert(BridgedManager);
-    }
 
     let is_exempt = exempt(&method, &path);
     // Resolved wherever it could matter, which is two overlapping sets. Every
@@ -743,33 +738,6 @@ impl<S: Send + Sync> FromRequestParts<S> for MaybeIdentity {
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         Ok(MaybeIdentity(parts.extensions.get::<AuthIdentity>().cloned()))
-    }
-}
-
-/// Whether the caller may manage this machine: whether the routes that change
-/// its posture ([`crate::agent::bridge::RouteClass::Posture`]) would take it.
-/// Everyone the guard let in otherwise than over the bridge may; a device
-/// bridged in may when the bridge said so ([`crate::agent::bridge::POSTURE_HEADER`]).
-/// For a route every device reaches that keeps part of its answer for those.
-///
-/// Annotate the parameter `#[api(skip)]`, as [`Identity`]'s.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Manages(pub bool);
-
-/// Put on a bridged request by the guard when the bridge said its device may
-/// manage this machine.
-#[derive(Debug, Clone, Copy)]
-struct BridgedManager;
-
-impl<S: Send + Sync> FromRequestParts<S> for Manages {
-    type Rejection = std::convert::Infallible;
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let bridged = parts
-            .extensions
-            .get::<AuthIdentity>()
-            .is_some_and(|identity| identity.username.starts_with("cloud:"));
-        Ok(Manages(!bridged || parts.extensions.get::<BridgedManager>().is_some()))
     }
 }
 
