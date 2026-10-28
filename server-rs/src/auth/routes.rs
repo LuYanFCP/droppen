@@ -123,8 +123,9 @@ pub struct AuthStatus {
     /// instance, to put before `droppenPath` (`APP_INSTANCE=bob …/droppen
     /// setup-code`): the instance when it is not `default`, and where this
     /// server keeps its files when that is not the usual place
-    /// (`crate::program::droppen_env`). Empty for the usual install; values
-    /// not yet quoted for a shell. Servers older than this field send none.
+    /// [`crate::sessions::Paths::droppen_env`]. Empty for the usual install;
+    /// values not yet quoted for a shell. Servers older than this field send
+    /// none.
     pub droppen_env: Vec<CommandEnv>,
 }
 
@@ -365,7 +366,7 @@ pub async fn status(State(state): State<AppState>, #[api(skip)] MaybeIdentity(id
         user: Nullable(identity.map(|identity| identity.username)),
         desktop_app: state.desktop_app,
         droppen_path: crate::program::droppen_path(),
-        droppen_env: crate::program::droppen_env(&state.paths)
+        droppen_env: state.paths.droppen_env()
             .into_iter()
             .map(|(name, value)| CommandEnv { name, value })
             .collect(),
@@ -1530,7 +1531,7 @@ mod tests {
         );
         // And what such a command needs to reach this instance: this test's
         // server keeps its files under a home of its own, not the process's.
-        let expected: Vec<serde_json::Value> = crate::program::droppen_env(&state_paths)
+        let expected: Vec<serde_json::Value> = state_paths.droppen_env()
             .into_iter()
             .map(|(name, value)| json!({"name": name, "value": value}))
             .collect();
