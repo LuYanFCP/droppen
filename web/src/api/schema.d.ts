@@ -4183,6 +4183,12 @@ export interface components {
         };
         /** @description The `GET /api/models` response. */
         ModelList: {
+            /**
+             * @description How many of an ACP agent's models are left out because their ids look
+             *     like a credential, so a picker can say why its list is short or empty;
+             *     absent when none are.
+             */
+            hidden?: number;
             /** @description Models currently known to the local CLI, freshest first. */
             models: components["schemas"]["ModelInfo"][];
             /** @description Whether `models` came from the CLI's cache or from the static fallback. */

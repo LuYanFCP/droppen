@@ -11,7 +11,8 @@ its turn open until it is cancelled. `FAKE_AGENT_SLOW=<method>=<seconds>,...`
 makes it take that long over a request, after writing it down, so a test can
 act while the request is in flight; `FAKE_AGENT_DEAF` the same, but after
 answering, without reading what it is sent meanwhile. `FAKE_AGENT_TITLE` is
-what it calls itself.
+what it calls itself, and `FAKE_AGENT_FIRST_MODEL` a model it offers before the
+others, which its sessions start on.
 """
 import json
 import os
@@ -34,6 +35,8 @@ lock = threading.Lock()
 waiting = {}
 
 MODELS = [("fake:small", "Small"), ("openrouter:vendor/big", "Big")]
+if os.environ.get("FAKE_AGENT_FIRST_MODEL"):
+    MODELS.insert(0, (os.environ["FAKE_AGENT_FIRST_MODEL"], "First"))
 EFFORTS = ["auto", "low", "high"]
 # Each session's model and effort, as set_config_option leaves them.
 runtime = {}

@@ -59,7 +59,7 @@ use crate::sessions::acp_transcript::{agent_dir, has_conversation, locate, read_
 use client::Client;
 use conn::Conn;
 pub(super) use driver::Handle;
-use driver::{Driver, Message, Process, State, StderrTail};
+use driver::{Cmd, Delivery, Driver, Message, Process, State, StderrTail};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
@@ -86,8 +86,6 @@ impl Paths {
 
 /// A session this server already has a transcript for.
 struct Recorded {
-    /// This server's id for it.
-    id: String,
     /// Its transcript.
     file: PathBuf,
     /// The id the agent gave it.
@@ -229,6 +227,47 @@ impl Started {
     }
 }
 
+/// A session whose agent is being started, outside the spawn gate. Its handle
+/// is in the map already, with the first message on its way, so the session
+/// is busy — it is not removed, archived or started twice — and a message
+/// sent to it meanwhile queues behind the first.
+///
+/// Dropped before [`InjectionRegistry::acp_attach`] took it — the start
+/// failed, or its request was given up on — it takes its handle out again and
+/// puts back the one it replaced; the messages on their way are dropped, and
+/// their senders told the agent exited before it took them.
+struct Starting<'a> {
+    registry: &'a InjectionRegistry,
+    key: String,
+    handle: Handle,
+    rx: Option<mpsc::UnboundedReceiver<Cmd>>,
+    replaced: Option<Handle>,
+}
+
+impl Drop for Starting<'_> {
+    fn drop(&mut self) {
+        if self.rx.is_none() {
+            return;
+        }
+        let mut servers = self.registry.acp_servers.lock().unwrap();
+        if servers.get(&self.key).is_some_and(|handle| handle.shares(&self.handle.shared())) {
+            match self.replaced.take() {
+                Some(replaced) => servers.insert(self.key.clone(), replaced),
+                None => servers.remove(&self.key),
+            };
+        }
+    }
+}
+
+/// A session's agent, started, with the session open and its transcript
+/// ready: what a driver is made of.
+struct Open {
+    agent_session: String,
+    started: Started,
+    transcript: driver::Transcript,
+    options: Vec<ConfigOption>,
+}
+
 /// A scratch directory for an agent that is only asked something: removed
 /// when it is dropped, a cancelled request's included.
 fn scratch(kind: &str) -> std::io::Result<tempfile::TempDir> {
@@ -296,6 +335,14 @@ impl InjectionRegistry {
     /// start may run a different configuration.
     pub fn forget_acp_options(&self, agent: &str) {
         self.acp_options.lock().unwrap().remove(agent);
+    }
+
+    /// Whether an id an agent gave — a model, an effort — can be shown and
+    /// sent back as it is: no longer than a name, and nothing in it that
+    /// [`InjectionRegistry::redact`] would take out. The agent's own variables'
+    /// values are not looked for: they are often what names its model.
+    pub(crate) fn acp_id_shown(&self, id: &str) -> bool {
+        id.chars().count() <= crate::acp_agent::MAX_AGENT_WORD && self.redact(id) == id
     }
 
     /// What `agent` said, fit to be stored and shown: [`InjectionRegistry::redact`],
@@ -426,9 +473,11 @@ impl InjectionRegistry {
     /// Start a new session on the configured agent `agent` in `cwd`, with its
     /// first message; this server's id for it is returned.
     ///
-    /// The spawn gate is held from reading the agent until the message is on
-    /// its way, and not while the driver takes it ([`driver::Delivery::taken`]): a
-    /// driver that is slow to, or never does, holds up no other send.
+    /// The spawn gate, which every Claude, Codex and ACP send takes, is held to
+    /// read the agent and put the session's handle in the map with the message
+    /// on its way, and not while the agent starts or the driver takes the
+    /// message: a slow agent, or one that never answers, holds up no other
+    /// send.
     pub(super) async fn acp_start(self: &Arc<Self>, agent: &str, cwd: &str, text: &str, options: &SendOptions) -> Result<String, InjectError> {
         // The agent is read under the gate, which its removal holds too
         // ([`InjectionRegistry::remove_acp_agent`]).
@@ -441,9 +490,11 @@ impl InjectionRegistry {
         let offered = self.acp_options.lock().unwrap().get(&agent.id).cloned().unwrap_or_default();
         check_choice(&agent, &offered, message.model.as_deref(), message.effort.as_deref())?;
         let name = agent.name.clone();
-        let (id, handle) = self.acp_spawn(agent, None, Some(cwd)).await?;
-        let delivery = handle.deliver(message);
+        let id = new_uuid();
+        let (starting, delivery) = self.acp_starting(&agent, &id, message);
         drop(gate);
+        let open = self.acp_open(&agent, &id, None, Some(cwd)).await?;
+        self.acp_attach(starting, agent, &id, open);
         delivery.taken(&name).await?;
         Ok(id)
     }
@@ -462,7 +513,17 @@ impl InjectionRegistry {
             .ok_or_else(|| InjectError::message(crate::acp_agent::removed(&agent_id)))?;
         check_options(&agent, options)?;
         let message = message(text, options);
-        let running = self.acp_handle(id).filter(Handle::takes_messages);
+        let current = self.acp_handle(id).filter(Handle::alive);
+        // Its configuration changed while it had work: that work ends on the
+        // process it started on, and nothing more is given to it. One with
+        // nothing left is on its way out, and a new one is started.
+        if current.as_ref().is_some_and(|handle| handle.retiring() && handle.busy()) {
+            return Err(InjectError::message(format!(
+                "{} restarts with its new settings after this turn; send again then",
+                agent.name
+            )));
+        }
+        let running = current.filter(Handle::takes_messages);
         // Checked before anything starts, against the session's own options
         // when it is running and what the agent last offered otherwise.
         let offered = match &running {
@@ -471,25 +532,43 @@ impl InjectionRegistry {
         };
         check_choice(&agent, &offered, message.model.as_deref(), message.effort.as_deref())?;
         let name = agent.name.clone();
-        let handle = match running {
-            Some(handle) => handle,
-            None => {
-                // Written by this server when the session was created; a header
-                // without the agent's id is from before this server minted its
-                // own, when the two were the same.
-                let header = read_header(&file).await.unwrap_or_default();
-                let recorded = Recorded {
-                    id: id.to_string(),
-                    file,
-                    agent_session: header.agent_session_id.unwrap_or_else(|| id.to_string()),
-                    cwd: header.cwd,
-                };
-                self.acp_spawn(agent, Some(recorded), None).await?.1
-            }
-        };
-        let delivery = handle.deliver(message);
+        if let Some(handle) = running {
+            let delivery = handle.deliver(message);
+            drop(gate);
+            return delivery.taken(&name).await;
+        }
+        let (starting, delivery) = self.acp_starting(&agent, id, message);
         drop(gate);
+        // Written by this server when the session was created; a header
+        // without the agent's id is from before this server minted its own,
+        // when the two were the same.
+        let header = read_header(&file).await.unwrap_or_default();
+        let recorded = Recorded {
+            file,
+            agent_session: header.agent_session_id.unwrap_or_else(|| id.to_string()),
+            cwd: header.cwd,
+        };
+        let open = self.acp_open(&agent, id, Some(recorded), None).await?;
+        self.acp_attach(starting, agent, id, open);
         delivery.taken(&name).await
+    }
+
+    /// Put the handle of the session `id`, whose agent is about to start, in
+    /// the map, with `message` on its way to it. Under the spawn gate.
+    fn acp_starting(&self, agent: &AcpAgent, id: &str, message: Message) -> (Starting<'_>, Delivery) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = Handle::new(tx, &agent.id);
+        let delivery = handle.deliver(message);
+        let key = self.key_of(Source::Acp, id);
+        let replaced = self.acp_servers.lock().unwrap().insert(key.clone(), handle.clone());
+        let starting = Starting {
+            registry: self,
+            key,
+            handle,
+            rx: Some(rx),
+            replaced,
+        };
+        (starting, delivery)
     }
 
     pub(super) async fn acp_queue_action(&self, id: &str, qid: &str, steer: bool) -> QueueOutcome {
@@ -544,13 +623,14 @@ impl InjectionRegistry {
             .map_err(|error| ArchiveError(format!("cannot archive the ACP session: {error}")))
     }
 
-    /// Start `agent` for a session and open it: a new one in `cwd`, or the
-    /// `recorded` one, reopened where it ran with `session/load`.
-    async fn acp_spawn(self: &Arc<Self>, agent: AcpAgent, recorded: Option<Recorded>, cwd: Option<&str>) -> Result<(String, Handle), InjectError> {
+    /// Start `agent` for the session `id` and open it: a new one in `cwd`, or
+    /// the `recorded` one, reopened where it ran with `session/load`. Not under
+    /// the spawn gate: this is what can take as long as [`START_TIMEOUT`].
+    async fn acp_open(&self, agent: &AcpAgent, id: &str, recorded: Option<Recorded>, cwd: Option<&str>) -> Result<Open, InjectError> {
         // A session that exists ran somewhere; that is where it is reopened,
         // whatever directory the request names.
         let workdir = claude_workdir(&self.paths, recorded.as_ref().and_then(|recorded| recorded.cwd.as_deref()).or(cwd));
-        let mut started = start(&agent, &workdir).await?;
+        let mut started = start(agent, &workdir).await?;
         let reopen = recorded.as_ref().map(|recorded| recorded.agent_session.as_str());
         let opened = match tokio::time::timeout(START_TIMEOUT, started.conn.open(reopen, &workdir)).await {
             Ok(Ok(opened)) => opened,
@@ -559,11 +639,11 @@ impl InjectionRegistry {
                     Ok(Err(error)) => error.to_string(),
                     _ => format!("{} did not open the session in time", agent.name),
                 };
-                return Err(started.fail(self, &agent, reason).await);
+                return Err(started.fail(self, agent, reason).await);
             }
         };
-        let (id, file) = match recorded {
-            Some(recorded) => (recorded.id, recorded.file),
+        let file = match recorded {
+            Some(recorded) => recorded.file,
             None => {
                 // A new session's options say what a fresh one starts on — the
                 // defaults the composer offers. A reopened one's say what *it*
@@ -573,9 +653,7 @@ impl InjectionRegistry {
                 tokio::fs::create_dir_all(&dir)
                     .await
                     .map_err(|error| InjectError::Internal(error.to_string()))?;
-                let id = new_uuid();
-                let file = dir.join(format!("{id}.jsonl"));
-                (id, file)
+                dir.join(format!("{id}.jsonl"))
             }
         };
 
@@ -600,25 +678,40 @@ impl InjectionRegistry {
             records.extend(translator.flush());
             transcript.append(&records).await;
         }
+        Ok(Open {
+            agent_session: opened.id,
+            started,
+            transcript,
+            options: opened.options,
+        })
+    }
 
-        let (tx, rx) = mpsc::unbounded_channel();
-        let handle = Handle::new(tx, &agent.id);
-        let (in_flight, retire) = handle.counters();
-        self.acp_servers.lock().unwrap().insert(self.key_of(Source::Acp, &id), handle.clone());
-        let Started { process, stderr, client, conn } = started;
+    /// Give the session `id`'s started agent its driver, on the handle
+    /// `starting` put in the map. The messages on their way are in its channel
+    /// already, so the driver takes them first; one whose agent was edited
+    /// meanwhile is retiring, and ends once it has run them.
+    fn acp_attach(self: &Arc<Self>, mut starting: Starting<'_>, agent: AcpAgent, id: &str, open: Open) {
+        let rx = starting.rx.take().expect("a session is attached once");
+        let (in_flight, retire) = starting.handle.counters();
+        let Open {
+            agent_session,
+            started: Started { process, stderr, client, conn },
+            transcript,
+            options,
+        } = open;
         let driver = Driver {
             registry: self.clone(),
             agent,
-            id: id.clone(),
-            agent_session: opened.id,
+            id: id.to_string(),
+            agent_session,
             process,
             conn,
             client,
             stderr,
             transcript,
             translator: Translator::default(),
-            state: State::with_options(opened.options),
-            shared: handle.shared(),
+            state: State::with_options(options),
+            shared: starting.handle.shared(),
             rx,
             in_flight,
             retire,
@@ -626,7 +719,6 @@ impl InjectionRegistry {
             recorded_choice: None,
         };
         tokio::spawn(driver.run());
-        Ok((id, handle))
     }
 }
 
@@ -797,9 +889,12 @@ mod tests {
         assert!(!handle.busy());
         let delivery = handle.deliver(message("hi", &SendOptions::default()));
         assert!(handle.busy(), "sent, not taken yet");
-        assert!(matches!(rx.try_recv(), Ok(driver::Cmd::Deliver(..))));
         drop(delivery);
-        assert!(!handle.busy(), "given up on");
+        assert!(handle.busy(), "its sender gave up waiting; the message is still on its way");
+        let taken = rx.try_recv();
+        assert!(matches!(taken, Ok(driver::Cmd::Deliver(..))));
+        drop(taken);
+        assert!(!handle.busy(), "taken, or dropped with the driver");
     }
 
     /// Configure the stand-in ACP agent the integration tests run as `id`,
@@ -823,10 +918,24 @@ mod tests {
         std::fs::read_to_string(workdir.join("agent-calls.jsonl")).is_ok_and(|calls| calls.contains(&format!("\"method\": \"{method}\"")))
     }
 
+    /// Workdirs under `home`, one per name.
+    fn workdirs(home: &Path, names: &[&str]) -> Vec<PathBuf> {
+        names
+            .iter()
+            .map(|name| {
+                let dir = home.join(name);
+                std::fs::create_dir_all(&dir).expect("workdir");
+                dir
+            })
+            .collect()
+    }
+
     /// An agent that never answers a model switch holds up its own session
-    /// only: the message waiting behind the switch waits outside the spawn
-    /// gate, so another agent's session starts meanwhile; and the switch is
-    /// given up on after its timeout, failing the message and the process.
+    /// only: a message sent to it waits outside the spawn gate, so another
+    /// agent's session starts meanwhile. The switch is given up on after its
+    /// timeout: its message fails, the process goes, and so do the message
+    /// queued behind it and the one on its way — with the error written down
+    /// once.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_agent_that_never_answers_a_model_switch_holds_up_no_other_send() {
         let home = tempfile::tempdir().expect("tempdir");
@@ -834,24 +943,29 @@ mod tests {
         let injections = state.drive.injections.clone();
         configure_fake(&state.paths, home.path(), "stuck", "FAKE_AGENT_SLOW=session/set_config_option=600");
         configure_fake(&state.paths, home.path(), "other", "");
-        let workdir = |name: &str| {
-            let dir = home.path().join(name);
-            std::fs::create_dir_all(&dir).expect("workdir");
-            dir
-        };
-        let (stuck_dir, other_dir) = (workdir("stuck"), workdir("other"));
+        let dirs = workdirs(home.path(), &["stuck", "other"]);
+        let (stuck_dir, other_dir) = (&dirs[0], &dirs[1]);
+        let plain = SendOptions::default();
 
-        let id = injections
-            .acp_start("stuck", &stuck_dir.to_string_lossy(), "hello", &SendOptions::default())
-            .await
-            .expect("started");
+        let id = injections.acp_start("stuck", &stuck_dir.to_string_lossy(), "hello", &plain).await.expect("started");
         until("the first turn", || injections.acp_handle(&id).is_some_and(|handle| !handle.busy())).await;
+        // A turn that waits, with the switch and one more message queued behind it.
+        injections.acp_send(&id, "wait for me", &plain).await.expect("handed over");
+        let running = || {
+            injections
+                .acp_handle(&id)
+                .and_then(|handle| handle.injection())
+                .is_some_and(|injection| injection.state == crate::sessions::InjectionRunState::Running)
+        };
+        until("the long turn", running).await;
         let switch = SendOptions {
             model: Some("openrouter:vendor/big".into()),
             ..SendOptions::default()
         };
-        injections.acp_send(&id, "switch", &switch).await.expect("handed over");
-        until("the switch", || was_sent(&stuck_dir, "session/set_config_option")).await;
+        assert!(injections.acp_send(&id, "switch", &switch).await.expect("handed over").queued);
+        assert!(injections.acp_send(&id, "queued behind", &plain).await.expect("handed over").queued);
+        assert!(injections.acp_handle(&id).expect("a handle").interrupt());
+        until("the switch", || was_sent(stuck_dir, "session/set_config_option")).await;
 
         // The driver is stuck on the switch, so the next message waits for it…
         let behind = tokio::spawn({
@@ -861,18 +975,87 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!behind.is_finished(), "it waits for the driver");
         // …and nobody else does.
-        let other = injections.acp_start("other", &other_dir.to_string_lossy(), "hi", &SendOptions::default()).await;
+        let other = injections.acp_start("other", &other_dir.to_string_lossy(), "hi", &plain).await;
         assert!(other.is_ok(), "{:?}", other.err());
         assert!(!behind.is_finished(), "another agent's session started while the switch was still unanswered");
 
-        // Given up on: the message fails, the process goes, and so does the
-        // message that was waiting for it.
+        // Given up on: the message fails, the process goes, and so does what
+        // was waiting for it.
         let behind = tokio::time::timeout(Duration::from_secs(20), behind).await.expect("answered").expect("joined");
         assert!(behind.is_err(), "the process went before it took the message");
         until("the process to go", || injections.acp_handle(&id).is_some_and(|handle| !handle.alive())).await;
         let (_, file) = locate(&state.paths, &id).await.expect("its transcript");
         let transcript = std::fs::read_to_string(file).expect("transcript");
-        assert!(transcript.contains("did not answer a switch of its model"), "{transcript}");
+        assert_eq!(transcript.matches("did not answer a switch of its model").count(), 1, "{transcript}");
+    }
+
+    /// An agent that hangs while it starts holds up nothing but its own
+    /// session: the spawn gate, which every Claude and Codex send takes too, is
+    /// free meanwhile, another agent's session starts and is sent to, and the
+    /// starting agent is not removed under it. Given up on, the start leaves
+    /// nothing behind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_agent_that_hangs_while_it_starts_holds_up_no_other_send() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let state = crate::api::test_support::state(home.path()).await;
+        let injections = state.drive.injections.clone();
+        configure_fake(&state.paths, home.path(), "hangs", "FAKE_AGENT_SLOW=initialize=600");
+        configure_fake(&state.paths, home.path(), "other", "");
+        let dirs = workdirs(home.path(), &["hangs", "other"]);
+        let plain = SendOptions::default();
+
+        let starting = tokio::spawn({
+            let (injections, dir) = (injections.clone(), dirs[0].to_string_lossy().into_owned());
+            async move { injections.acp_start("hangs", &dir, "hello", &SendOptions::default()).await }
+        });
+        until("initialize", || was_sent(&dirs[0], "initialize")).await;
+
+        let quickly = Duration::from_secs(10);
+        let gate = tokio::time::timeout(Duration::from_secs(1), injections.spawn_gate.lock()).await;
+        assert!(gate.is_ok(), "the spawn gate is held while an agent starts");
+        drop(gate);
+        let other = tokio::time::timeout(quickly, injections.acp_start("other", &dirs[1].to_string_lossy(), "hi", &plain))
+            .await
+            .expect("not held up")
+            .expect("started");
+        until("the other turn", || injections.acp_handle(&other).is_some_and(|handle| !handle.busy())).await;
+        tokio::time::timeout(quickly, injections.acp_send(&other, "again", &plain))
+            .await
+            .expect("not held up")
+            .expect("sent");
+
+        let hangs = state.paths.acp_agent("hangs").expect("configured");
+        let refused = injections.remove_acp_agent(&hangs).await.expect_err("it is starting");
+        assert!(refused.contains("running a turn or has a message waiting"), "{refused}");
+        assert!(!starting.is_finished());
+
+        starting.abort();
+        let _ = starting.await;
+        assert!(!injections.acp_agent_busy("hangs"), "nothing of the start is left");
+        assert_eq!(injections.remove_acp_agent(&hangs).await, Ok(true));
+    }
+
+    /// A stop asked for while a message is on its way to the driver is
+    /// refused, and the message is taken: an archive racing a send loses.
+    #[tokio::test]
+    async fn a_stop_does_not_drop_a_message_on_its_way() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let state = crate::api::test_support::state(home.path()).await;
+        let injections = state.drive.injections.clone();
+        configure_fake(&state.paths, home.path(), "fake", "");
+        let dir = workdirs(home.path(), &["work"]).remove(0);
+        let id = injections
+            .acp_start("fake", &dir.to_string_lossy(), "hello", &SendOptions::default())
+            .await
+            .expect("started");
+        until("the first turn", || injections.acp_handle(&id).is_some_and(|handle| !handle.busy())).await;
+
+        // One thread: the driver reads both only once this test waits.
+        let handle = injections.acp_handle(&id).expect("a handle");
+        let stopping = handle.request_stop().expect("a driver");
+        let delivery = handle.deliver(message("after", &SendOptions::default()));
+        assert!(!stopping.await.expect("answered"), "a message was on its way");
+        assert!(delivery.taken("Fake").await.is_ok(), "and it was taken");
     }
 
     #[tokio::test]

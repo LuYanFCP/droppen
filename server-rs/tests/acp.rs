@@ -983,25 +983,68 @@ async fn a_changed_command_line_or_environment_reaches_the_next_process() {
     wait_for(&server, &id, "the third turn", |detail| texts(detail).len() == 15 && finished(detail)).await;
     assert_eq!(marked_calls(&workdir)[6..], [pair("session/prompt", "mark-two")]);
 
-    // A busy one finishes its turn where it is, and ends after it.
+    // A busy one runs what it had when the edit came, where it started, and
+    // takes nothing more; it ends after that.
+    let replies = |n: usize| {
+        move |detail: &Value| texts(detail).iter().filter(|(_, _, text)| text == "Hello from the agent").count() == n && finished(detail)
+    };
     send("wait for me").await;
     wait_for(&server, &id, "the long turn", |detail| detail["injection"]["state"] == "running").await;
+    send("queued before the edit").await;
     let (status, body) = server.json("PUT", "/api/acp/agents/fake", &json!({"env": "FAKE_AGENT_MARK=mark-three"})).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(server.get_json(&format!("/api/sessions/acp/{id}")).await["injection"]["state"], "running", "not cut short");
+    let (status, body) = server
+        .json("POST", &format!("/api/sessions/acp/{id}/message"), &json!({"text": "after the edit"}))
+        .await;
+    assert_eq!(status, 409, "{body}");
+    assert!(body.contains("restarts with its new settings after this turn"), "{body}");
     server.json("POST", &format!("/api/sessions/acp/{id}/interrupt"), &json!({})).await;
-    wait_for(&server, &id, "the interruption", finished).await;
+    wait_for(&server, &id, "the queued turn", replies(4)).await;
     send("fourth").await;
-    wait_for(&server, &id, "the fourth turn", |detail| {
-        texts(detail).iter().filter(|(_, _, text)| text == "Hello from the agent").count() == 4 && finished(detail)
-    })
-    .await;
+    wait_for(&server, &id, "the fourth turn", replies(5)).await;
     let calls = marked_calls(&workdir);
-    assert_eq!(calls[7], pair("session/prompt", "mark-two"), "the long turn ran where it started");
+    assert_eq!(
+        calls[7..10],
+        [pair("session/prompt", "mark-two"), pair("session/cancel", "mark-two"), pair("session/prompt", "mark-two")],
+        "the long turn and the message queued before the edit ran where they started"
+    );
     assert_eq!(
         calls[calls.len() - 3..],
         [pair("initialize", "mark-three"), pair("session/load", "mark-three"), pair("session/prompt", "mark-three")]
     );
+    server.stop().await;
+}
+
+/// A model's id goes back to the agent as it is, so the list leaves out one
+/// that looks like a key rather than show it altered, and says how many it
+/// left out. One that only contains the value of one of the agent's
+/// variables — as an id names its provider — is listed.
+#[tokio::test]
+async fn a_model_is_left_out_only_when_its_id_looks_like_a_key() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let program = install_fake(home.path());
+    let workdir = workdirs(home.path(), &["work"]).remove(0);
+    let server = TestServer::start_at(home.path(), None).await;
+    configure_env(&server, "fake", &program, "FAKE_AGENT_MARK=openrouter\nFAKE_AGENT_FIRST_MODEL=sk-ant-model-like-a-key").await;
+
+    let models = server.get_json("/api/models?source=acp&acpAgent=fake").await;
+    let ids: Vec<&str> = models["models"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["fake:small", "openrouter:vendor/big"], "{models:#}");
+    assert_eq!(models["hidden"], 1, "{models:#}");
+
+    // A session that runs on it does not write it down either.
+    let id = start(&server, "fake", &workdir, "hi").await;
+    let detail = wait_for(&server, &id, "the turn", finished).await;
+    assert_eq!(detail["cliChoice"]["effort"], "auto", "{detail:#}");
+    assert!(detail["cliChoice"]["model"].is_null(), "{detail:#}");
+    let file = server.paths.acp_sessions().join("fake").join(format!("{id}.jsonl"));
+    assert!(!std::fs::read_to_string(file).unwrap().contains("sk-ant-model-like-a-key"));
+
+    // An agent whose models all show says nothing of hidden ones.
+    configure_env(&server, "plain", &program, "").await;
+    let models = server.get_json("/api/models?source=acp&acpAgent=plain").await;
+    assert!(models.get("hidden").is_none(), "{models:#}");
     server.stop().await;
 }
 

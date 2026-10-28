@@ -519,9 +519,10 @@ pub struct AcpAuthMethod {
 /// The longest error a check keeps, and what an agent says in a session's
 /// error is cut to ([`crate::inject::InjectionRegistry::redact_acp`]).
 pub(crate) const MAX_CHECK_ERROR: usize = 4096;
-/// The longest name, title, version or id of what an agent says it is, in
-/// characters, and the longest description of a way to sign in.
-const MAX_CHECK_WORD: usize = 256;
+/// The longest name, title, version or id of what an agent says it is, and
+/// of a model or effort it offers, in characters; and the longest description
+/// of a way to sign in.
+pub(crate) const MAX_AGENT_WORD: usize = 256;
 const MAX_CHECK_DESCRIPTION: usize = 1024;
 /// The most ways to sign in a check keeps.
 const MAX_AUTH_METHODS: usize = 16;
@@ -534,7 +535,7 @@ impl AcpCheck {
     pub fn ready(resolved: PathBuf, answer: &crate::acp::InitializeResponse, redact: impl Fn(&str) -> String) -> Self {
         let caps = &answer.agent_capabilities;
         let said = |text: &str, cap: usize| crate::accounts::limits::clip(&redact(text), cap);
-        let word = |text: &str| said(text, MAX_CHECK_WORD);
+        let word = |text: &str| said(text, MAX_AGENT_WORD);
         Self {
             resolved_path: Some(resolved.to_string_lossy().into_owned()).into(),
             protocol_version: answer.protocol_version.into(),
@@ -964,13 +965,13 @@ mod tests {
     fn what_a_ready_agent_says_of_itself_is_redacted_and_bounded() {
         let answer = crate::acp::InitializeResponse::read(&serde_json::json!({
             "protocolVersion": 1,
-            "agentInfo": {"name": "agent", "title": "for key-1234567890", "version": "x".repeat(MAX_CHECK_WORD * 2)},
+            "agentInfo": {"name": "agent", "title": "for key-1234567890", "version": "x".repeat(MAX_AGENT_WORD * 2)},
             "authMethods": (0..MAX_AUTH_METHODS * 2).map(|i| serde_json::json!({"id": format!("m{i}"), "name": "key-1234567890"})).collect::<Vec<_>>(),
         }));
         let check = AcpCheck::ready(PathBuf::from("/x/agent"), &answer, |text| text.replace("key-1234567890", "[redacted]"));
         let info = check.agent_info.0.expect("what it is");
         assert_eq!(info.title.0.as_deref(), Some("for [redacted]"));
-        assert_eq!(info.version.0.map(|version| version.chars().count()), Some(MAX_CHECK_WORD));
+        assert_eq!(info.version.0.map(|version| version.chars().count()), Some(MAX_AGENT_WORD));
         let methods = check.auth_methods.0.expect("ways to sign in");
         assert_eq!(methods.len(), MAX_AUTH_METHODS);
         assert!(methods.iter().all(|method| method.name == "[redacted]"), "{methods:?}");

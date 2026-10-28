@@ -2887,6 +2887,10 @@
       "ModelList": {
         "description": "The `GET /api/models` response.",
         "properties": {
+          "hidden": {
+            "description": "How many of an ACP agent's models are left out because their ids look\nlike a credential, so a picker can say why its list is short or empty;\nabsent when none are.",
+            "type": "integer"
+          },
           "models": {
             "description": "Models currently known to the local CLI, freshest first.",
             "items": {

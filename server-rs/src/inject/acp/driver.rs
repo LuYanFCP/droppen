@@ -81,15 +81,15 @@ pub(in crate::inject) struct Handle {
     retire: Arc<AtomicBool>,
 }
 
-/// A message on its way to the driver, counted on its [`Handle`] until the
-/// driver takes it or is gone.
+/// A message on its way to the driver: what its sender waits on.
 pub(super) struct Delivery {
     reply: oneshot::Receiver<Sent>,
-    _counted: InFlight,
 }
 
-/// One message in [`Handle::in_flight`], for as long as this lives.
-struct InFlight(Arc<AtomicUsize>);
+/// One message in [`Handle::in_flight`], for as long as this lives: it goes
+/// with the message, and the driver lets go of it once the message is in its
+/// queue. A driver that is gone drops it with the message.
+pub(in crate::inject) struct InFlight(Arc<AtomicUsize>);
 
 impl Drop for InFlight {
     fn drop(&mut self) {
@@ -139,21 +139,22 @@ impl Handle {
         Arc::ptr_eq(&self.shared, shared)
     }
 
-    /// Send the driver its next message, counted as in flight until it is
-    /// taken. A driver that is gone drops it, which [`Delivery::taken`] says.
+    /// Send the driver its next message, counted as in flight until the
+    /// driver has it in its queue. A driver that is gone drops it, which
+    /// [`Delivery::taken`] says.
     pub(super) fn deliver(&self, message: Message) -> Delivery {
         self.in_flight.fetch_add(1, Ordering::AcqRel);
         let counted = InFlight(self.in_flight.clone());
         let (reply, taken) = oneshot::channel();
-        let _ = self.tx.send(Cmd::Deliver(message, reply));
-        Delivery { reply: taken, _counted: counted }
+        let _ = self.tx.send(Cmd::Deliver(message, reply, counted));
+        Delivery { reply: taken }
     }
 
-    /// Whether a message for this session goes to this process: it is alive,
-    /// and not on its way out for a changed configuration with nothing left
-    /// to do.
+    /// Whether a message for this session goes to this process: it is alive
+    /// and not on its way out. One retiring for a changed configuration runs
+    /// only what it had when the configuration changed.
     pub(super) fn takes_messages(&self) -> bool {
-        self.alive() && (!self.retiring() || self.busy())
+        self.alive() && !self.retiring()
     }
 
     /// Ask the driver to end its process if it has nothing to do; the answer
@@ -238,14 +239,17 @@ impl Handle {
 }
 
 pub(in crate::inject) enum Cmd {
-    Deliver(Message, oneshot::Sender<Sent>),
+    /// A message, the reply its sender waits for, and its count in
+    /// [`Handle::in_flight`].
+    Deliver(Message, oneshot::Sender<Sent>, InFlight),
     Interrupt,
     Queue {
         id: String,
         steer: bool,
         reply: oneshot::Sender<QueueOutcome>,
     },
-    /// End the process if nothing is in flight; `false` when something is.
+    /// End the process if nothing is in flight — no turn, no queue, no message
+    /// on its way; `false` when something is.
     Stop(oneshot::Sender<bool>),
 }
 
@@ -279,7 +283,8 @@ impl Process {
         unsafe {
             let mut info: libc::siginfo_t = std::mem::zeroed();
             let found = libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT);
-            found == 0 && info.si_pid() != 0
+            // macOS reports a stopped child here too: only an exit counts.
+            found == 0 && info.si_pid() != 0 && matches!(info.si_code, libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED)
         }
     }
 
@@ -465,6 +470,11 @@ impl Driver {
         self.registry.poke_feed(Source::Acp, &self.id);
     }
 
+    /// Nothing to do: no turn, no queue, and no message on its way.
+    fn idle(&self) -> bool {
+        !self.state.active && self.state.queue.is_empty() && self.in_flight.load(Ordering::Acquire) == 0
+    }
+
     /// Take this driver's handle out of the registry's map, if it is still
     /// the one there.
     fn leave(&self) {
@@ -478,8 +488,7 @@ impl Driver {
     pub(super) async fn run(mut self) {
         let mut idle_since = Instant::now();
         loop {
-            let idle = !self.state.active && self.state.queue.is_empty() && self.in_flight.load(Ordering::Acquire) == 0;
-            if idle && self.retire.load(Ordering::Acquire) {
+            if self.idle() && self.retire.load(Ordering::Acquire) {
                 // The handle stays, closed, so the session row still says how
                 // the last turn ended; the next message starts a new process.
                 self.exit().await;
@@ -517,7 +526,7 @@ impl Driver {
                 },
                 cmd = self.rx.recv() => match cmd {
                     Some(Cmd::Stop(reply)) => {
-                        let idle = !self.state.active && self.state.queue.is_empty();
+                        let idle = self.idle();
                         if idle {
                             self.exit().await;
                         }
@@ -537,7 +546,7 @@ impl Driver {
                         return;
                     }
                 },
-                _ = tokio::time::sleep_until(idle_deadline.into()), if !self.state.active && self.state.queue.is_empty() => {
+                _ = tokio::time::sleep_until(idle_deadline.into()), if self.idle() => {
                     // Gone from the map first, so the next message starts a new
                     // process instead of finding this one on its way out.
                     self.leave();
@@ -551,10 +560,12 @@ impl Driver {
 
     async fn command(&mut self, cmd: Cmd) -> Result<(), InjectError> {
         match cmd {
-            Cmd::Deliver(message, reply) => {
+            Cmd::Deliver(message, reply, counted) => {
                 let queued = self.state.active || !self.state.queue.is_empty();
                 self.state.queue.push_back(message);
                 self.publish();
+                // In the queue now, where the session's row and its busyness see it.
+                drop(counted);
                 let _ = reply.send(Sent { queued });
             }
             Cmd::Interrupt => {
@@ -597,14 +608,20 @@ impl Driver {
             // at an effort nobody asked for.
             self.registry
                 .note_receipt(Source::Acp, &self.id, &message.id, crate::inject::receipts::ReceiptStatus::Failed);
-            let (Unset::Refused(reason) | Unset::Silent(reason)) = &unset;
-            let said = self.redact(reason);
-            self.transcript.append(&[record("error", json!({ "message": said }))]).await;
-            self.start_turn();
-            self.end_turn(Some(said.clone()), false);
             return match unset {
-                Unset::Refused(_) => Ok(()),
-                Unset::Silent(_) => Err(InjectError::message(said)),
+                Unset::Refused(reason) => {
+                    let said = self.redact(&reason);
+                    self.transcript.append(&[record("error", json!({ "message": said }))]).await;
+                    self.start_turn();
+                    self.end_turn(Some(said), false);
+                    Ok(())
+                }
+                // Said once, by `died`, which this ends in: the turn it ends
+                // with the end of the agent's stderr, and the queue behind it.
+                Unset::Silent(reason) => {
+                    self.start_turn();
+                    Err(InjectError::message(reason))
+                }
             };
         }
         self.record_choice().await;
@@ -683,9 +700,15 @@ impl Driver {
     }
 
     /// Write down which model and effort the session runs on, when that is
-    /// news: what the composer shows for a session it reopens.
+    /// news: what the composer shows for a session it reopens. A value the
+    /// model list would leave out ([`InjectionRegistry::acp_id_shown`]) is
+    /// left out here too.
     async fn record_choice(&mut self) {
-        let current = |category: &str| option_for(&self.state.options, category).and_then(|option| option.current_value.clone());
+        let current = |category: &str| {
+            option_for(&self.state.options, category)
+                .and_then(|option| option.current_value.clone())
+                .filter(|value| self.registry.acp_id_shown(value))
+        };
         let choice = (current(category::MODEL), current(category::THOUGHT_LEVEL));
         if choice == (None, None) || self.recorded_choice.as_ref() == Some(&choice) {
             return;
