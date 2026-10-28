@@ -336,6 +336,10 @@ export interface paths {
         /**
          * ACP agents
          * @description The ACP agents configured on this machine, and the built-in descriptions.
+         *
+         *     A last check's `error` is the agent's own words, the end of its stderr
+         *     included, and is sent only to a caller that may manage this machine;
+         *     another device is told how the check ended and when.
          */
         get: operations["acp_agents"];
         put?: never;
@@ -2899,7 +2903,8 @@ export interface components {
             id: string;
             /**
              * @description What the last check of its command line and environment found; absent
-             *     until one ran.
+             *     until one ran. Its `error` is only for a caller that may manage this
+             *     machine.
              */
             lastCheck?: components["schemas"]["AcpCheck"];
             /** @description What the user calls it. */
@@ -2991,7 +2996,8 @@ export interface components {
             /**
              * @description Why it is not ready: the error, the end of what it wrote to stderr and
              *     the `PATH` it was looked up on, with the agent's variable values and
-             *     anything that looks like a key taken out.
+             *     anything that looks like a key taken out. In a list of the agents, only
+             *     for a caller that may manage this machine.
              */
             error?: string;
             /** @description The ACP version it agreed to. */
@@ -7153,7 +7159,7 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
-            /** @description A turn of the agent is running */
+            /** @description A turn of the agent is running, or a message is waiting for one */
             409: {
                 headers: {
                     [name: string]: unknown;

@@ -172,35 +172,126 @@ pub(in crate::inject) enum Cmd {
     Stop(oneshot::Sender<bool>),
 }
 
+/// The agent process, leading a process group of its own: what it starts — a
+/// helper, a language server, a shell it forked — is stopped with it.
+pub(super) struct Process(Child);
+
+impl Process {
+    pub(super) fn new(child: Child) -> Self {
+        Self(child)
+    }
+
+    /// Wait up to `grace` for it to exit on its own; then [`Process::kill`] it.
+    pub(super) async fn end(&mut self, grace: Duration) {
+        if tokio::time::timeout(grace, self.0.wait()).await.is_err() {
+            self.kill().await;
+        }
+    }
+
+    /// Kill it and everything in its group, and reap it.
+    pub(super) async fn kill(&mut self) {
+        self.kill_group();
+        let _ = tokio::time::timeout(KILL_WAIT, self.0.wait()).await;
+    }
+
+    /// `SIGKILL` its group. Only while it is unreaped: until then its pid, and
+    /// so the group's id, cannot be anybody else's.
+    fn kill_group(&self) {
+        if let Some(pid) = self.0.id() {
+            crate::procs::signal_group(pid, libc::SIGKILL);
+        }
+    }
+}
+
+impl Drop for Process {
+    /// A process dropped before it was reaped — by a check whose request was
+    /// cancelled, or a session the server stopped with — takes its group with
+    /// it.
+    fn drop(&mut self) {
+        self.kill_group();
+    }
+}
+
+/// How long a killed agent is waited for.
+const KILL_WAIT: Duration = Duration::from_secs(5);
+/// How long the end of the agent's stderr is waited for once it is gone: a
+/// failure is reported with what it said last, which can still be in the pipe.
+const STDERR_SETTLE: Duration = Duration::from_secs(2);
+
 /// The last [`STDERR_TAIL`] bytes the agent wrote to stderr.
-#[derive(Clone, Default)]
-pub(super) struct StderrTail(Arc<Mutex<VecDeque<u8>>>);
+#[derive(Clone)]
+pub(super) struct StderrTail {
+    kept: Arc<Mutex<Ring>>,
+    /// `true` once stderr is closed.
+    ended: tokio::sync::watch::Receiver<bool>,
+}
+
+/// The bytes [`StderrTail`] keeps.
+#[derive(Debug, Default)]
+struct Ring {
+    bytes: VecDeque<u8>,
+    /// Bytes were dropped off the front: the first line is the end of one.
+    wrapped: bool,
+}
+
+impl Ring {
+    fn push(&mut self, read: &[u8]) {
+        self.bytes.extend(read);
+        let excess = self.bytes.len().saturating_sub(STDERR_TAIL);
+        if excess > 0 {
+            self.bytes.drain(..excess);
+            self.wrapped = true;
+        }
+    }
+
+    /// The last few non-empty lines. A line the ring cut is left out: the
+    /// start of a value it held is gone, so the rest of it could not be
+    /// recognised to be redacted.
+    fn text(&self) -> String {
+        let bytes: Vec<u8> = self.bytes.iter().copied().collect();
+        let text = String::from_utf8_lossy(&bytes);
+        let whole = if self.wrapped {
+            text.split_once('\n').map_or("", |(_, rest)| rest)
+        } else {
+            &text
+        };
+        let lines: Vec<&str> = whole.lines().filter(|line| !line.trim().is_empty()).collect();
+        lines[lines.len().saturating_sub(8)..].join("\n")
+    }
+}
 
 impl StderrTail {
     pub(super) fn follow(mut stderr: tokio::process::ChildStderr) -> Self {
-        let tail = Self::default();
-        let kept = tail.0.clone();
+        let (ended_tx, ended) = tokio::sync::watch::channel(false);
+        let tail = Self {
+            kept: Arc::default(),
+            ended,
+        };
+        let kept = tail.kept.clone();
         tokio::spawn(async move {
             let mut buffer = [0u8; 4096];
             while let Ok(read) = stderr.read(&mut buffer).await {
                 if read == 0 {
-                    return;
+                    break;
                 }
-                let mut kept = kept.lock().unwrap();
-                kept.extend(&buffer[..read]);
-                let excess = kept.len().saturating_sub(STDERR_TAIL);
-                kept.drain(..excess);
+                kept.lock().unwrap().push(&buffer[..read]);
             }
+            let _ = ended_tx.send(true);
         });
         tail
     }
 
     /// The last few non-empty lines.
     pub(super) fn text(&self) -> String {
-        let bytes: Vec<u8> = self.0.lock().unwrap().iter().copied().collect();
-        let text = String::from_utf8_lossy(&bytes);
-        let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
-        lines[lines.len().saturating_sub(8)..].join("\n")
+        self.kept.lock().unwrap().text()
+    }
+
+    /// [`StderrTail::text`] once stderr is closed, or [`STDERR_SETTLE`] has
+    /// passed: for a process that is gone, what it wrote last.
+    pub(super) async fn settled(&self) -> String {
+        let mut ended = self.ended.clone();
+        let _ = tokio::time::timeout(STDERR_SETTLE, ended.wait_for(|ended| *ended)).await;
+        self.text()
     }
 }
 
@@ -243,7 +334,7 @@ pub(super) struct Driver {
     /// The agent's id for it: what every request to the agent names, and what
     /// its notifications carry.
     pub(super) agent_session: String,
-    pub(super) child: Child,
+    pub(super) process: Process,
     pub(super) conn: Conn,
     pub(super) client: Arc<Client>,
     pub(super) stderr: StderrTail,
@@ -381,7 +472,7 @@ impl Driver {
             // at an effort nobody asked for.
             self.registry
                 .note_receipt(Source::Acp, &self.id, &message.id, crate::inject::receipts::ReceiptStatus::Failed);
-            let message = self.registry.redact(&reason);
+            let message = self.redact(&reason);
             self.transcript.append(&[record("error", json!({ "message": message }))]).await;
             self.start_turn();
             self.end_turn(Some(message), false);
@@ -444,7 +535,9 @@ impl Driver {
                 self.options_changed(options);
             }
         }
-        self.publish();
+        // Published with the turn's start or its failure, not here: the message
+        // is off the queue and the turn not started, and the session must not
+        // look idle in between — the agent could be removed under it.
         Ok(())
     }
 
@@ -480,7 +573,7 @@ impl Driver {
                 (None, stop == "cancelled")
             }
             Err(error) => {
-                let message = self.registry.redact(&error);
+                let message = self.redact(&error);
                 records.push(record("error", json!({ "message": message })));
                 (Some(message), false)
             }
@@ -523,14 +616,18 @@ impl Driver {
         );
     }
 
+    /// What the agent said, fit to be stored and shown.
+    fn redact(&self, text: &str) -> String {
+        self.registry.redact_acp(&self.agent, text)
+    }
+
     /// The process went away, or stopped answering: say so, and fail what
     /// was waiting for it.
     async fn died(&mut self, reason: &str) {
         self.client.kill_all();
-        let _ = self.child.start_kill();
-        let _ = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
-        let tail = self.stderr.text();
-        let message = self.registry.redact(&if tail.is_empty() {
+        self.process.kill().await;
+        let tail = self.stderr.settled().await;
+        let message = self.redact(&if tail.is_empty() {
             reason.to_string()
         } else {
             format!("{reason}\n{tail}")
@@ -562,9 +659,28 @@ impl Driver {
         self.rx.close();
         self.client.kill_all();
         self.conn.close().await;
-        if tokio::time::timeout(Duration::from_secs(10), self.child.wait()).await.is_err() {
-            let _ = self.child.start_kill();
-            let _ = self.child.wait().await;
-        }
+        self.process.end(Duration::from_secs(10)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_line_the_stderr_ring_cut_is_left_out() {
+        let mut ring = Ring::default();
+        ring.push(b"first\n\nsecond\n");
+        assert_eq!(ring.text(), "first\nsecond", "nothing cut: every line");
+
+        // 28 bytes, then enough to push all but the last 10 of them out.
+        let mut ring = Ring::default();
+        ring.push(b"token tok-very-secret-value\n");
+        let mut rest = vec![b'x'; STDERR_TAIL - 21];
+        rest.extend_from_slice(b"\nlast line\n");
+        ring.push(&rest);
+        let text = ring.text();
+        assert!(!text.contains("value"), "the cut line's end is not shown: {text}");
+        assert!(text.ends_with("xx\nlast line"), "{text}");
     }
 }

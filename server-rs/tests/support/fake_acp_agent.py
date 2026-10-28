@@ -7,13 +7,16 @@ Its sessions offer a model and a reasoning effort as configuration options,
 as real agents' do. Everything it is asked is appended to `agent-calls.jsonl` in its
 working directory — or to `$FAKE_AGENT_LOG`, which a probe's scratch directory
 needs — so a test can read what it was sent. A prompt containing "wait" holds
-its turn open until it is cancelled.
+its turn open until it is cancelled. `FAKE_AGENT_SLOW=<method>=<seconds>,...`
+makes it take that long over a request, after writing it down, so a test can
+act while the request is in flight; `FAKE_AGENT_TITLE` is what it calls itself.
 """
 import json
 import os
 from pathlib import Path
 import sys
 import threading
+import time
 
 # Started with the arguments the settings give it, and only those.
 if sys.argv[1:] != ["--acp", "--stdio"]:
@@ -32,6 +35,10 @@ MODELS = [("fake:small", "Small"), ("openrouter:vendor/big", "Big")]
 EFFORTS = ["auto", "low", "high"]
 # Each session's model and effort, as set_config_option leaves them.
 runtime = {}
+slow = {
+    method: float(seconds)
+    for method, seconds in (pair.split("=", 1) for pair in os.environ.get("FAKE_AGENT_SLOW", "").split(",") if pair)
+}
 
 
 def config_options(session):
@@ -97,6 +104,7 @@ for raw in sys.stdin:
     method = request.get("method")
     params = request.get("params", {})
     log({"method": method, "params": params, "mark": os.environ.get("FAKE_AGENT_MARK")})
+    time.sleep(slow.get(method, 0))
     if method == "session/cancel":
         done = waiting.pop(params.get("sessionId"), None)
         if done:
@@ -105,7 +113,7 @@ for raw in sys.stdin:
         answer(request, {"protocolVersion": 1, "agentCapabilities": {
             "loadSession": True, "sessionCapabilities": {"close": {}},
             "promptCapabilities": {"image": True, "embeddedContext": True}},
-            "agentInfo": {"name": "fake-agent", "title": "Fake agent", "version": "0.1.0"}})
+            "agentInfo": {"name": "fake-agent", "title": os.environ.get("FAKE_AGENT_TITLE", "Fake agent"), "version": "0.1.0"}})
     elif method == "session/new":
         session = "f00dfeed0123456789abcdef01234567"
         runtime.pop(session, None)

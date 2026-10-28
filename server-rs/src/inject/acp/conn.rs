@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Map, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{mpsc, oneshot};
 
@@ -262,10 +262,59 @@ impl Conn {
     }
 }
 
+/// The longest line read from an agent: far more than a message carries — a
+/// whole file the agent writes through the client is one line — and a bound on
+/// what a program that is not speaking ACP can make this server hold.
+const MAX_LINE: usize = 64 * 1024 * 1024;
+
+/// The agent's stdout, a line at a time, none longer than `max`.
+struct Lines<R> {
+    reader: BufReader<R>,
+    max: usize,
+    line: Vec<u8>,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> Lines<R> {
+    fn new(output: R, max: usize) -> Self {
+        Self {
+            reader: BufReader::new(output),
+            max,
+            line: Vec::new(),
+        }
+    }
+
+    /// The next line, without its line ending; `None` at the end of the
+    /// output. A line longer than `max` ends it too: nothing after it can be
+    /// trusted to be in step, and holding it would be unbounded. A line that is
+    /// not UTF-8 is skipped, as anything else that is not the protocol is.
+    async fn next(&mut self) -> Option<String> {
+        loop {
+            self.line.clear();
+            let read = (&mut self.reader)
+                .take(self.max as u64 + 1)
+                .read_until(b'\n', &mut self.line)
+                .await
+                .ok()?;
+            if read == 0 {
+                return None;
+            }
+            if self.line.len() > self.max && !self.line.ends_with(b"\n") {
+                tracing::warn!("an ACP agent wrote a line longer than {} bytes; reading no more of it", self.max);
+                return None;
+            }
+            let end = self.line.strip_suffix(b"\n").unwrap_or(&self.line);
+            let end = end.strip_suffix(b"\r").unwrap_or(end);
+            if let Ok(line) = std::str::from_utf8(end) {
+                return Some(line.to_string());
+            }
+        }
+    }
+}
+
 /// Read everything the agent writes; see the module note.
 async fn read(stdout: ChildStdout, writer: Writer, pending: Arc<Mutex<Pending>>, events: mpsc::UnboundedSender<Event>, client: Arc<Client>) {
-    let mut lines = BufReader::new(stdout).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    let mut lines = Lines::new(stdout, MAX_LINE);
+    while let Some(line) = lines.next().await {
         let Some(message) = parse(&line) else { continue };
         match (message.get("method").and_then(Value::as_str), message.get("id")) {
             // A request this client is to answer.
@@ -322,5 +371,20 @@ mod tests {
         assert!(parse("Loading plugins...").is_none());
         assert!(parse("[1, 2]").is_none());
         assert!(parse("{not json").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_line_too_long_ends_the_output_and_one_that_is_not_text_is_skipped() {
+        let output: &[u8] = b"one\r\n\xff\xfe\ntwo\nlast";
+        let mut lines = Lines::new(output, 8);
+        assert_eq!(lines.next().await.as_deref(), Some("one"));
+        assert_eq!(lines.next().await.as_deref(), Some("two"), "not UTF-8: skipped");
+        assert_eq!(lines.next().await.as_deref(), Some("last"), "the end of the output ends a line");
+        assert_eq!(lines.next().await, None);
+
+        let output: &[u8] = b"12345678\n123456789\nafter\n";
+        let mut lines = Lines::new(output, 8);
+        assert_eq!(lines.next().await.as_deref(), Some("12345678"), "at the bound: kept");
+        assert_eq!(lines.next().await, None, "past it: the end");
     }
 }

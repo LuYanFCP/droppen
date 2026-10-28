@@ -24,7 +24,8 @@
 //! recorded on every session, so a session is reopened by the agent it ran on
 //! and no other. Removing an agent leaves its sessions alone: they stay listed
 //! and readable, and cannot be continued until an agent with that id is
-//! configured again. It is refused while a turn of the agent is running.
+//! configured again. It is refused while a turn of the agent is running or a
+//! message is waiting for one.
 //!
 //! A **check** ([`AcpCheck`], `POST /api/acp/agents/{id}/check`) starts the
 //! agent with its environment, sends `initialize`, reads what it says it is and
@@ -50,6 +51,7 @@ use crate::accounts::store::{parse_env_block, EnvVar};
 use crate::api::error::ApiError;
 use crate::api::extract::{ApiJson, ApiPath};
 use crate::api::{ApiRouter, AppState, SendResult};
+use crate::auth::Manages;
 use crate::db::scope;
 use crate::openapi_ext::{ExtraResponses, Optional};
 use crate::process_env::{clean_env_bare, resolve_on_path, Env};
@@ -168,13 +170,11 @@ impl AcpAgent {
         }
     }
 
-    /// The values a check of this agent must not show, longest first: its
-    /// variables' values, which are what an API key looks like. Short ones are
-    /// left alone; they would blank out ordinary words.
-    pub fn secrets(&self) -> Vec<&str> {
-        let mut values: Vec<&str> = self.env.iter().map(|var| var.value.as_str()).filter(|value| value.len() >= 4).collect();
-        values.sort_by_key(|value| std::cmp::Reverse(value.len()));
-        values
+    /// `text` with this agent's variables' values taken out
+    /// ([`crate::process_env::redact_values`]): they are what an API key looks
+    /// like, and anything it says may repeat one.
+    pub fn without_values(&self, text: &str) -> String {
+        crate::process_env::redact_values(text, self.env.iter().map(|var| var.value.as_str()))
     }
 
     /// Keep `check` as this agent's last, unless its command line or
@@ -331,6 +331,11 @@ pub fn update(paths: &Paths, id: &str, patch: &AcpAgentUpdate) -> Result<AcpAgen
         if command.len() > MAX_COMMAND || command.contains(['\n', '\r', '\0']) {
             return Err("the agent's executable must be a single path or command name".into());
         }
+        // A relative path would be found from whatever directory the agent is
+        // started in, which is the session's.
+        if command.contains('/') && !command.starts_with('/') {
+            return Err("the agent's executable must be an absolute path, or a command name to look up on its PATH".into());
+        }
         next.command = command.to_string();
     }
     if let Some(args) = patch.args.0.as_deref() {
@@ -406,9 +411,21 @@ pub struct AcpAgentInfo {
     #[serde(default, skip_serializing_if = "Optional::is_none")]
     pub note: Optional<String>,
     /// What the last check of its command line and environment found; absent
-    /// until one ran.
+    /// until one ran. Its `error` is only for a caller that may manage this
+    /// machine.
     #[serde(default, skip_serializing_if = "Optional::is_none")]
     pub last_check: Optional<AcpCheck>,
+}
+
+impl AcpAgentInfo {
+    /// This, for a caller that may not manage the machine: how the last check
+    /// ended, without what the agent said.
+    fn without_check_error(mut self) -> Self {
+        if let Some(check) = self.last_check.0.as_mut() {
+            check.error = None.into();
+        }
+        self
+    }
 }
 
 /// How a check of an agent ended.
@@ -450,7 +467,8 @@ pub struct AcpCheck {
     pub auth_methods: Optional<Vec<AcpAuthMethod>>,
     /// Why it is not ready: the error, the end of what it wrote to stderr and
     /// the `PATH` it was looked up on, with the agent's variable values and
-    /// anything that looks like a key taken out.
+    /// anything that looks like a key taken out. In a list of the agents, only
+    /// for a caller that may manage this machine.
     #[serde(default, skip_serializing_if = "Optional::is_none")]
     pub error: Optional<String>,
 }
@@ -502,11 +520,22 @@ pub struct AcpAuthMethod {
 
 /// The longest error a check keeps.
 const MAX_CHECK_ERROR: usize = 4096;
+/// The longest name, title, version or id of what an agent says it is, in
+/// characters, and the longest description of a way to sign in.
+const MAX_CHECK_WORD: usize = 256;
+const MAX_CHECK_DESCRIPTION: usize = 1024;
+/// The most ways to sign in a check keeps.
+const MAX_AUTH_METHODS: usize = 16;
 
 impl AcpCheck {
-    /// An agent that started and answered `initialize` with `answer`.
-    pub fn ready(resolved: PathBuf, answer: &crate::acp::InitializeResponse) -> Self {
+    /// An agent that started and answered `initialize` with `answer`. What it
+    /// says of itself goes through `redact`, as its errors do, and is cut short
+    /// where it is longer than any name: it is kept, and shown to whoever
+    /// lists the agents.
+    pub fn ready(resolved: PathBuf, answer: &crate::acp::InitializeResponse, redact: impl Fn(&str) -> String) -> Self {
         let caps = &answer.agent_capabilities;
+        let said = |text: &str, cap: usize| crate::accounts::limits::clip(&redact(text), cap);
+        let word = |text: &str| said(text, MAX_CHECK_WORD);
         Self {
             resolved_path: Some(resolved.to_string_lossy().into_owned()).into(),
             protocol_version: answer.protocol_version.into(),
@@ -514,9 +543,9 @@ impl AcpCheck {
                 .agent_info
                 .as_ref()
                 .map(|info| AcpAgentIdentity {
-                    name: info.name.clone(),
-                    title: info.title.clone().into(),
-                    version: info.version.clone().into(),
+                    name: word(&info.name),
+                    title: info.title.as_deref().map(word).into(),
+                    version: info.version.as_deref().map(word).into(),
                 })
                 .into(),
             capabilities: Some(AcpCapabilities {
@@ -533,10 +562,11 @@ impl AcpCheck {
                     answer
                         .auth_methods
                         .iter()
+                        .take(MAX_AUTH_METHODS)
                         .map(|method| AcpAuthMethod {
-                            id: method.id.clone(),
-                            name: method.name.clone(),
-                            description: method.description.clone().into(),
+                            id: word(&method.id),
+                            name: word(&method.name),
+                            description: method.description.as_deref().map(|text| said(text, MAX_CHECK_DESCRIPTION)).into(),
                         })
                         .collect()
                 })
@@ -607,11 +637,18 @@ pub struct AcpAgentUpdate {
 }
 
 /// The ACP agents configured on this machine, and the built-in descriptions.
+///
+/// A last check's `error` is the agent's own words, the end of its stderr
+/// included, and is sent only to a caller that may manage this machine;
+/// another device is told how the check ended and when.
 #[api(id = "acp_agents", group = "acp", summary = "ACP agents")]
-pub async fn acp_agents(State(state): State<AppState>) -> Json<AcpAgentList> {
+pub async fn acp_agents(State(state): State<AppState>, #[api(skip)] Manages(manages): Manages) -> Json<AcpAgentList> {
     let env = clean_env_bare();
     Json(AcpAgentList {
-        agents: agents(&state.paths).iter().map(AcpAgent::info).collect(),
+        agents: agents(&state.paths)
+            .iter()
+            .map(|agent| if manages { agent.info() } else { agent.info().without_check_error() })
+            .collect(),
         presets: presets().iter().map(|preset| preset.looked_up(&env)).collect(),
     })
 }
@@ -638,17 +675,11 @@ pub async fn delete_acp_agent(State(state): State<AppState>, ApiPath(id): ApiPat
     let Some(agent) = agent(&state.paths, &id) else {
         return Err(ApiError::not_found("no such ACP agent"));
     };
-    if state.drive.injections.acp_agent_busy(&id) {
-        return Err(ApiError::conflict(format!(
-            "{} is running a turn; stop it, or let it finish, then remove the agent",
-            agent.name
-        )));
+    match state.drive.injections.remove_acp_agent(&agent).await {
+        Ok(true) => Ok(Json(SendResult { accepted: true })),
+        Ok(false) => Err(ApiError::not_found("no such ACP agent")),
+        Err(busy) => Err(ApiError::conflict(busy)),
     }
-    if !remove(&state.paths, &id) {
-        return Err(ApiError::not_found("no such ACP agent"));
-    }
-    state.drive.injections.forget_acp_options(&id);
-    Ok(Json(SendResult { accepted: true }))
 }
 
 /// Check an ACP agent: start it with its environment, send `initialize`, read
@@ -688,7 +719,12 @@ pub fn describe(reg: &mut ExtraResponses) {
     )
     .describe("DELETE", "/api/acp/agents/{id}", 200, "The agent is gone; its sessions stay")
     .error("DELETE", "/api/acp/agents/{id}", 404, "No such ACP agent")
-    .error("DELETE", "/api/acp/agents/{id}", 409, "A turn of the agent is running")
+    .error(
+        "DELETE",
+        "/api/acp/agents/{id}",
+        409,
+        "A turn of the agent is running, or a message is waiting for one",
+    )
     .describe(
         "POST",
         "/api/acp/agents/{id}/check",
@@ -828,7 +864,12 @@ mod tests {
         assert!(update(&paths, "x", &patch(Some("/x"), None, Some("not a pair"))).is_err());
         assert!(update(&paths, "x", &patch(Some("agent\nrm -rf /"), None, None)).is_err());
         assert!(update(&paths, "x", &patch(Some("/x"), Some(&["a\nb"]), None)).is_err());
+        for relative in ["bin/agent", "./agent", "~/bin/agent"] {
+            assert!(update(&paths, "x", &patch(Some(relative), None, None)).is_err(), "{relative}");
+        }
         assert!(agents(&paths).is_empty(), "a refusal stores nothing");
+        update(&paths, "y", &patch(Some("agent"), None, None)).expect("a command name is looked up on PATH");
+        assert!(remove(&paths, "y"));
         update(&paths, "x", &patch(Some("/x"), None, None)).expect("saved");
         assert!(update(&paths, "x", &patch(Some(""), None, None)).is_err(), "removing is a delete, not an empty executable");
         assert_eq!(agent(&paths, "x").unwrap().command, "/x");
@@ -881,7 +922,71 @@ mod tests {
             ],
             last_check: None,
         };
-        assert_eq!(agent.secrets(), vec!["secret-value-2", "secret-value"], "the longest first, the short ones left alone");
+        assert_eq!(
+            agent.without_values("ab: secret-value-2, then secret-value"),
+            "ab: [redacted], then [redacted]",
+            "the longest first, the short ones left alone"
+        );
+    }
+
+    /// What the agent says of itself is kept and listed: it is redacted as
+    /// its errors are, and no longer than a name.
+    #[test]
+    fn what_a_ready_agent_says_of_itself_is_redacted_and_bounded() {
+        let answer = crate::acp::InitializeResponse::read(&serde_json::json!({
+            "protocolVersion": 1,
+            "agentInfo": {"name": "agent", "title": "for key-1234567890", "version": "x".repeat(MAX_CHECK_WORD * 2)},
+            "authMethods": (0..MAX_AUTH_METHODS * 2).map(|i| serde_json::json!({"id": format!("m{i}"), "name": "key-1234567890"})).collect::<Vec<_>>(),
+        }));
+        let check = AcpCheck::ready(PathBuf::from("/x/agent"), &answer, |text| text.replace("key-1234567890", "[redacted]"));
+        let info = check.agent_info.0.expect("what it is");
+        assert_eq!(info.title.0.as_deref(), Some("for [redacted]"));
+        assert_eq!(info.version.0.map(|version| version.chars().count()), Some(MAX_CHECK_WORD));
+        let methods = check.auth_methods.0.expect("ways to sign in");
+        assert_eq!(methods.len(), MAX_AUTH_METHODS);
+        assert!(methods.iter().all(|method| method.name == "[redacted]"), "{methods:?}");
+    }
+
+    /// A last check's error is the agent's own words: it is listed for a
+    /// caller that may manage this machine — this computer, or a device the
+    /// bridge says may — and only how the check ended for another device.
+    #[tokio::test]
+    async fn a_check_error_is_listed_only_for_a_caller_that_may_manage_the_machine() {
+        use tower_service::Service;
+
+        async fn last_check(router: &mut gotcha::axum::Router, headers: &[(&str, &str)]) -> serde_json::Value {
+            let mut request = gotcha::axum::http::Request::get("/api/acp/agents").header("host", "127.0.0.1:8700");
+            for (name, value) in headers {
+                request = request.header(*name, *value);
+            }
+            let mut request = request.body(gotcha::axum::body::Body::empty()).expect("request");
+            let peer: std::net::SocketAddr = "127.0.0.1:50000".parse().expect("peer");
+            request.extensions_mut().insert(gotcha::axum::extract::ConnectInfo(peer));
+            let response = router.call(request).await.expect("infallible");
+            assert_eq!(response.status(), 200);
+            let body = gotcha::axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
+            let list: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            list["agents"][0]["lastCheck"].clone()
+        }
+
+        let home = tempfile::tempdir().expect("tempdir");
+        let (state, mut router) = crate::api::test_support::guarded_router(home.path(), Some(false)).await;
+        update(&state.paths, "x", &patch(Some("/x/agent"), None, None)).expect("saved");
+        let failed = AcpCheck::ended(AcpCheckState::Failed, Some("the agent's own words".into()));
+        assert!(agent(&state.paths, "x").unwrap().record_check(&state.paths, &failed));
+
+        assert_eq!(last_check(&mut router, &[]).await["error"], "the agent's own words", "this computer");
+        let credential = state.drive.auth.internal_credential().to_string();
+        let device = [
+            (crate::agent::bridge::CREDENTIAL_HEADER, credential.as_str()),
+            (crate::agent::bridge::DEVICE_HEADER, "d-1"),
+        ];
+        let plain = last_check(&mut router, &device).await;
+        assert_eq!(plain["state"], "failed", "{plain:#}");
+        assert!(plain["checkedAt"].is_string(), "{plain:#}");
+        assert!(plain.get("error").is_none(), "another device: {plain:#}");
+        let manager = last_check(&mut router, &[device[0], device[1], (crate::agent::bridge::POSTURE_HEADER, "1")]).await;
+        assert_eq!(manager["error"], "the agent's own words", "a device that may manage it");
     }
 
     #[test]
