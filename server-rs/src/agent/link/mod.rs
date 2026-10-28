@@ -213,6 +213,7 @@ mod tests {
     use super::local::*;
     use super::mail::*;
     use super::*;
+    use super::admit::ChainErrorExt;
     use rh_proto::chain::{genesis_draft, recovery_keys, ChainClock, ChainState, DeviceInfo, RecoveryKey, RecoveryKeys};
     use rh_proto::identity::{fingerprint, MachineIdentity};
 
@@ -2291,7 +2292,7 @@ mod tests {
         a.shared.save();
         let mut keys = crate::aggregator::keys::HostKeys::load(&a.shared.paths, "a-1", "m-1").unwrap();
         keys.put("m-2", 0, &[2; 32]).unwrap();
-        let refused = startable(&a.shared.paths).err().expect("a removed machine does not start");
+        let refused = a.shared.paths.startable().err().expect("a removed machine does not start");
         assert!(refused.contains("removed"), "{refused}");
         assert!(!crate::aggregator::dir(&a.shared.paths).exists(), "the other devices' keys are gone");
     }
@@ -2606,9 +2607,9 @@ mod tests {
 
     #[test]
     fn conflicts_are_told_apart_from_refused_entries() {
-        assert!(is_conflict(&ChainError::Fork { seq: 3 }));
-        assert!(is_conflict(&ChainError::GenesisMismatch));
-        assert!(!is_conflict(&ChainError::TooEarly { seq: 3, ready_ms: 1 }));
-        assert!(!is_conflict(&ChainError::BadSignature { seq: 3 }));
+        assert!(ChainError::Fork { seq: 3 }.is_conflict());
+        assert!(ChainError::GenesisMismatch.is_conflict());
+        assert!(!ChainError::TooEarly { seq: 3, ready_ms: 1 }.is_conflict());
+        assert!(!ChainError::BadSignature { seq: 3 }.is_conflict());
     }
 }

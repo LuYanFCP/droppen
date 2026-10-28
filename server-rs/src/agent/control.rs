@@ -4,7 +4,7 @@
 //! - at boot it starts the link when `agent/state.json` is there (an instance
 //!   that never enrolled starts nothing);
 //! - [`Control::enroll`] runs the same enrollment `agent enroll` does
-//!   ([`super::enroll::begin`]) in this process and starts the link at once,
+//!   ([`Paths::begin_enrollment`]) in this process and starts the link at once,
 //!   which then follows the chain until a device adds the machine;
 //! - the link stops itself when this machine is removed from the account
 //!   ([`super::link`]), and [`Control::status`] says so;
@@ -87,7 +87,7 @@ pub struct AgentStatus {
     pub changes: Vec<Alarm>,
     /// Renewing this machine's identity key: a staged key (and the code to
     /// type, for a high-assurance renewal), a renewal just taken, or one made
-    /// elsewhere ([`super::rotation::status`]).
+    /// elsewhere ([`Paths::rotation_status`]).
     pub rotation: super::rotation::Status,
 }
 
@@ -120,10 +120,10 @@ impl AgentStatus {
     }
 
     /// [`AgentStatus::of`], with the identity renewal as this instance's
-    /// files say ([`super::rotation::status`]).
+    /// files say ([`Paths::rotation_status`]).
     pub fn of_instance(paths: &Paths, st: &AgentState) -> Self {
         Self {
-            rotation: super::rotation::status(paths, Some(st), super::now_ms()),
+            rotation: paths.rotation_status(Some(st), super::now_ms()),
             ..Self::of(st)
         }
     }
@@ -257,12 +257,12 @@ impl Control {
         crate::aggregator::sweep_deleted(&self.paths);
         // Adding this device again under a new identity, cut short by a
         // crash: finished before anything starts.
-        if let Err(error) = super::rotation::finish_re_enroll(&self.paths) {
+        if let Err(error) = self.paths.finish_re_enroll() {
             tracing::error!(%error, "cannot finish adding this device again under a new identity");
         }
         // A dispute statement the hub has not taken yet: delivered again
         // (it outlives the enrollment it disputes).
-        super::dispute::deliver(&self.paths);
+        self.paths.deliver_disputes();
         let _ = self.env.set(env);
     }
 
@@ -310,8 +310,8 @@ impl Control {
         }
         // An install still enrolled at the legacy apex hub moves to the
         // canonical `api.` origin once, if the hub takes its sign-in
-        // ([`super::migrate_hub`]).
-        super::migrate_hub(&self.paths).await.map_err(ControlError::Failed)?;
+        // ([`Paths::migrate_hub`]).
+        self.paths.migrate_hub().await.map_err(ControlError::Failed)?;
         let started = super::link::start(&self.paths, env, self.live.clone(), self.restart_hook()).map_err(ControlError::Failed)?;
         *self.running.lock().expect("running") = Some(started);
         Ok(())
@@ -394,8 +394,8 @@ impl Control {
         self.stop_locked().await;
         // A seed a renewal retired (or one archived) never signs up again:
         // a fresh one then (`docs/host-identity-rotation.md` §3.8).
-        let begun = match super::rotation::identity_for_enrolling(&self.paths) {
-            Ok(identity) => super::enroll::begin(&self.paths, &identity, code, hub_url)
+        let begun = match self.paths.identity_for_enrolling() {
+            Ok(identity) => self.paths.begin_enrollment(&identity, code, hub_url)
                 .await
                 .map_err(ControlError::Begin),
             Err(error) => Err(ControlError::Failed(error)),
@@ -445,7 +445,7 @@ impl Control {
         }
         tracing::warn!("no device added this machine within the enrollment code's lifetime; forgetting the enrollment");
         self.stop_locked().await;
-        if let Err(error) = forget_enrollment(&self.paths) {
+        if let Err(error) = self.paths.forget_agent_enrollment() {
             tracing::error!(%error, "cannot forget the expired enrollment");
         }
     }
@@ -465,7 +465,7 @@ impl Control {
             return Ok(false);
         }
         self.stop_locked().await;
-        forget_enrollment(&self.paths).map_err(ControlError::Failed)?;
+        self.paths.forget_agent_enrollment().map_err(ControlError::Failed)?;
         Ok(true)
     }
 
@@ -491,7 +491,7 @@ impl Control {
 
     /// Before a sign-in shows this computer's keys: when the seed in use is
     /// one it must never use again — archived, or replaced elsewhere on the
-    /// chain it knows ([`super::rotation::seed_retired`]: never its own
+    /// chain it knows ([`Paths::seed_retired`]: never its own
     /// renewal to a key it staged) — it never signs up again:
     /// the link stops, the seed is archived, the old enrollment forgotten and
     /// a fresh seed made ([`Control::re_enroll_fresh`]). `true` when that happened.
@@ -502,23 +502,23 @@ impl Control {
             Ok(None) => return Ok(false),
             Err(error) => return Err(ControlError::Failed(error)),
         };
-        if !super::rotation::seed_retired(&self.paths, &current) {
+        if !self.paths.seed_retired(&current) {
             return Ok(false);
         }
         self.stop_locked().await;
-        super::rotation::re_enroll_fresh(&self.paths, super::now_ms()).map_err(ControlError::Failed)?;
+        self.paths.re_enroll_fresh(super::now_ms()).map_err(ControlError::Failed)?;
         Ok(true)
     }
 
     /// "Add this device again with a new identity": for a device left holding
     /// only a retired identity key (`link.rotation.state` `foreign`), stop
     /// the link, archive the seed, forget the enrollment and make a fresh
-    /// seed ([`super::rotation::re_enroll_fresh`]). The new identity; the
+    /// seed ([`Paths::re_enroll_fresh`]). The new identity; the
     /// instance is then not enrolled, waiting for a registration code.
     pub async fn re_enroll_fresh(&self) -> Result<MachineIdentity, ControlError> {
         let _gate = self.gate.lock().await;
         self.stop_locked().await;
-        super::rotation::re_enroll_fresh(&self.paths, super::now_ms()).map_err(ControlError::Failed)
+        self.paths.re_enroll_fresh(super::now_ms()).map_err(ControlError::Failed)
     }
 
     /// Stop the link and delete everything under `agent/`: the state, the
@@ -527,7 +527,7 @@ impl Control {
     pub async fn unenroll(&self) -> Result<(), ControlError> {
         let _gate = self.gate.lock().await;
         self.stop_locked().await;
-        unenroll_files(&self.paths).map_err(ControlError::Failed)
+        self.paths.unenroll_agent_files().map_err(ControlError::Failed)
     }
 }
 
@@ -614,58 +614,62 @@ fn waiting_for_a_device(st: &AgentState) -> bool {
     !st.enrolled() && !st.removed()
 }
 
-/// Delete an enrollment's state (and what it left), keeping the machine key.
-fn forget_enrollment(paths: &Paths) -> Result<(), String> {
-    paths.forget_enrollment_leftovers()?;
-    match std::fs::remove_file(paths.agent_state_path()) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.to_string()),
+impl Paths {
+    /// Delete an enrollment's state (and what it left), keeping the machine key.
+    fn forget_agent_enrollment(&self) -> Result<(), String> {
+        self.forget_enrollment_leftovers()?;
+        match std::fs::remove_file(self.agent_state_path()) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 }
 
-/// Delete `agent/` and everything in it (no-op when it is not there) — but
-/// a dispute statement the hub has not taken yet ([`super::dispute`]): the
-/// only evidence that this device's key was replaced elsewhere, signed and
-/// holding no secret, kept and still delivered until the hub has it. The
-/// link — and with it the streams' writer — must be stopped first; the
-/// process's connection to `streams.db` is dropped here, before the file.
-pub fn unenroll_files(paths: &Paths) -> Result<(), String> {
-    crate::db::forget(&paths.streams_db_path());
-    let dir = paths.instance_dir().join("agent");
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(format!("{}: {e}", dir.display())),
-    };
-    let mut kept = 0usize;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
-        let path = entry.path();
-        let is_dir = entry.file_type().map_err(|e| format!("{}: {e}", path.display()))?.is_dir();
-        if !is_dir && super::dispute::is_pending_statement(&path) {
-            kept += 1;
-            continue;
-        }
-        let removed = if is_dir { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
-        match removed {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("{}: {e}", path.display())),
-        }
-    }
-    if kept == 0 {
-        match std::fs::remove_dir(&dir) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+impl Paths {
+    /// Delete `agent/` and everything in it (no-op when it is not there) — but
+    /// a dispute statement the hub has not taken yet ([`super::dispute`]): the
+    /// only evidence that this device's key was replaced elsewhere, signed and
+    /// holding no secret, kept and still delivered until the hub has it. The
+    /// link — and with it the streams' writer — must be stopped first; the
+    /// process's connection to `streams.db` is dropped here, before the file.
+    pub fn unenroll_agent_files(&self) -> Result<(), String> {
+        crate::db::forget(&self.streams_db_path());
+        let dir = self.instance_dir().join("agent");
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(format!("{}: {e}", dir.display())),
+        };
+        let mut kept = 0usize;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+            let path = entry.path();
+            let is_dir = entry.file_type().map_err(|e| format!("{}: {e}", path.display()))?.is_dir();
+            if !is_dir && super::dispute::is_pending_statement(&path) {
+                kept += 1;
+                continue;
+            }
+            let removed = if is_dir { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+            match removed {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("{}: {e}", path.display())),
+            }
         }
-        tracing::info!(dir = %dir.display(), "unenrolled: the agent's files are gone");
-    } else {
-        super::sync_dir(&dir.join("."));
-        tracing::warn!(dir = %dir.display(), kept, "unenrolled: the agent's files are gone but the dispute statements the hub does not have yet");
+        if kept == 0 {
+            match std::fs::remove_dir(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("{}: {e}", dir.display())),
+            }
+            tracing::info!(dir = %dir.display(), "unenrolled: the agent's files are gone");
+        } else {
+            super::sync_dir(&dir.join("."));
+            tracing::warn!(dir = %dir.display(), kept, "unenrolled: the agent's files are gone but the dispute statements the hub does not have yet");
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -780,9 +784,9 @@ mod tests {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
 
-    /// Re-review of S1-5, M1: a deletion of the other devices' copies the
-    /// process did not finish (it stopped right after turning the aggregator
-    /// off) is finished at the next start, with the aggregator off.
+    /// A deletion of the other devices' copies that a stop interrupted (it
+    /// stopped right after turning the aggregator off) is finished at the next
+    /// start, with the aggregator off.
     #[tokio::test]
     async fn an_unfinished_deletion_of_the_copies_is_finished_at_start() {
         let dir = tempfile::tempdir().unwrap();
@@ -970,13 +974,13 @@ mod tests {
         // What the crash left: the marker, the seed archived, the state kept.
         let agent = paths.machine_key_path().parent().unwrap().to_path_buf();
         crate::agent::write_private(&agent.join("re-enroll-fresh.json"), b"{}").unwrap();
-        std::fs::rename(paths.machine_key_path(), super::super::rotation::archived_key_path(&paths, 5)).unwrap();
+        std::fs::rename(paths.machine_key_path(), paths.archived_key_path(5)).unwrap();
         control.attach(link_env(&paths));
         assert!(!paths.has_agent_state(), "the old enrollment is forgotten");
         assert!(!agent.join("re-enroll-fresh.json").exists());
         let fresh = control.identity().unwrap();
         assert_ne!(fresh.sign_public(), old.sign_public());
-        assert!(super::super::rotation::archived(&paths, &old));
+        assert!(paths.seed_archived(&old));
         assert!(!control.start_if_enrolled().await, "nothing to start");
         assert_eq!(control.status().state, Standing::None);
     }
